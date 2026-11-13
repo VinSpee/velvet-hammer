@@ -14,7 +14,9 @@ firstmate, with its own operational home (see
 [The managed firstmate clone](docs/firstmate.md)).
 **Needs your input** shows the tasks firstmate holds for you and the merges waiting for your
 approval, read from firstmate's own records, together with the tool uses waiting for your
-approval. **For you to do** shows the notes Claude Code adds with the app's `app_note` tool. The
+approval. Which tool uses wait for you is a setting: by default, as recommended, the chief of
+staff runs its tools without asking and every tool use is logged (see
+[Tool approval](#tool-approval)). **For you to do** shows the notes Claude Code adds with the app's `app_note` tool. The
 agents list shows the tasks firstmate has in flight, and selecting one shows that crewmate's
 terminal. [Where the integration stands](docs/firstmate.md#where-the-integration-stands) lists
 what works end to end and what is not verified. A stub with sample data stands in for the agent layer in headless scenes and tests. The interface
@@ -30,6 +32,8 @@ The window has three columns:
 - **Agents** (left): the subagents the chief of staff manages. Selecting one opens a peek at its
   transcript in place of the chat; **Back to chat** closes it. A **Firstmate** card at the bottom
   shows the state of the managed firstmate clone and opens a page for installing and updating it.
+  A **Tool approval** card above it shows the approval mode and opens the settings page, which
+  links to the activity log.
 - **Chief of staff** (middle): the conversation, with a message field and a **Send** button. A
   line under the heading says what runs it, such as "Claude Code · signed in with your Claude Max
   plan". When Claude Code is not ready, a sign-in screen takes the conversation's place.
@@ -51,6 +55,8 @@ The window has three columns:
 - `src/firstmate.rs`: `Firstmate`, the managed firstmate clone. It runs `git` to install the
   clone, compare it with upstream and update it, and never discards a local change. Its `lab`
   module builds scratch git repositories for tests and scenes.
+- `src/approval.rs`: the tool-approval settings (a mode and custom rules), the file they are
+  saved in, the decision the hook makes for each tool use, and the activity log.
 - `src/bearings.rs`: what waits on the captain, read from firstmate's records by running its
   `bin/fm-bearings-snapshot.sh --json` whenever the records change.
 - `scripts/fake-claude`: a stand-in for `claude` that speaks the same protocol without an account.
@@ -81,8 +87,9 @@ talks to Anthropic:
   starts as firstmate (see [The managed firstmate clone](docs/firstmate.md)).
 - **Tools and hooks.** The chat session also gets `--mcp-config` and `--settings` flags that point
   at a server the app runs on `127.0.0.1` for that session only. Its `app_note` tool adds a note
-  to **For you to do**, and its PreToolUse hook asks you in **Needs your input** before Claude
-  Code uses any other tool. Your Claude settings files are not changed. See
+  to **For you to do**, and its PreToolUse hook applies your [tool-approval](#tool-approval)
+  settings to every tool use: it runs it, refuses it, or asks you in **Needs your input**. Your
+  Claude settings files are not changed. See
   [docs/extending.md](docs/extending.md), which also covers skills, subagents, the Agent SDK and
   what Anthropic's terms say.
 - **Subscription only.** If `claude auth status` reports a sign-in method other than `claude.ai`
@@ -110,6 +117,47 @@ unmodified `claude`; the sign-in happens in Claude Code and your browser, and th
 stores or forwards a token. Messages are billed the way Claude Code bills them. This reading of the
 terms has not been confirmed by Anthropic. If Velvet Hammer is ever distributed to other people,
 check the terms again for that case.
+
+### Tool approval
+
+Every tool use of the chief of staff goes through the app's PreToolUse hook, which decides it
+with settings you choose on the **Tool approval** page (the card above **Firstmate** in the
+agents column):
+
+- **Mode.** **Run without asking** (recommended, and what a fresh install uses): the chief of
+  staff will edit files, run commands and use tools without stopping for you, and every tool use
+  is still logged. **Auto-allow read-only tools**: `Read`, `Glob`, `Grep`, `LS`, `NotebookRead`,
+  `ToolSearch`, `TodoWrite` and the app's own `app_note` run at once, and everything else waits
+  for you. **Ask every time**: every tool use waits for you.
+- **Rules.** An ordered list of allow, ask and deny rules on top of the mode. A rule names a
+  tool (`*` matches any text, so `mcp__github__*` covers a server's tools) and optionally a
+  pattern for its main argument. A Bash pattern matches a command that is the pattern or starts
+  with it and a space, and it is checked against each part of a command joined with `&&`, `;`,
+  `|`, `$( )` or backticks: an allow rule must match every part, an ask or deny rule any part.
+  Other patterns are globs on the file path (Read, Edit, Write), URL (WebFetch) or the whole
+  input. A matching deny rule always wins, then ask, then allow, whatever their order; ask brings
+  up the full-input question even in **Run without asking**. A rule cannot see inside a script
+  or `sh -c`, so a deny rule is a guard rail, not a sandbox.
+- **Asking.** A tool use that waits for you appears in **Needs your input** with all of its
+  input, as before. An input larger than 64 KB that would be asked about is denied, because
+  approving a partial view would approve what you never saw.
+- **Trying it.** The page shows what the settings decide for an example tool call you type.
+  **Reset to the recommended default** asks once before it deletes your rules.
+- **Activity log.** Every tool use, with the start of its command or path (200 characters) and
+  how it was decided: allowed or denied by the mode or by which rule, or asked and what you
+  answered. It is kept in `tool-activity.jsonl` in the app's data directory
+  (`~/.velvet-hammer`, or `$VELVET_HAMMER_DATA`), which the app moves to
+  `tool-activity.jsonl.1` when it passes 1 MB.
+- **Where the settings live.** `tool-approval.json` in the same directory (versioned, written to a
+  temporary file and renamed into place), never in your Claude settings or a repository.
+  Changes apply to a running session at once. If the file cannot be read, every tool use asks
+  you and the page says why; the next change keeps the old file as `tool-approval.json.bad`.
+
+No setting changes the app's fixed limits: it never reads or stores your Claude sign-in, it
+always removes `ANTHROPIC_API_KEY` and `ANTHROPIC_AUTH_TOKEN` from `claude`'s environment, and it
+never pushes, publishes or merges anything itself. In **Run without asking** the chief of staff
+can run `git push` or `gh pr merge` like any other command; add an ask or deny rule for any
+command you want to see first.
 
 ### Trying the real sign-in
 
@@ -176,6 +224,10 @@ It writes these files to `OUT_DIR`:
 | `approval.png`, `approval.json` | The PreToolUse hook is waiting for you to allow or deny a Bash command |
 | `approval-long.png`, `approval-long.json` | The same question for a very long command, shown whole in a scrollable block |
 | `approved.png`, `approved.json` | After you allowed it, with the reply |
+| `approval-settings.png`, `approval-settings.json` | The Tool approval page: the recommended mode, three rules and the example |
+| `approval-by-rule.png`, `approval-by-rule.json` | An ask rule bringing up the full-input question while running without asking |
+| `approval-activity.png`, `approval-activity.json` | The activity log after a command run without asking, one denied by a rule and one you allowed |
+| `approval-corrupt.png`, `approval-corrupt.json` | The Tool approval page when its settings file could not be read |
 | `firstmate-missing.png`, `firstmate-missing.json` | The Firstmate page with no clone installed |
 | `firstmate-installing.png`, `firstmate-installing.json` | The clone is being installed |
 | `firstmate-up-to-date.png`, `firstmate-up-to-date.json` | The clone matches upstream |
@@ -189,7 +241,7 @@ It writes these files to `OUT_DIR`:
 | `walk-sent.json` | `scripts/walkthrough.json` after typing and sending a message |
 | `walk-end.png`, `walk-end.json` | The same script after answering an item, finishing the task and opening a peek |
 
-The first four scenes use the stub. The sign-in scenes run the app on `scripts/fake-claude`, so
+The first four scenes and `approval-settings` use the stub. The sign-in scenes run the app on `scripts/fake-claude`, so
 they need no Claude account; each waits for the fake's real processes before rendering. The
 firstmate scenes run `git` on a scratch upstream repository under `target/`, so they need no
 network. The

@@ -4,8 +4,9 @@
 //!
 //! - an MCP server (`--mcp-config`) with one tool, `app_note`, which puts a note in the captain's
 //!   For you to do panel;
-//! - a PreToolUse hook (`--settings`), which asks the captain to allow or deny each tool use in
-//!   the Needs your input panel. The app's own tools are allowed without asking.
+//! - a PreToolUse hook (`--settings`), which applies the captain's tool-approval settings (see
+//!   [`crate::approval`]) to each tool use: it allows it, denies it, or asks the captain to allow
+//!   or deny it in the Needs your input panel. Every decision is reported for the activity log.
 //!
 //! Every request must carry the bearer token made for this server, so other programs and web
 //! pages cannot reach it. A hook the server cannot answer blocks the tool use (`onFailure`).
@@ -19,6 +20,8 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
+
+use crate::approval::{self, Effect, Entry, Policy};
 
 /// The MCP server's name; Claude Code calls its tools `mcp__velvet-hammer__<tool>`.
 pub const SERVER: &str = "velvet-hammer";
@@ -52,6 +55,8 @@ pub enum Call {
     /// The question with this ticket can no longer be answered: the wait ran out or Claude Code
     /// stopped waiting. Whatever answer comes later is not used.
     Expired(u64),
+    /// The hook decided a tool use, for the activity log.
+    Logged(Entry),
 }
 
 pub struct Bridge {
@@ -61,8 +66,12 @@ pub struct Bridge {
 }
 
 impl Bridge {
-    /// Starts serving on a free port of 127.0.0.1. `on_call` runs on the server's threads.
-    pub fn start(on_call: impl Fn(Call) + Send + Sync + 'static) -> io::Result<Bridge> {
+    /// Starts serving on a free port of 127.0.0.1. The hook decides with `policy` as it stands at
+    /// each tool use. `on_call` runs on the server's threads.
+    pub fn start(
+        policy: Policy,
+        on_call: impl Fn(Call) + Send + Sync + 'static,
+    ) -> io::Result<Bridge> {
         let listener = TcpListener::bind(("127.0.0.1", 0))?;
         let addr = listener.local_addr()?;
         let mut bytes = [0u8; 32];
@@ -80,9 +89,10 @@ impl Bridge {
                     break;
                 }
                 let Ok(stream) = stream else { continue };
-                let (expected, on_call) = (expected.clone(), on_call.clone());
+                let (expected, policy, on_call) =
+                    (expected.clone(), policy.clone(), on_call.clone());
                 thread::spawn(move || {
-                    let _ = serve(stream, &expected, &*on_call);
+                    let _ = serve(stream, &expected, &policy, &*on_call);
                 });
             }
         });
@@ -137,7 +147,12 @@ enum Reply {
 }
 
 /// Reads one request from `stream`, answers it and closes the connection.
-fn serve(stream: TcpStream, expected: &str, on_call: &dyn Fn(Call)) -> io::Result<()> {
+fn serve(
+    stream: TcpStream,
+    expected: &str,
+    policy: &Policy,
+    on_call: &dyn Fn(Call),
+) -> io::Result<()> {
     stream.set_read_timeout(Some(Duration::from_secs(10)))?;
     let mut reader = BufReader::new(stream.try_clone()?);
     let mut line = String::new();
@@ -179,7 +194,7 @@ fn serve(stream: TcpStream, expected: &str, on_call: &dyn Fn(Call)) -> io::Resul
         match (path.as_str(), serde_json::from_slice::<Value>(&body)) {
             ("/mcp", Ok(request)) => mcp(&request, on_call).map_or(Reply::Accepted, Reply::Json),
             ("/hooks/pre-tool-use", Ok(input)) => {
-                Reply::Json(pre_tool_use(&input, &stream, on_call))
+                Reply::Json(pre_tool_use(&input, &stream, policy, on_call))
             }
             ("/mcp" | "/hooks/pre-tool-use", Err(_)) => Reply::Status(400, "Bad Request"),
             _ => Reply::Status(404, "Not Found"),
@@ -247,22 +262,6 @@ fn mcp(request: &Value, on_call: &dyn Fn(Call)) -> Option<Value> {
     })
 }
 
-/// All of a tool's input as text, one `name: value` per field with string values as they are, so
-/// a command or file content is shown whole.
-fn review_text(input: &Value) -> String {
-    let Some(fields) = input.as_object() else {
-        return input.to_string();
-    };
-    let lines: Vec<String> = fields
-        .iter()
-        .map(|(name, value)| match value.as_str() {
-            Some(text) => format!("{name}: {text}"),
-            None => format!("{name}: {value}"),
-        })
-        .collect();
-    lines.join("\n")
-}
-
 /// Whether Claude Code has hung up on this request, which it does when it stops waiting.
 fn hung_up(stream: &TcpStream) -> bool {
     if stream.set_nonblocking(true).is_err() {
@@ -294,33 +293,48 @@ fn wait_for(
     }
 }
 
-/// Decides one PreToolUse hook: the app's own tools are allowed, anything else waits for the
-/// captain, who is shown all of the input or, when it is too large to show, nothing is allowed.
-fn pre_tool_use(input: &Value, stream: &TcpStream, on_call: &dyn Fn(Call)) -> Value {
+/// Decides one PreToolUse hook with the captain's settings. A tool use they leave to the
+/// captain waits in Needs your input with all of its input shown or, when it is too large to
+/// show, is denied rather than approved from a partial view.
+fn pre_tool_use(
+    input: &Value,
+    stream: &TcpStream,
+    policy: &Policy,
+    on_call: &dyn Fn(Call),
+) -> Value {
     let tool = input["tool_name"].as_str().unwrap_or_default();
-    let review = review_text(&input["tool_input"]);
-    let (allow, reason) = if tool.starts_with(&format!("mcp__{SERVER}__")) {
-        (true, "Velvet Hammer's own tool.")
-    } else if review.len() > MAX_REVIEW {
-        (
+    let tool_input = &input["tool_input"];
+    let verdict = policy
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .decide(tool, tool_input);
+    let why = verdict.why();
+    let review = approval::input_text(tool_input);
+    let (allow, how) = match verdict.effect {
+        Effect::Allow => (true, format!("allowed {why}")),
+        Effect::Deny => (false, format!("denied {why}")),
+        Effect::Ask if review.len() > MAX_REVIEW => (
             false,
-            "Input too large to review here, so Velvet Hammer denied it.",
-        )
-    } else {
-        let (answer, decision) = channel();
-        let ticket = NEXT_TICKET.fetch_add(1, Ordering::Relaxed);
-        on_call(Call::Approve {
-            ticket,
-            tool: tool.to_string(),
-            input: review,
-            answer,
-        });
-        match wait_for(stream, ticket, &decision, on_call) {
-            Some(true) => (true, "The captain allowed this in Velvet Hammer."),
-            Some(false) => (false, "The captain denied this in Velvet Hammer."),
-            None => (false, "Nobody allowed this in Velvet Hammer."),
+            format!("asked {why}, but too large to review here, so denied"),
+        ),
+        Effect::Ask => {
+            let (answer, decision) = channel();
+            let ticket = NEXT_TICKET.fetch_add(1, Ordering::Relaxed);
+            on_call(Call::Approve {
+                ticket,
+                tool: tool.to_string(),
+                input: review,
+                answer,
+            });
+            match wait_for(stream, ticket, &decision, on_call) {
+                Some(true) => (true, format!("asked {why}; you allowed it")),
+                Some(false) => (false, format!("asked {why}; you denied it")),
+                None => (false, format!("asked {why}; nobody answered, so denied")),
+            }
         }
     };
+    let reason = format!("Velvet Hammer: {how}.");
+    on_call(Call::Logged(Entry::new(tool, tool_input, allow, how)));
     json!({"hookSpecificOutput": {
         "hookEventName": "PreToolUse",
         "permissionDecision": if allow { "allow" } else { "deny" },
@@ -331,14 +345,56 @@ fn pre_tool_use(input: &Value, stream: &TcpStream, on_call: &dyn Fn(Call)) -> Va
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
+    use crate::approval::{Mode, Rule, Settings};
+    use std::sync::{Mutex, RwLock};
 
-    /// A bridge whose calls arrive on the returned receiver.
+    /// A bridge in "Ask every time" mode whose calls arrive on the returned receiver.
     fn bridge() -> (Bridge, Receiver<Call>) {
+        let (bridge, calls, _) = bridge_with(Settings {
+            mode: Mode::Ask,
+            rules: vec![],
+        });
+        (bridge, calls)
+    }
+
+    fn bridge_with(settings: Settings) -> (Bridge, Receiver<Call>, Policy) {
         let (tx, rx) = channel();
         let tx = Mutex::new(tx);
-        let bridge = Bridge::start(move |call| tx.lock().unwrap().send(call).unwrap()).unwrap();
-        (bridge, rx)
+        let policy = Arc::new(RwLock::new(settings));
+        let bridge = Bridge::start(policy.clone(), move |call| {
+            tx.lock().unwrap().send(call).unwrap()
+        })
+        .unwrap();
+        (bridge, rx, policy)
+    }
+
+    /// The next call that is not an activity log entry.
+    fn next_call(calls: &Receiver<Call>) -> Option<Call> {
+        loop {
+            match calls.recv_timeout(Duration::from_secs(5)) {
+                Ok(Call::Logged(_)) => continue,
+                other => return other.ok(),
+            }
+        }
+    }
+
+    /// The activity log entries reported so far.
+    fn logged(calls: &Receiver<Call>) -> Vec<Entry> {
+        calls
+            .try_iter()
+            .filter_map(|c| match c {
+                Call::Logged(entry) => Some(entry),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn decision(out: &Value) -> (&str, &str) {
+        let out = &out["hookSpecificOutput"];
+        (
+            out["permissionDecision"].as_str().unwrap(),
+            out["permissionDecisionReason"].as_str().unwrap(),
+        )
     }
 
     /// POSTs `body` and returns the status and the parsed body (Null when empty).
@@ -409,15 +465,9 @@ mod tests {
     }
 
     #[test]
-    fn the_hook_waits_for_the_captain_and_allows_the_apps_own_tools() {
+    fn in_ask_mode_the_hook_waits_for_the_captain() {
         let (bridge, calls) = bridge();
         let auth = bearer(&bridge);
-        let own =
-            json!({"hook_event_name": "PreToolUse", "tool_name": "mcp__velvet-hammer__app_note"});
-        let (_, out) = post(&bridge, "/hooks/pre-tool-use", Some(&auth), own);
-        assert_eq!(out["hookSpecificOutput"]["permissionDecision"], "allow");
-        assert!(calls.try_recv().is_err());
-
         let bridge = Arc::new(bridge);
         for (allow, want) in [(Some(true), "allow"), (Some(false), "deny"), (None, "deny")] {
             let hook = thread::spawn({
@@ -428,12 +478,12 @@ mod tests {
                     post(&bridge, "/hooks/pre-tool-use", Some(&auth), input).1
                 }
             });
-            let Ok(Call::Approve {
+            let Some(Call::Approve {
                 tool,
                 input,
                 answer,
                 ..
-            }) = calls.recv_timeout(Duration::from_secs(5))
+            }) = next_call(&calls)
             else {
                 panic!("expected an approval");
             };
@@ -447,8 +497,164 @@ mod tests {
                 None => drop(answer),
             }
             let out = hook.join().unwrap();
-            assert_eq!(out["hookSpecificOutput"]["permissionDecision"], want);
+            assert_eq!(decision(&out).0, want);
+            let entry = next_logged(&calls);
+            assert_eq!(
+                (entry.allowed, entry.subject.as_str()),
+                (want == "allow", "git push")
+            );
+            assert!(entry.how.starts_with("asked by the mode Ask every time; "));
         }
+    }
+
+    fn next_logged(calls: &Receiver<Call>) -> Entry {
+        match calls.recv_timeout(Duration::from_secs(5)) {
+            Ok(Call::Logged(entry)) => entry,
+            _ => panic!("expected a log entry"),
+        }
+    }
+
+    #[test]
+    fn each_mode_allows_or_asks_without_a_rule() {
+        let read = json!({"tool_name": "Read", "tool_input": {"file_path": "/repo/a.rs"}});
+        let note =
+            json!({"tool_name": "mcp__velvet-hammer__app_note", "tool_input": {"text": "x"}});
+        let bash = json!({"tool_name": "Bash", "tool_input": {"command": "rm -rf build"}});
+        for (mode, input, asks) in [
+            (Mode::Run, &bash, false),
+            (Mode::Run, &read, false),
+            (Mode::ReadOnly, &read, false),
+            (Mode::ReadOnly, &note, false),
+            (Mode::ReadOnly, &bash, true),
+            (Mode::Ask, &read, true),
+            (Mode::Ask, &note, true),
+        ] {
+            let (bridge, calls, _) = bridge_with(Settings {
+                mode,
+                rules: vec![],
+            });
+            let auth = bearer(&bridge);
+            let bridge = Arc::new(bridge);
+            let hook = thread::spawn({
+                let (bridge, auth, input) = (bridge.clone(), auth.clone(), input.clone());
+                move || post(&bridge, "/hooks/pre-tool-use", Some(&auth), input).1
+            });
+            if asks {
+                let Some(Call::Approve { answer, .. }) = next_call(&calls) else {
+                    panic!("{mode:?} should ask about {input}");
+                };
+                answer.send(true).unwrap();
+            }
+            let out = hook.join().unwrap();
+            assert_eq!(decision(&out).0, "allow", "{mode:?} {input}");
+            let entries = logged(&calls);
+            assert_eq!(entries.len(), 1, "{mode:?} {input}");
+            let how = &entries[0].how;
+            let want = if asks {
+                "asked by the mode"
+            } else {
+                "allowed by the mode"
+            };
+            assert!(how.starts_with(want), "{mode:?}: {how}");
+        }
+    }
+
+    #[test]
+    fn rules_deny_ask_and_allow_with_deny_first() {
+        let (bridge, calls, policy) = bridge_with(Settings {
+            mode: Mode::Run,
+            rules: vec![
+                Rule {
+                    effect: Effect::Allow,
+                    tool: "Bash".into(),
+                    pattern: Some("git".into()),
+                },
+                Rule {
+                    effect: Effect::Deny,
+                    tool: "Bash".into(),
+                    pattern: Some("git push".into()),
+                },
+                Rule {
+                    effect: Effect::Ask,
+                    tool: "Write".into(),
+                    pattern: None,
+                },
+            ],
+        });
+        let auth = bearer(&bridge);
+        let bash = |c: &str| json!({"tool_name": "Bash", "tool_input": {"command": c}});
+        // Deny wins over the allow rule that also matches, without asking.
+        let (_, out) = post(
+            &bridge,
+            "/hooks/pre-tool-use",
+            Some(&auth),
+            bash("git push"),
+        );
+        assert_eq!(
+            decision(&out),
+            (
+                "deny",
+                "Velvet Hammer: denied by rule 2 (Deny Bash matching git push)."
+            )
+        );
+        let (_, out) = post(
+            &bridge,
+            "/hooks/pre-tool-use",
+            Some(&auth),
+            bash("git status"),
+        );
+        assert_eq!(decision(&out).0, "allow");
+        let entries = logged(&calls);
+        assert_eq!(entries.len(), 2);
+        assert!(!entries[0].allowed && entries[1].allowed);
+        // Ask forces the full-input question in Run without asking.
+        let bridge = Arc::new(bridge);
+        let hook = thread::spawn({
+            let (bridge, auth) = (bridge.clone(), auth.clone());
+            move || {
+                let input = json!({"tool_name": "Write", "tool_input":
+                    {"file_path": "/repo/a.txt", "content": "line one\nline two"}});
+                post(&bridge, "/hooks/pre-tool-use", Some(&auth), input).1
+            }
+        });
+        let Some(Call::Approve { input, answer, .. }) = next_call(&calls) else {
+            panic!("an ask rule should ask");
+        };
+        assert_eq!(input, "content: line one\nline two\nfile_path: /repo/a.txt");
+        answer.send(false).unwrap();
+        assert_eq!(decision(&hook.join().unwrap()).0, "deny");
+        // A change applies to the next tool use of the running session.
+        policy.write().unwrap().rules.clear();
+        let (_, out) = post(
+            &bridge,
+            "/hooks/pre-tool-use",
+            Some(&auth),
+            bash("git push"),
+        );
+        assert_eq!(decision(&out).0, "allow");
+    }
+
+    #[test]
+    fn too_large_an_input_is_denied_when_it_would_be_asked_about() {
+        let (bridge, calls, policy) = bridge_with(Settings {
+            mode: Mode::Run,
+            rules: vec![Rule {
+                effect: Effect::Ask,
+                tool: "Bash".into(),
+                pattern: None,
+            }],
+        });
+        let auth = bearer(&bridge);
+        let big = json!({"tool_name": "Bash", "tool_input": {"command": "x".repeat(MAX_REVIEW)}});
+        let (_, out) = post(&bridge, "/hooks/pre-tool-use", Some(&auth), big.clone());
+        assert_eq!(decision(&out).0, "deny");
+        assert!(decision(&out).1.contains("too large to review"));
+        assert!(matches!(calls.try_recv(), Ok(Call::Logged(e)) if !e.allowed));
+        assert!(calls.try_recv().is_err(), "nothing was asked");
+        // Nothing is approved from a partial view; with no question there is no view.
+        policy.write().unwrap().rules.clear();
+        let (_, out) = post(&bridge, "/hooks/pre-tool-use", Some(&auth), big);
+        assert_eq!(decision(&out).0, "allow");
     }
 
     #[test]
@@ -465,8 +671,7 @@ mod tests {
                 post(&bridge, "/hooks/pre-tool-use", Some(&auth), input).1
             }
         });
-        let Ok(Call::Approve { input, answer, .. }) = calls.recv_timeout(Duration::from_secs(5))
-        else {
+        let Some(Call::Approve { input, answer, .. }) = next_call(&calls) else {
             panic!("expected an approval");
         };
         for part in ["file_path: /tmp/x", "content: one\ntwo", "; rm -rf ~"] {
@@ -484,7 +689,7 @@ mod tests {
                 .unwrap()
                 .contains("too large to review")
         );
-        assert!(calls.try_recv().is_err());
+        assert!(!calls.try_iter().any(|c| matches!(c, Call::Approve { .. })));
     }
 
     #[test]

@@ -15,12 +15,17 @@ that one `claude -p` process with two flags. Nothing is written to the user's Cl
 - **A tool.** `--mcp-config` names the app's MCP server, `velvet-hammer`, over streamable HTTP.
   It has one tool, `app_note`, which adds a note to the **For you to do** panel. Marking the note
   done tells the chief of staff which note it was.
-- **A hook.** `--settings` adds an HTTP `PreToolUse` hook for every tool. The app's own tools are
-  allowed at once. Any other tool use appears in **Needs your input** as "Allow *tool*?" with all
+- **A hook.** `--settings` adds an HTTP `PreToolUse` hook for every tool, including the app's
+  own. It decides each tool use with the tool-approval settings (`src/approval.rs`, described in
+  the README's [Tool approval](../README.md#tool-approval) section): a mode, **Run without
+  asking** by default, and custom allow, ask and deny rules on top of it. An allowed or denied
+  tool use gets its answer at once, with a reason that names the mode or the rule. A tool use
+  the settings leave to you appears in **Needs your input** as "Allow *tool*?" with all
   of its input in a scrollable block you can select from: the whole command, or for a file edit or
-  write the path and the full content. Nothing is shortened. An input larger than 64 KB is denied
-  with "Input too large to review here", because approving a partial view would approve what you
-  never saw. **Allow** or **Deny** goes back to Claude Code as the hook's decision. If nobody
+  write the path and the full content. Nothing is shortened. Such an input larger than 64 KB is
+  denied with "too large to review here", because approving a partial view would approve what
+  you never saw. **Allow** or **Deny** goes back to Claude Code as the hook's decision. Every
+  decision is added to the activity log. If nobody
   answers within 590 seconds, or Claude Code hangs up on the hook first, the app denies the tool
   use and the question leaves the panel, so a later click cannot look like an approval. The hook
   sets `onFailure: "block"`, so if the app cannot answer at all, Claude Code blocks the tool use.
@@ -33,11 +38,12 @@ The sign-in guarantees are unchanged: the app still strips `ANTHROPIC_API_KEY` a
 `ANTHROPIC_AUTH_TOKEN` from every `claude` it starts, and it never reads or stores a credential.
 
 `scripts/fake-claude` calls the server the same way the real `claude` does, so `cargo test` and
-`scripts/verify.sh` cover both paths without an account. One ignored test,
-`cargo test real_claude -- --ignored`, sends one short message to the real `claude` on the Haiku
-model. On Claude Code 2.1.311 it passed: `claude` accepted both flags, the hook asked about
-Claude Code's `ToolSearch` call that loads the deferred `app_note` tool, and the tool added its
-note. No flag was rejected.
+`scripts/verify.sh` cover both paths, every approval mode and the rules without an account. One
+ignored test, `cargo test real_claude -- --ignored`, sends one short message to the real
+`claude` on the Haiku model in **Ask every time**. On Claude Code 2.1.311, before the approval
+settings existed, it passed: `claude` accepted both flags, the hook asked about Claude Code's
+`ToolSearch` call that loads the deferred `app_note` tool, and the tool added its note. No flag
+was rejected. It has not been run against the real `claude` since the settings were added.
 
 ## Extension points of the headless `claude`
 

@@ -4,7 +4,9 @@
 
 use crate::{App, Showing};
 use rune::tok::{self, Theme, radius, space, type_};
-use rune::{Cx, El, ScrollSpec, col, el, row, text, text_input};
+use rune::{Cx, El, ScrollSpec, TextEdit, col, el, row, text, text_input};
+
+use crate::approval::{self, Effect, Mode};
 
 use crate::firstmate::{Checkout, Distro, Firstmate, Standing, Work};
 use crate::model::{Action, Agent, Author, Item, ItemKind, Message, Plan, Status};
@@ -18,6 +20,8 @@ pub fn view(s: &App, cx: &mut Cx<App>) -> El {
     let main = match (&s.showing, peeked, &s.status) {
         (Showing::Crew(id), ..) => crew_peek(s, id, t, cx.system_dark()),
         (Showing::Firstmate, ..) => firstmate_page(&s.firstmate, t, cx.system_dark()),
+        (Showing::Approvals, ..) => approvals_page(s, t, cx.system_dark()),
+        (Showing::Activity, ..) => activity_page(s, t, cx.system_dark()),
         (_, Some(agent), _) => peek(agent, t),
         // A chief of staff that runs in the managed clone cannot chat until it is installed.
         (_, None, Status::Ready(_)) if !s.chat_ready() => {
@@ -109,28 +113,53 @@ fn agents(s: &App, t: Theme) -> El {
                 ),
         );
     }
-    list.child(el().grow(1.0)).child(
-        col()
-            .key("firstmate")
-            .role("button")
-            .label("Firstmate")
-            .focusable(true)
-            .padding(space::S2)
-            .gap(2.0)
-            .radius(radius::SM)
-            .fill(if s.showing == Showing::Firstmate {
-                t.control_off
-            } else {
-                t.card
-            })
-            .on_press(|s: &mut App| s.showing = Showing::Firstmate)
-            .child(text("Firstmate").font(type_::TITLE).color(t.text))
-            .child(note(
-                "firstmate-summary",
-                firstmate_summary(&s.firstmate),
-                t,
-            )),
-    )
+    list.child(el().grow(1.0))
+        .child(
+            col()
+                .key("approvals")
+                .role("button")
+                .label("Tool approval")
+                .focusable(true)
+                .padding(space::S2)
+                .gap(2.0)
+                .radius(radius::SM)
+                .fill(
+                    if matches!(s.showing, Showing::Approvals | Showing::Activity) {
+                        t.control_off
+                    } else {
+                        t.card
+                    },
+                )
+                .on_press(|s: &mut App| s.showing = Showing::Approvals)
+                .child(text("Tool approval").font(type_::TITLE).color(t.text))
+                .child(note(
+                    "approvals-summary",
+                    s.approvals.settings().mode.label(),
+                    t,
+                )),
+        )
+        .child(
+            col()
+                .key("firstmate")
+                .role("button")
+                .label("Firstmate")
+                .focusable(true)
+                .padding(space::S2)
+                .gap(2.0)
+                .radius(radius::SM)
+                .fill(if s.showing == Showing::Firstmate {
+                    t.control_off
+                } else {
+                    t.card
+                })
+                .on_press(|s: &mut App| s.showing = Showing::Firstmate)
+                .child(text("Firstmate").font(type_::TITLE).color(t.text))
+                .child(note(
+                    "firstmate-summary",
+                    firstmate_summary(&s.firstmate),
+                    t,
+                )),
+        )
 }
 
 /// The managed clone in a few words, for the card under the agents.
@@ -326,6 +355,421 @@ fn standing_words(c: &Checkout) -> (&'static str, String) {
                 .into(),
         ),
     }
+}
+
+/// The tool-approval settings: the mode, the custom rules, an example to try them on, and the
+/// limits no setting changes.
+fn approvals_page(s: &App, t: Theme, dark: bool) -> El {
+    let settings = s.approvals.settings();
+    let form = &s.form;
+    let mut body = col().key("approvals-body").gap(space::S6);
+    if let Some(problem) = s.approvals.problem() {
+        body = body.child(warning("approvals-problem", problem, dark));
+    }
+
+    let mut modes = col().key("modes").role("radiogroup").gap(space::S2);
+    for mode in Mode::ALL {
+        let selected = settings.mode == mode;
+        let title = if mode == Mode::RECOMMENDED {
+            format!("{} (Recommended)", mode.label())
+        } else {
+            mode.label().to_string()
+        };
+        modes = modes.child(
+            col()
+                .key(format!("mode-{}", mode.key()))
+                .role("radio")
+                .label(title.clone())
+                .checked(selected)
+                .focusable(true)
+                .padding(space::S3)
+                .gap(2.0)
+                .radius(radius::MD)
+                .fill(if selected { t.control_off } else { t.bg })
+                .border(
+                    1.0,
+                    if selected {
+                        tok::accent(0, true)
+                    } else {
+                        t.card_border
+                    },
+                )
+                .on_press(move |s: &mut App| s.approvals.change(|x| x.mode = mode))
+                .child(
+                    text(format!(
+                        "{} {title}",
+                        if selected { "\u{25cf}" } else { "\u{25cb}" }
+                    ))
+                    .font(type_::TITLE)
+                    .color(t.text),
+                )
+                .child(note(
+                    &format!("mode-{}-why", mode.key()),
+                    mode.explanation(),
+                    t,
+                )),
+        );
+    }
+    let reset = if form.confirm_reset {
+        row()
+            .gap(space::S2)
+            .flex_wrap()
+            .child(button(
+                "approvals-reset-confirm",
+                "Reset and delete my rules",
+                t,
+                |s| s.form.reset(&mut s.approvals),
+            ))
+            .child(button(
+                "approvals-reset-cancel",
+                "Keep my settings",
+                t,
+                |s| s.form.confirm_reset = false,
+            ))
+    } else {
+        row().child(button(
+            "approvals-reset",
+            "Reset to the recommended default",
+            t,
+            |s| s.form.confirm_reset = true,
+        ))
+    };
+    body = body.child(section("How tools run", t).child(modes).child(reset));
+
+    let mut rules = col().key("rules").gap(space::S2);
+    if settings.rules.is_empty() {
+        rules = rules.child(note(
+            "rules-empty",
+            "No rules. The mode decides every tool use.",
+            t,
+        ));
+    }
+    let last = settings.rules.len().saturating_sub(1);
+    for (i, rule) in settings.rules.iter().enumerate() {
+        let mut buttons = row().gap(space::S1);
+        if i > 0 {
+            buttons = buttons.child(small_button(&format!("rule-{i}-up"), "Up", t, move |s| {
+                s.form.shift(&mut s.approvals, i, -1)
+            }));
+        }
+        if i < last {
+            buttons = buttons.child(small_button(
+                &format!("rule-{i}-down"),
+                "Down",
+                t,
+                move |s| s.form.shift(&mut s.approvals, i, 1),
+            ));
+        }
+        buttons = buttons
+            .child(small_button(
+                &format!("rule-{i}-edit"),
+                "Edit",
+                t,
+                move |s| s.form.edit(&s.approvals, i),
+            ))
+            .child(small_button(
+                &format!("rule-{i}-delete"),
+                "Delete",
+                t,
+                move |s| s.form.delete(&mut s.approvals, i),
+            ));
+        rules = rules.child(
+            row()
+                .key(format!("rule-{i}"))
+                .gap(space::S2)
+                .center_y()
+                .padding(space::S2)
+                .radius(radius::SM)
+                .fill(if form.editing == Some(i) {
+                    t.control_off
+                } else {
+                    t.bg
+                })
+                .child(
+                    text(format!("{}. {}", i + 1, rule.describe()))
+                        .font(type_::LABEL)
+                        .color(t.text)
+                        .wrap_anywhere()
+                        .grow(1.0),
+                )
+                .child(buttons),
+        );
+    }
+
+    let mut effects = row().key("rule-effect").role("radiogroup").gap(space::S1);
+    for effect in Effect::ALL {
+        let selected = form.effect == effect;
+        effects = effects.child(
+            el().key(format!("rule-effect-{}", effect.key()))
+                .role("radio")
+                .label(effect.label())
+                .checked(selected)
+                .focusable(true)
+                .h(28.0)
+                .px(space::S3)
+                .center()
+                .radius(radius::SM)
+                .fill(if selected {
+                    tok::accent(0, true)
+                } else {
+                    t.control_off
+                })
+                .on_press(move |s: &mut App| s.form.effect = effect)
+                .child(text(effect.label()).font(type_::LABEL).color(if selected {
+                    t.knob
+                } else {
+                    t.text
+                })),
+        );
+    }
+    let mut editor = col()
+        .key("rule-form")
+        .gap(space::S2)
+        .child(effects)
+        .child(field(
+            "rule-tool",
+            &form.tool,
+            "Tool, such as Bash, Edit or mcp__github__*",
+            t,
+            |s| &mut s.form.tool,
+        ))
+        .child(field(
+            "rule-pattern",
+            &form.pattern,
+            "Pattern (optional), such as git push or /Users/me/project/*",
+            t,
+            |s| &mut s.form.pattern,
+        ));
+    if let Some(problem) = &form.problem {
+        editor = editor.child(warning("rule-problem", problem, dark));
+    }
+    let mut form_buttons = row().gap(space::S2).child(button(
+        "rule-save",
+        if form.editing.is_some() {
+            "Save rule"
+        } else {
+            "Add rule"
+        },
+        t,
+        |s| s.form.save(&mut s.approvals),
+    ));
+    if form.editing.is_some() {
+        form_buttons = form_buttons.child(button("rule-cancel", "Cancel", t, |s| s.form.clear()));
+    }
+    editor = editor.child(form_buttons);
+    body = body.child(
+        section("Rules", t)
+            .child(note(
+                "rules-help",
+                "Rules apply before the mode. Deny wins over ask and allow, and ask wins over \
+                 allow, whatever their order; ask brings up the full-input question even when \
+                 running without asking. A Bash pattern matches commands that start with it, in \
+                 every part of a command joined with && ; or |. Other patterns match the file \
+                 path or main argument, and * matches any text. A rule cannot see inside a \
+                 script or sh -c, so a deny rule is a guard rail, not a sandbox.",
+                t,
+            ))
+            .child(rules)
+            .child(editor),
+    );
+
+    body = body.child(
+        section("Try a tool call", t)
+            .child(
+                row()
+                    .gap(space::S2)
+                    .child(
+                        field("example-tool", &form.example_tool, "Tool", t, |s| {
+                            &mut s.form.example_tool
+                        })
+                        .w(160.0)
+                        .grow(0.0),
+                    )
+                    .child(field(
+                        "example-argument",
+                        &form.example_argument,
+                        "Command, file path or input",
+                        t,
+                        |s| &mut s.form.example_argument,
+                    )),
+            )
+            .child(
+                text(form.example(settings))
+                    .key("example-result")
+                    .font(type_::BODY)
+                    .color(t.text)
+                    .wrap(),
+            ),
+    );
+
+    body = body.child(note(
+        "approvals-limits",
+        &format!(
+            "No setting changes these: Velvet Hammer never reads or stores your Claude sign-in, \
+             never lets ANTHROPIC_API_KEY or ANTHROPIC_AUTH_TOKEN reach Claude Code, and never \
+             pushes, publishes or merges anything itself. These settings apply to your chief of \
+             staff's tool uses and Velvet Hammer's own tools, take effect at once, and are kept \
+             in {}.",
+            s.approvals.path().display()
+        ),
+        t,
+    ));
+    let actions = row()
+        .gap(space::S2)
+        .child(button("approvals-activity", "Activity log", t, |s| {
+            s.showing = Showing::Activity
+        }))
+        .child(button("approvals-close", "Back to chat", t, |s| {
+            s.showing = Showing::Chat
+        }));
+    page("approvals-page", "Tool approval", actions, body, t)
+}
+
+/// Every tool use the chief of staff made and what was decided, newest first.
+fn activity_page(s: &App, t: Theme, dark: bool) -> El {
+    let mut body = col().key("activity-body").gap(space::S2);
+    if let Some(problem) = s.activity.problem() {
+        body = body.child(warning("activity-problem", problem, dark));
+    }
+    if s.activity.entries().is_empty() {
+        body = body.child(note("activity-empty", "No tool uses yet.", t));
+    }
+    for (n, entry) in s.activity.entries().iter().enumerate().rev() {
+        let decision = if entry.allowed { "Allowed" } else { "Denied" };
+        body = body.child(
+            col()
+                .key(format!("activity-{n}"))
+                .padding(space::S3)
+                .gap(2.0)
+                .radius(radius::MD)
+                .fill(t.bg)
+                .child(
+                    text(format!("{decision} \u{b7} {}", entry.tool))
+                        .font(type_::TITLE)
+                        .color(if entry.allowed {
+                            t.text
+                        } else {
+                            tok::accent(3, dark)
+                        }),
+                )
+                .child(
+                    text(entry.subject.clone())
+                        .font(type_::LABEL.mono())
+                        .color(t.text)
+                        .wrap_anywhere()
+                        .selectable(true),
+                )
+                .child(note(
+                    &format!("activity-{n}-how"),
+                    &format!("{} \u{b7} {}", approval::clock(entry.at), entry.how),
+                    t,
+                )),
+        );
+    }
+    let help = note(
+        "activity-help",
+        &format!(
+            "Every tool use of your chief of staff and how it was decided, newest first. Each \
+             entry keeps the start of the command or path, not the whole input. The log is kept \
+             in {}.",
+            s.activity.path().display()
+        ),
+        t,
+    );
+    let actions = row()
+        .gap(space::S2)
+        .child(button("activity-settings", "Settings", t, |s| {
+            s.showing = Showing::Approvals
+        }))
+        .child(button("activity-close", "Back to chat", t, |s| {
+            s.showing = Showing::Chat
+        }));
+    page(
+        "activity-page",
+        "Tool activity",
+        actions,
+        col().gap(space::S3).child(help).child(body),
+        t,
+    )
+}
+
+/// A page in the middle column: a heading with its buttons over a card that scrolls.
+fn page(key: &str, title: &str, actions: El, body: El, t: Theme) -> El {
+    col()
+        .key(key)
+        .grow(1.0)
+        .h_full()
+        .min_h(0.0)
+        .padding(space::S6)
+        .gap(space::S6)
+        .child(
+            row()
+                .gap(space::S2)
+                .center_y()
+                .child(heading(title, t).grow(1.0))
+                .child(actions),
+        )
+        .child(
+            col()
+                .grow(1.0)
+                .min_h(0.0)
+                .radius(radius::LG)
+                .fill(t.card)
+                .border(1.0, t.card_border)
+                .scroll(ScrollSpec {
+                    stick_bottom: false,
+                })
+                .child(col().padding(space::S6).child(body)),
+        )
+}
+
+fn section(title: &str, t: Theme) -> El {
+    col().gap(space::S2).child(
+        text(title.to_string())
+            .font(type_::SECTION)
+            .color(t.text_secondary),
+    )
+}
+
+/// A one-line text field.
+fn field(
+    key: &str,
+    edit: &TextEdit,
+    placeholder: &str,
+    t: Theme,
+    on_edit: impl for<'a> Fn(&'a mut App) -> &'a mut TextEdit + 'static,
+) -> El {
+    row()
+        .grow(1.0)
+        .h(32.0)
+        .px(space::S3)
+        .center_y()
+        .radius(radius::MD)
+        .fill(t.bg)
+        .border(1.0, t.card_border)
+        .child(
+            text_input(edit, type_::BODY)
+                .key(key)
+                .single_line()
+                .grow(1.0)
+                .color(t.text)
+                .placeholder(placeholder.to_string(), t.text_secondary)
+                .on_edit(on_edit),
+        )
+}
+
+fn small_button(key: &str, label: &str, t: Theme, f: impl Fn(&mut App) + 'static) -> El {
+    el().key(key)
+        .role("button")
+        .label(label.to_string())
+        .focusable(true)
+        .h(24.0)
+        .px(space::S2)
+        .center()
+        .radius(radius::SM)
+        .fill(t.control_off)
+        .on_press(f)
+        .child(text(label.to_string()).font(type_::LABEL).color(t.text))
 }
 
 fn count(n: u32, what: &str) -> String {

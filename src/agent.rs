@@ -6,6 +6,7 @@ use std::path::Path;
 
 use rune::Waker;
 
+use crate::approval::{Entry, Policy};
 use crate::model::{
     Action, Agent, AgentStatus, Author, Id, Item, ItemKind, Message, Plan, Status, Workspace,
 };
@@ -26,6 +27,8 @@ pub enum Event {
     Item(Item),
     /// The item no longer needs the captain, such as a question whose session ended.
     Withdrawn(Id),
+    /// A tool use and what was decided, for the activity log.
+    Activity(Entry),
 }
 
 pub trait ChiefOfStaff {
@@ -47,6 +50,8 @@ pub trait ChiefOfStaff {
     fn workplace(&self) -> Option<&Path> {
         None
     }
+    /// The captain's tool-approval settings, shared so a change applies at once.
+    fn approve_with(&mut self, _policy: Policy) {}
 }
 
 /// Simulated chief of staff: fixed starting data and canned replies.
