@@ -1530,6 +1530,14 @@ mod tests {
     }
 
     #[test]
+    fn an_unbound_input_keeps_its_shown_value_when_typed_into() {
+        let (spec, _) = parse(&json!({"root": "a", "elements": {"a": {"type": "Stack"}}})).unwrap();
+        let mut live = Live::default();
+        let edit = live.edit(&spec, "#input", "draft");
+        assert_eq!(edit.text, "draft");
+    }
+
+    #[test]
     fn actions_change_the_state_and_only_submit_sends() {
         let input: Value = serde_json::from_str(&fixture("ui-todos.json")).unwrap();
         let (spec, _) = parse(&input).unwrap();

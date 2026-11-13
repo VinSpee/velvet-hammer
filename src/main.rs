@@ -1001,9 +1001,9 @@ fn main() {
             ("view-state", |s| {
                 *s = viewing(spec("ui-todos.json"), true);
                 s.tick(VIEW, Some("/todos/1/done"), true, None, String::new());
-                s.view_edit(VIEW, "/draft").text = "Update the README".into();
+                s.view_edit(VIEW, "/draft", "").text = "Update the README".into();
                 press(s, "add");
-                s.view_edit(VIEW, "/draft").text = "Announce it".into();
+                s.view_edit(VIEW, "/draft", "").text = "Announce it".into();
             }),
             ("view-action", |s| {
                 *s = viewing(spec("ui-todos.json"), true);
@@ -2750,7 +2750,7 @@ mod tests {
             rt.find("tool-1-ui-done.1").is_some(),
             "ticking showed its badge"
         );
-        rt.update(|s, _| s.view_edit(VIEW, "/draft").text = "Update the README".into());
+        rt.update(|s, _| s.view_edit(VIEW, "/draft", "").text = "Update the README".into());
         rt.frame(1.0 / 60.0);
         tap(&mut rt, "tool-1-ui-add");
         assert!(texts(&rt).iter().any(|t| t == "Update the README"));
@@ -2766,7 +2766,7 @@ mod tests {
     fn a_submit_goes_to_the_chief_of_staff_and_shows_what_the_captain_did() {
         let mut rt = view_runtime(spec("ui-todos.json"));
         tap(&mut rt, "tool-1-ui-check.2");
-        rt.update(|s, _| s.view_edit(VIEW, "/draft").text = "half typed".into());
+        rt.update(|s, _| s.view_edit(VIEW, "/draft", "").text = "half typed".into());
         tap(&mut rt, "tool-1-ui-send");
         let chat = &rt.state.ws.chat;
         assert_eq!(chat[2].author, Author::Captain);
@@ -2790,7 +2790,7 @@ mod tests {
         }));
         let mut rt = runtime_with(app);
         let i = rt.state.ws.chat.len() - 1;
-        rt.update(|s, _| s.view_edit(VIEW, "/draft").text = "Ship".into());
+        rt.update(|s, _| s.view_edit(VIEW, "/draft", "").text = "Ship".into());
         tap(&mut rt, &format!("tool-{i}-ui-send"));
         wait(&mut rt, replied);
         let reply = &rt.state.ws.chat.last().unwrap().text;
