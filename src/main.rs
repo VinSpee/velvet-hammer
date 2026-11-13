@@ -934,6 +934,33 @@ mod tests {
     }
 
     #[test]
+    fn dropping_the_app_signals_a_session_that_never_finishes_its_turn() {
+        let home = scratch("signed-in");
+        let mut rt = runtime_with(on_fake(FAKE_CLAUDE, &home, &[]));
+        wait(&mut rt, settled);
+        rt.state.draft.text = "stuck: forever".into();
+        tap(&mut rt, "send");
+        let pid_file = home.join("pid");
+        let started = std::time::Instant::now();
+        while !pid_file.exists() && started.elapsed() < Duration::from_secs(5) {
+            std::thread::sleep(Duration::from_millis(25));
+        }
+        let pid: libc::pid_t = std::fs::read_to_string(&pid_file)
+            .expect("the fake wrote its pid")
+            .trim()
+            .parse()
+            .expect("a pid");
+        let alive = || unsafe { libc::kill(pid, 0) == 0 };
+        assert!(alive());
+        drop(rt);
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        while alive() && std::time::Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(25));
+        }
+        assert!(!alive(), "the session outlived the app");
+    }
+
+    #[test]
     fn the_question_for_a_write_shows_the_path_and_the_content() {
         let (mut rt, item) = ask_about("write: /tmp/notes.txt hello there");
         assert_eq!(item.title, "Allow Write?");

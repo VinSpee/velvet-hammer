@@ -110,6 +110,11 @@ auth)
     case $text in
     *envcheck*) text="api-key:${ANTHROPIC_API_KEY:+reached} token:${ANTHROPIC_AUTH_TOKEN:+reached}" ;;
     *whereami*) text="cwd=$(pwd -P) FM_HOME=${FM_HOME:-unset}" ;;
+    stuck:*)
+      # A turn that never finishes, and ignores its hooks and input, until it is signalled.
+      i=0
+      while [ $i -lt 600 ]; do sleep 1; i=$((i + 1)); done
+      ;;
     note:*)
       note=${text#note: }
       post "$mcp_url" "$mcp_auth" '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"fake-claude","version":"9.9.9"}}}' >/dev/null
