@@ -10,6 +10,7 @@ use crate::approval::{self, Effect, Mode};
 
 use crate::firstmate::{Checkout, Distro, Firstmate, Standing, Work};
 use crate::model::{Action, Agent, Author, Item, ItemKind, Message, Plan, Status};
+use crate::projects::Project;
 
 pub fn view(s: &App, cx: &mut Cx<App>) -> El {
     let t = tok::theme(cx.system_dark());
@@ -27,14 +28,14 @@ pub fn view(s: &App, cx: &mut Cx<App>) -> El {
         (_, None, Status::Ready(_)) if !s.chat_ready() => {
             firstmate_page(&s.firstmate, t, cx.system_dark())
         }
-        (_, None, Status::Ready(plan)) => chat(s, plan, t),
+        (_, None, Status::Ready(plan)) => chat(s, plan, t, cx.system_dark()),
         (_, None, status) => sign_in(status, t, cx.system_dark()),
     };
     row()
         .w_full()
         .h_full()
         .fill(t.bg)
-        .child(agents(s, t))
+        .child(agents(s, t, cx.system_dark()))
         .child(main)
         .child(
             col()
@@ -49,7 +50,7 @@ pub fn view(s: &App, cx: &mut Cx<App>) -> El {
         )
 }
 
-fn agents(s: &App, t: Theme) -> El {
+fn agents(s: &App, t: Theme, dark: bool) -> El {
     let mut list = col()
         .key("agents")
         .role("list")
@@ -113,6 +114,9 @@ fn agents(s: &App, t: Theme) -> El {
                 ),
         );
     }
+    if let Some(projects) = &s.projects {
+        list = list.child(project_list(s, projects, t, dark));
+    }
     list.child(el().grow(1.0))
         .child(
             col()
@@ -160,6 +164,65 @@ fn agents(s: &App, t: Theme) -> El {
                     t,
                 )),
         )
+}
+
+/// The projects in firstmate's records, and the way to add one.
+fn project_list(s: &App, projects: &Result<Vec<Project>, String>, t: Theme, dark: bool) -> El {
+    let mut list = col()
+        .key("projects")
+        .role("list")
+        .label("Projects")
+        .pt(space::S6)
+        .gap(space::S1)
+        .child(heading("Projects", t));
+    match projects {
+        Err(problem) => list = list.child(warning("projects-problem", problem, dark)),
+        Ok(projects) if projects.is_empty() => {
+            list = list.child(note("projects-none", "No projects yet.", t))
+        }
+        Ok(projects) => {
+            for project in projects {
+                let mut row = col()
+                    .key(format!("project-{}", project.name))
+                    .padding(space::S2)
+                    .gap(2.0)
+                    .child(
+                        text(project.name.clone())
+                            .font(type_::TITLE)
+                            .color(t.text)
+                            .wrap(),
+                    )
+                    .child(
+                        text(project.summary())
+                            .font(type_::LABEL)
+                            .color(t.text_secondary)
+                            .wrap(),
+                    );
+                if !project.about.is_empty() {
+                    row = row.child(
+                        text(project.about.clone())
+                            .font(type_::LABEL)
+                            .color(t.text_secondary)
+                            .wrap(),
+                    );
+                }
+                list = list.child(row);
+            }
+        }
+    }
+    if s.chat_ready() {
+        list.child(
+            row().child(small_button("add-project", "Add project", t, |s| {
+                s.add_project()
+            })),
+        )
+    } else {
+        list.child(note(
+            "add-project-later",
+            "Your chief of staff adds projects once it can chat.",
+            t,
+        ))
+    }
 }
 
 /// The managed clone in a few words, for the card under the agents.
@@ -777,7 +840,7 @@ fn count(n: u32, what: &str) -> String {
     format!("{n} {what}{}", if n == 1 { "" } else { "s" })
 }
 
-fn chat(s: &App, plan: &Plan, t: Theme) -> El {
+fn chat(s: &App, plan: &Plan, t: Theme, dark: bool) -> El {
     let input = text_input(&s.draft, type_::BODY)
         .key("chat-input")
         .single_line()
@@ -828,6 +891,7 @@ fn chat(s: &App, plan: &Plan, t: Theme) -> El {
         .padding(space::S6)
         .gap(space::S3)
         .child(header)
+        .children((s.has_no_projects() && !s.adding).then(|| no_projects(t)))
         .child(transcript("messages", &s.ws.chat, t))
         .children(s.answering.as_ref().map(|key| {
             row()
@@ -846,7 +910,81 @@ fn chat(s: &App, plan: &Plan, t: Theme) -> El {
                 )
                 .child(button("answer-cancel", "Cancel", t, |s| s.answering = None))
         }))
+        .children(s.adding.then(|| adding(s, t, dark)))
         .child(composer)
+}
+
+/// The empty state: the app works on projects, and there are none yet.
+fn no_projects(t: Theme) -> El {
+    col()
+        .key("projects-empty")
+        .padding(space::S6)
+        .gap(space::S2)
+        .radius(radius::LG)
+        .fill(t.card)
+        .border(1.0, t.card_border)
+        .child(heading("Add your first project", t))
+        .child(
+            text(
+                "Velvet Hammer works on projects: the repositories your chief of staff and its \
+                 crew work in. You have none yet. Your chief of staff asks for the repository (a \
+                 git URL or a folder on this computer), a name and how its work should ship, \
+                 then shows you what it will clone and register, and where, and waits for your \
+                 yes. Nothing remote is created or published unless you agree to it.",
+            )
+            .key("projects-empty-lede")
+            .font(type_::BODY)
+            .color(t.text_secondary)
+            .wrap(),
+        )
+        .child(
+            row().child(button("add-first-project", "Add a project", t, |s| {
+                s.add_project()
+            })),
+        )
+}
+
+/// The small controls that help answer the chief of staff while adding a project. The
+/// conversation stays the way the project is added; these only fill in or send an answer.
+fn adding(s: &App, t: Theme, dark: bool) -> El {
+    let mut buttons = row().gap(space::S2).flex_wrap().child(button(
+        "add-pick-folder",
+        if s.picking() {
+            "Choosing a folder\u{2026}"
+        } else {
+            "Choose a folder\u{2026}"
+        },
+        t,
+        |s| s.pick_folder(),
+    ));
+    // A yes or no only once the chief of staff has finished asking.
+    let asked = s.replying.is_none()
+        && s.ws
+            .chat
+            .last()
+            .is_some_and(|m| m.author == Author::ChiefOfStaff);
+    if asked {
+        buttons = buttons
+            .child(button("add-yes", "Yes", t, |s| s.reply("Yes.")))
+            .child(button("add-no", "No", t, |s| s.reply("No.")));
+    }
+    buttons = buttons.child(button("add-finish", "Done adding", t, |s| {
+        s.finish_adding()
+    }));
+    let mut bar = col()
+        .key("adding")
+        .gap(space::S2)
+        .child(note(
+            "adding-help",
+            "Adding a project with your chief of staff. Answer in the chat; a chosen folder's \
+             path goes into your message for you to send.",
+            t,
+        ))
+        .child(buttons);
+    if let Some(problem) = &s.pick_problem {
+        bar = bar.child(warning("add-pick-problem", problem, dark));
+    }
+    bar
 }
 
 /// One line on what runs the chief of staff and what pays for it.

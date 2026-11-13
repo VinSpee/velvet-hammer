@@ -6,8 +6,8 @@ Velvet Hammer keeps its own git clone of it. This page explains where the clone 
 installed and updated, how to change it, and how to reset it.
 
 Velvet Hammer installs and updates the clone, runs the chief of staff inside it, fills the
-**Needs your input** panel and the agents list from firstmate's records, and lets you peek at a
-crewmate's terminal. [Where the integration stands](#where-the-integration-stands) lists what
+**Needs your input** panel, the agents list and the projects list from firstmate's records, lets
+you peek at a crewmate's terminal, and starts adding a project with the chief of staff. [Where the integration stands](#where-the-integration-stands) lists what
 works end to end and what is not verified.
 
 ## Where it lives
@@ -229,6 +229,51 @@ is doing, tell your chief of staff.
 warning marker in the home's `state/` directory when no watcher is running. That is the only
 thing a peek can write.
 
+## Projects
+
+Firstmate works on projects: git clones under the home's `projects/` directory, listed in its
+registry `data/projects.md`. Its `project-management` skill owns how a project is added, and the
+header of its `bin/fm-project-mode.sh` owns the registry's line format:
+`- <name> [<delivery posture>] - <description> (added <date>)`.
+
+**The list.** Firstmate publishes no document of its projects, so `src/projects.rs` reads these
+two records itself, every two seconds, and never writes them. It lists each registry entry by its
+name, its posture (an entry with no bracket is `no-mistakes`, as firstmate reads it) and its
+description, then any clone under `projects/` that the registry does not list, because firstmate
+rebuilds a missing registry from the clones. A home that does not exist yet, as on a fresh
+install, has no projects. If a record cannot be read, the list shows why instead of claiming
+there are none.
+
+**With no projects** the chat opens with a card that explains projects and offers **Add a
+project**. Before the clone is installed and Claude Code is signed in, the list says that the
+chief of staff adds projects once it can chat.
+
+**Adding a project** is a conversation with the chief of staff. **Add a project** in that card,
+or **Add project** under the list at any time, sends this message in your name:
+
+> I want to add a project. Follow your project-management procedure and walk me through it one
+> question at a time, waiting for my answer before the next: first the repository (a git URL, or
+> a folder on this computer), then the project's name, then each delivery choice the procedure
+> needs, with the default you recommend. Before you clone, register or initialize anything, tell
+> me exactly what you will clone or register and where, and wait for my yes. Do not create, push
+> to or publish anything remote unless I say yes to that here. If something goes wrong or you
+> refuse, tell me why in plain words and leave everything as it is. When the project is added,
+> tell me the result in plain words and ask whether I want to add another.
+
+Firstmate then loads its `project-management` skill, which also checks its secondmate routing,
+proposes defaults (a remote-backed project defaults to `no-mistakes-prod-only`, a project with
+no remote to `local-only`), and clones, registers and initializes the project itself. The app
+does not write the registry or clone anything: what is created is exactly what firstmate's
+procedure creates, and it appears in the list when firstmate's records change. Firstmate's own
+rules forbid creating a remote repository without the captain's explicit consent, and the
+message repeats that rule.
+
+While you add a project, a row above the message field offers small controls. **Choose a
+folder…** opens the system's folder dialog (`osascript` on macOS, `zenity` elsewhere) and puts
+the chosen path into your message, which you then send. **Yes** and **No** send that word once
+the chief of staff has finished asking. **Done adding** hides the row. You can always type
+instead.
+
 ## Reset it
 
 Velvet Hammer has no reset button, because a reset discards your changes. To start again from
@@ -255,11 +300,21 @@ chief of staff an empty backlog and no task records, and loses nothing in the cl
   session takes the home's lock.
 - Reading a task held for the captain through firstmate's snapshot script into **Needs your
   input**.
+- Adding a project through the chat. Measured once with the ignored test
+  `real_firstmate_adds_a_local_folder_as_a_project` (Claude Code 2.1.311 with Sonnet, firstmate
+  `427056c4`, a scratch home): from **Add a project**, firstmate asked for the repository, the
+  name, the delivery posture (recommending `local-only` for a folder with no remote) and the
+  branch prefix one at a time, listed what it would clone and register and where, waited for a
+  yes, then cloned the folder into `projects/notes`, removed the clone's link to its source so
+  it has no remote, wrote the registry line, and asked whether to add another. The project
+  appeared in the list without a restart.
 - Reading a crewmate's terminal through `bin/fm-peek.sh` from a real tmux pane. This one was run
   by hand against the scripts, not through the app's code.
 
 **Works against stand-ins only** (the fake `claude` and stand-in scripts in a scratch upstream):
-the answer flow, merge approvals, the agents list and the peek view.
+the answer flow, merge approvals, the agents list and the peek view. The projects list, its
+empty state and the add controls also run on the fake `claude`, with the test writing the
+registry that firstmate's procedure would write.
 
 **Not verified:**
 
@@ -270,6 +325,9 @@ the answer flow, merge approvals, the agents list and the peek view.
 - A real crewmate in flight under the app: the watcher arming at turn end, a status change
   waking the session, the supervision host, and the agents list and peek fed by it.
 - Whether Claude Code stops firstmate's hook processes when the app ends a session.
+- The folder dialog. Tests replace it; `osascript` and `zenity` were not run by a test.
+- Adding a project from a git URL, which clones over the network and may set up no-mistakes, and
+  any refusal or failure in firstmate's procedure. Only the local-folder case above was run.
 - The app's real window. Everything above ran headless.
 
 **Decided: configurable, recommended run without asking.** The chief of staff's tool uses are
@@ -286,3 +344,5 @@ approves its own crew was not in scope and is unchanged.
    so the app can feed the keyed-answer intake directly and still tell the chief of staff.
 3. A way to start supervision when a session opens, so that a crewmate's status change is
    noticed before the captain's first message after reopening the app.
+4. The registered projects in the bearings snapshot (or a script that prints them), so the app
+   renders firstmate's document instead of reading `data/projects.md` and `projects/` itself.
