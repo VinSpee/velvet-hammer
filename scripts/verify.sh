@@ -27,7 +27,7 @@ cargo test --manifest-path "$root/Cargo.toml"
 # The firstmate scenes run git on a scratch upstream under target/, so they need no network.
 for scene in chat replied empty peek signed-out signing-in signed-in expired cli-missing claude-error noted approval approval-long approved \
   firstmate-missing firstmate-installing firstmate-up-to-date firstmate-update-available \
-  firstmate-modified firstmate-blocked firstmate-session; do
+  firstmate-modified firstmate-blocked firstmate-session firstmate-panels firstmate-answering; do
   headless --scene "$scene" --snap "$out/$scene.png"
   headless --scene "$scene" --tree "$out/$scene.json"
 done
@@ -151,6 +151,19 @@ check firstmate-session.json yes 'Running firstmate from'
 check firstmate-session.json yes '/data/firstmate FM_HOME='
 check firstmate-session.json yes '/data/home"'
 check firstmate-session.json no  '"key": "firstmate-page"'
+# The panel fed from firstmate's records: two captain holds and a merge approval.
+check firstmate-panels.json yes '"key": "hold-lab-window-size"'
+check firstmate-panels.json yes '1280x800 (shows more chat).'
+check firstmate-panels.json yes '"key": "answer-lab-window-size"'
+check firstmate-panels.json yes '"key": "hold-lab-gh-login"'
+check firstmate-panels.json yes '"key": "merge-lab-panels"'
+check firstmate-panels.json yes '"key": "approve-lab-panels"'
+check firstmate-panels.json no  '"key": "merge-lab-window-size"'
+check firstmate-panels.json no  '"key": "needs-input-empty"'
+check firstmate-panels.json no  '"key": "answering"'
+check firstmate-answering.json yes '"key": "answering"'
+check firstmate-answering.json yes '"key": "answer-cancel"'
+check firstmate-answering.json yes '"text": "Answering below"'
 # The scripted run.
 check walk-sent.json yes '"text": "Ship it when CI is green."'
 check walk-sent.json yes 'Got it:'

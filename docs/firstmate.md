@@ -5,8 +5,9 @@ scripts that the chief of staff runs on. It ships as a git repository, not as a 
 Velvet Hammer keeps its own git clone of it. This page explains where the clone lives, how it is
 installed and updated, how to change it, and how to reset it.
 
-Velvet Hammer installs and updates the clone and runs the chief of staff inside it. Feeding the
-panels and the agents list from firstmate is not built yet.
+Velvet Hammer installs and updates the clone, runs the chief of staff inside it, and fills the
+**Needs your input** panel from firstmate's records. Feeding the agents list from firstmate is
+not built yet.
 
 ## Where it lives
 
@@ -153,6 +154,55 @@ When a session ends, or the app quits, the app closes its input and sends `claud
 signal at once, so that Claude Code stops firstmate's watcher instead of leaving it running. If
 `claude` has not exited after five seconds, the app kills it.
 
+## The panels and firstmate's records
+
+Firstmate keeps what waits on the captain in its own records and publishes them as one
+structured document, `bin/fm-bearings-snapshot.sh --json` (schema `fm-bearings.v1`). Its own rule
+is that a view renders that document and does not parse the record files. Velvet Hammer follows
+it: `src/bearings.rs` runs the script from the clone with `FM_HOME` set to the app's home and
+`FM_CREW_STATE_NO_FORGE=1`, so it makes no network request and writes nothing. It runs once when
+the app opens and again whenever a file in the home's `state/` or `data/` directory changes,
+which the app checks every two seconds.
+
+| Panel | Source in the snapshot | What you see |
+| --- | --- | --- |
+| **Needs your input** | `decisions_open[]`: tasks held for the captain | The task id and firstmate's whole question (`question`, never the shortened `summary`), with **Answer** |
+| **Needs your input** | `contributions.captain[]` rows with no `hold`: pull requests whose checks are green and which wait for a merge approval | The pull request, firstmate's reason, and **Approve** |
+| **For you to do** | No firstmate source (see below) | The notes the chief of staff adds with the app's `app_note` tool |
+
+**Why "For you to do" has no firstmate source.** Firstmate has one kind of captain call: a
+task held for the captain. Its records do not say whether the captain must answer a question or
+do something himself, such as signing in. Firstmate's own guidance says that distinction is the
+agent's judgment and that nothing may classify a hold by reading its wording. So every hold
+appears under **Needs your input**, and the app does not guess. A structured marker on a hold
+that says "answer" or "act" would let the app split them; that is a change to firstmate and is
+proposed there, not made here. Until then the chief of staff can put a step that only you can
+take into **For you to do** with `app_note`.
+
+**Answering.** **Answer** on a hold turns your next chat message into your answer: the app sends
+"My answer to the captain hold *task-id*: *your words*" to the chief of staff. Firstmate then
+records your exact words with its own command, `bin/fm-captain-hold.sh answer`, and the hold
+leaves the panel when firstmate's records say it is closed. **Approve** on a merge sends "I
+approve merging *url* (task *task-id*)." the same way, and firstmate checks the pull request
+again before it merges.
+
+The app does not call `fm-captain-hold.sh answer` or the keyed-answer intake
+(`fm-captain-hold.sh answers`) itself, for two reasons taken from that script and firstmate's
+`captain-hold-lifecycle` skill:
+
+- An answer either closes the task (a question) or releases its hold so held work resumes, and
+  the caller must say which. Firstmate treats that choice as the agent's judgment. The snapshot
+  does not carry it, and the wrong choice marks unfinished work done or leaves a question open.
+- Recording an answer does not tell the chief of staff. It has to learn of the answer to act on
+  it, and the chat is how the captain's words reach it.
+
+If the snapshot exposed the close mode of each hold, the app could feed the intake directly with
+`--source "Velvet Hammer"` and still tell the chief of staff. That is the second proposed
+firstmate change.
+
+If the script fails, for example because `jq` or `tasks-axi` is missing or the home is in away
+mode, the panel shows firstmate's own error above the last items it read.
+
 ## Reset it
 
 Velvet Hammer has no reset button, because a reset discards your changes. To start again from
@@ -170,6 +220,11 @@ chief of staff an empty backlog and no task records, and loses nothing in the cl
 
 ## What is not verified
 
+- Answering a hold end to end with the real `claude`: the message reaches the chat, but whether
+  firstmate then records it was not run. Reading a real hold through the real snapshot script
+  was (`cargo test real_firstmate_reports_a_captain_hold -- --ignored`).
+- A merge approval row from a real pull request. The fixture's two `contributions.captain` rows
+  are written by hand in the shape `bin/fm-contributions.jq` produces.
 - A real crewmate in flight under the app: the watcher arming at turn end, a status change
   waking the session, and the supervision host.
 - Firstmate's features after an update that conflicts with a running session.

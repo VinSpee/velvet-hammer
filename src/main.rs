@@ -3,6 +3,7 @@
 //! `cargo run -- --snap chat.png` renders it headless (see the README for every scene).
 
 mod agent;
+mod bearings;
 mod bridge;
 mod claude;
 mod firstmate;
@@ -14,6 +15,7 @@ use std::time::{Duration, Instant};
 use rune::{AppSpec, TextEdit, Tx, Waker};
 
 use agent::{ChiefOfStaff, Event, Stub};
+use bearings::Bearings;
 use claude::Claude;
 use firstmate::{Checkout, Distro, Firstmate, Work, lab::Lab};
 use model::{Action, Author, Id, Message, Status, Workspace};
@@ -24,6 +26,14 @@ pub struct App {
     pub chief: Box<dyn ChiefOfStaff>,
     pub status: Status,
     pub firstmate: Firstmate,
+    /// Keeps `captain` current from firstmate's records, when the chief of staff is firstmate.
+    watcher: Option<bearings::Watcher>,
+    /// What firstmate's records say waits on the captain.
+    pub captain: Bearings,
+    /// Why firstmate's records could not be read the last time, in firstmate's words.
+    pub captain_problem: Option<String>,
+    /// The captain hold the next message answers, by its key.
+    pub answering: Option<String>,
     pub draft: TextEdit,
     pub showing: Showing,
     /// The chat message the chief of staff is still writing.
@@ -43,11 +53,18 @@ pub enum Showing {
 
 impl App {
     pub fn new(mut chief: Box<dyn ChiefOfStaff>, firstmate: Firstmate) -> Self {
+        let watcher = chief
+            .workplace()
+            .map(|clone| bearings::Watcher::start(clone, &firstmate.home_dir()));
         let mut app = App {
             ws: chief.open(),
             chief,
             status: Status::Checking,
             firstmate,
+            watcher,
+            captain: Bearings::default(),
+            captain_problem: None,
+            answering: None,
             draft: TextEdit::default(),
             showing: Showing::Chat,
             replying: None,
@@ -59,7 +76,23 @@ impl App {
     /// Applies what the agent layer reported; true when anything changed.
     pub fn drain(&mut self) -> bool {
         let events = self.chief.events();
-        let changed = self.firstmate.poll() | !events.is_empty();
+        let mut changed = self.firstmate.poll() | !events.is_empty();
+        if let Some(snapshot) = self.watcher.as_mut().and_then(|w| w.poll()) {
+            match snapshot {
+                Ok(captain) => {
+                    self.captain = captain;
+                    self.captain_problem = None;
+                }
+                Err(problem) => self.captain_problem = Some(problem),
+            }
+            // An answered hold leaves firstmate's records; stop answering one that is gone.
+            if let Some(key) = &self.answering
+                && !self.captain.holds.iter().any(|h| &h.key == key)
+            {
+                self.answering = None;
+            }
+            changed = true;
+        }
         for event in events {
             match event {
                 Event::Status(status) => self.status = status,
@@ -105,7 +138,22 @@ impl App {
             return;
         }
         self.draft.clear();
+        // An answer goes to the chief of staff in the captain's own words, naming the hold.
+        // Firstmate records it and decides whether it closes a question or frees held work.
+        let text = match self.answering.take() {
+            Some(key) => format!("My answer to the captain hold {key}: {text}"),
+            None => text,
+        };
         self.act(Action::Say(text));
+    }
+
+    /// Tells the chief of staff, in the chat, that the captain approves merging `url`.
+    pub fn approve_merge(&mut self, task: &str, url: &str) {
+        if self.chat_ready() {
+            self.act(Action::Say(format!(
+                "I approve merging {url} (task {task})."
+            )));
+        }
     }
 
     pub fn sign_in(&mut self) {
@@ -268,6 +316,9 @@ fn poll(s: &mut App, _: f64, _: &mut Tx) -> bool {
 
 fn setup(s: &mut App, wake: Waker) {
     s.firstmate.connect(wake.clone());
+    if let Some(watcher) = &mut s.watcher {
+        watcher.connect(wake.clone());
+    }
     s.chief.connect(wake);
 }
 
@@ -367,6 +418,20 @@ fn main() {
                 s.draft.text = "whereami".into();
                 s.send();
                 s.settle(replied);
+            }),
+            // The panels fed from firstmate's records: two captain holds and a merge approval.
+            ("firstmate-panels", |s| {
+                let lab = Lab::new();
+                lab.bearings(bearings::SNAPSHOT);
+                *s = fake_in_firstmate(&lab, true);
+                s.settle(|s| !s.captain.is_empty());
+            }),
+            ("firstmate-answering", |s| {
+                let lab = Lab::new();
+                lab.bearings(bearings::SNAPSHOT);
+                *s = fake_in_firstmate(&lab, true);
+                s.settle(|s| !s.captain.is_empty());
+                s.answering = Some("lab-window-size".into());
             }),
             // The managed firstmate clone. All but the first two run git on a scratch upstream.
             ("firstmate-missing", |s| {
@@ -518,6 +583,123 @@ mod tests {
         for part in ["state", "data", "config", "projects"] {
             assert!(home.join(part).is_dir(), "{part} is missing from the home");
         }
+    }
+
+    #[test]
+    fn the_panel_shows_what_firstmates_records_hold_for_the_captain() {
+        let lab = Lab::new();
+        let mut rt = runtime_with(fake_in_firstmate(&lab, true));
+        wait(&mut rt, |s| s.captain_problem.is_none());
+        assert!(rt.find("needs-input-empty").is_some());
+        lab.bearings(bearings::SNAPSHOT);
+        wait(&mut rt, |s| !s.captain.is_empty());
+        assert!(rt.find("hold-lab-window-size").is_some());
+        assert!(rt.find("hold-lab-gh-login").is_some());
+        assert!(rt.find("merge-lab-panels").is_some());
+        assert!(rt.find("needs-input-empty").is_none());
+        // Firstmate closed one hold: it leaves the panel when the records change.
+        lab.bearings(r#"{"schema":"fm-bearings.v1","decisions_open":[{"key":"lab-gh-login","question":"Sign in"}]}"#);
+        wait(&mut rt, |s| s.captain.holds.len() == 1);
+        assert!(rt.find("hold-lab-window-size").is_none());
+        assert!(rt.find("merge-lab-panels").is_none());
+    }
+
+    #[test]
+    fn answering_a_hold_sends_the_captains_words_to_the_chief_of_staff() {
+        let lab = Lab::new();
+        lab.bearings(bearings::SNAPSHOT);
+        let mut rt = runtime_with(fake_in_firstmate(&lab, true));
+        wait(&mut rt, |s| !s.captain.is_empty());
+        tap(&mut rt, "answer-lab-window-size");
+        assert_eq!(rt.state.answering.as_deref(), Some("lab-window-size"));
+        assert!(rt.find("answering").is_some());
+        tap(&mut rt, "answer-cancel");
+        assert_eq!(rt.state.answering, None);
+        tap(&mut rt, "answer-lab-window-size");
+        rt.state.draft.text = "1280x800".into();
+        tap(&mut rt, "send");
+        wait(&mut rt, replied);
+        let chat = &rt.state.ws.chat;
+        assert_eq!(
+            chat[0].text,
+            "My answer to the captain hold lab-window-size: 1280x800"
+        );
+        assert_eq!(chat[1].text, format!("You said: {}", chat[0].text));
+        assert_eq!(rt.state.answering, None);
+        // The hold stays in the panel until firstmate's records say it is closed.
+        assert!(rt.find("hold-lab-window-size").is_some());
+    }
+
+    #[test]
+    fn approving_a_merge_tells_the_chief_of_staff_in_the_chat() {
+        let lab = Lab::new();
+        // Only the merge, so its button is not scrolled out of the panel.
+        lab.bearings(
+            r#"{"schema":"fm-bearings.v1","contributions":{"captain":[{"task":"lab-panels",
+            "url":"https://github.com/example/app/pull/7","reason":"checks green","hold":null}]}}"#,
+        );
+        let mut rt = runtime_with(fake_in_firstmate(&lab, true));
+        wait(&mut rt, |s| !s.captain.is_empty());
+        tap(&mut rt, "approve-lab-panels");
+        wait(&mut rt, replied);
+        assert_eq!(
+            rt.state.ws.chat[0].text,
+            "I approve merging https://github.com/example/app/pull/7 (task lab-panels)."
+        );
+    }
+
+    #[test]
+    fn a_snapshot_firstmate_could_not_produce_says_why_and_keeps_the_last_one() {
+        let lab = Lab::new();
+        lab.bearings(bearings::SNAPSHOT);
+        let mut rt = runtime_with(fake_in_firstmate(&lab, true));
+        wait(&mut rt, |s| !s.captain.is_empty());
+        lab.bearings(r#"{"schema":"fm-bearings.v9"}"#);
+        wait(&mut rt, |s| s.captain_problem.is_some());
+        assert!(rt.find("captain-problem").is_some());
+        assert!(rt.find("hold-lab-window-size").is_some());
+    }
+
+    #[test]
+    #[ignore = "clones firstmate from GitHub and needs its tasks-axi and jq on PATH"]
+    fn real_firstmate_reports_a_captain_hold() {
+        let data = scratch("unused").join("data");
+        let mut firstmate = Firstmate::open(&data, firstmate::UPSTREAM);
+        firstmate.install();
+        let deadline = Instant::now() + Duration::from_secs(120);
+        while !firstmate.poll() {
+            assert!(Instant::now() < deadline, "the clone never finished");
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        let (clone, home) = (firstmate.clone_dir(), firstmate.home_dir());
+        firstmate::prepare_home(&home).unwrap();
+        // Firstmate's own command for holding a task for the captain.
+        let held = std::process::Command::new(clone.join("bin/fm-captain-hold.sh"))
+            .args(["hold", "vh-window-size", "--title", "Default window size"])
+            .args(["--reason", "Pick 1100x720 or 1280x800."])
+            .current_dir(clone)
+            .env("FM_HOME", &home)
+            .output()
+            .unwrap();
+        assert!(
+            held.status.success(),
+            "{}",
+            String::from_utf8_lossy(&held.stderr)
+        );
+        let mut watcher = bearings::Watcher::start(clone, &home);
+        let captain = loop {
+            assert!(Instant::now() < deadline, "no snapshot arrived");
+            match watcher.poll() {
+                Some(snapshot) => break snapshot.unwrap(),
+                None => std::thread::sleep(Duration::from_millis(50)),
+            }
+        };
+        assert_eq!(captain.holds.len(), 1);
+        assert_eq!(captain.holds[0].key, "vh-window-size");
+        assert_eq!(
+            captain.holds[0].question,
+            "Default window size: Pick 1100x720 or 1280x800."
+        );
     }
 
     #[test]
