@@ -1,21 +1,54 @@
-//! The boundary between the UI and the agent layer. The app only talks to a [`ChiefOfStaff`];
-//! today that is [`Stub`], which simulates replies. A Pi-backed chief of staff replaces it by
-//! implementing the same trait.
+//! The boundary between the UI and the agent layer. The app only talks to a [`ChiefOfStaff`]:
+//! [`Stub`] simulates one for headless scenes and tests, and [`crate::claude::Claude`] runs the
+//! captain's own Claude Code.
 
-use crate::model::{Action, Agent, AgentStatus, Author, Id, Item, ItemKind, Message, Workspace};
+use rune::Waker;
+
+use crate::model::{
+    Action, Agent, AgentStatus, Author, Id, Item, ItemKind, Message, Plan, Status, Workspace,
+};
+
+/// Something the agent layer reports. The app drains these each frame.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Event {
+    Status(Status),
+    /// The chief of staff's reply so far. It replaces the reply in progress or starts one;
+    /// `done` ends it.
+    Reply {
+        text: String,
+        done: bool,
+    },
+    /// A failure to show in the chat, in the agent layer's own words.
+    Problem(String),
+}
 
 pub trait ChiefOfStaff {
-    /// The workspace as it stands when the app opens.
+    /// The workspace as it stands when the app opens. The first [`Event::Status`] follows.
     fn open(&mut self) -> Workspace;
-    /// The chief of staff's replies to an action the captain took. `ws` already reflects it.
-    fn respond(&mut self, ws: &Workspace, action: &Action) -> Vec<Message>;
+    /// Called once with a waker that background threads call when events are waiting.
+    fn connect(&mut self, _wake: Waker) {}
+    /// The captain did something; `ws` already reflects it. Replies arrive as events.
+    fn act(&mut self, ws: &Workspace, action: &Action);
+    /// Everything reported since the last call.
+    fn events(&mut self) -> Vec<Event>;
+    /// Start the agent layer's own sign-in.
+    fn sign_in(&mut self) {}
+    /// Stop a sign-in in progress.
+    fn cancel_sign_in(&mut self) {}
+    /// Ask the agent layer again whether it is signed in.
+    fn recheck(&mut self) {}
 }
 
 /// Simulated chief of staff: fixed starting data and canned replies.
-pub struct Stub;
+#[derive(Default)]
+pub struct Stub {
+    queued: Vec<Event>,
+}
 
 impl ChiefOfStaff for Stub {
     fn open(&mut self) -> Workspace {
+        self.queued
+            .push(Event::Status(Status::Ready(Plan::Simulated)));
         Workspace {
             chat: seed_chat(),
             items: seed_items(),
@@ -23,15 +56,19 @@ impl ChiefOfStaff for Stub {
         }
     }
 
-    fn respond(&mut self, _ws: &Workspace, action: &Action) -> Vec<Message> {
-        let reply = match action {
+    fn act(&mut self, _ws: &Workspace, action: &Action) {
+        let text = match action {
             Action::Say(text) => format!("Got it: \u{201c}{text}\u{201d}. I'll take it from here."),
             Action::Answer { choice, .. } => {
                 format!("Thanks. Going with \u{201c}{choice}\u{201d}.")
             }
             Action::Done { .. } => "Thanks, I've let the team know that's done.".to_string(),
         };
-        vec![Message::new(Author::ChiefOfStaff, reply)]
+        self.queued.push(Event::Reply { text, done: true });
+    }
+
+    fn events(&mut self) -> Vec<Event> {
+        std::mem::take(&mut self.queued)
     }
 }
 

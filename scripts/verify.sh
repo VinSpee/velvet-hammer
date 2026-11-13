@@ -22,16 +22,18 @@ headless() {
 cargo build --manifest-path "$root/Cargo.toml"
 cargo test --manifest-path "$root/Cargo.toml"
 
-# PNGs of each scene (`$app --list-scenes`), and the element tree of each.
-for scene in chat replied empty peek; do
+# PNGs of each scene (`$app --list-scenes`), and the element tree of each. The sign-in scenes
+# run the app on scripts/fake-claude, so they need no Claude account.
+for scene in chat replied empty peek signed-out signing-in signed-in expired cli-missing claude-error; do
   headless --scene "$scene" --snap "$out/$scene.png"
   headless --scene "$scene" --tree "$out/$scene.json"
 done
 
-# Scripted input: type a message and send it, answer one item, finish the task, peek at an agent.
-headless --script "$walk" --at mark:sent --tree "$out/walk-sent.json"
-headless --script "$walk" --at mark:end --tree "$out/walk-end.json"
-headless --script "$walk" --at mark:end --snap "$out/walk-end.png"
+# Scripted input on the stub's chat scene: type a message and send it, answer one item, finish
+# the task, peek at an agent.
+headless --scene chat --script "$walk" --at mark:sent --tree "$out/walk-sent.json"
+headless --scene chat --script "$walk" --at mark:end --tree "$out/walk-end.json"
+headless --scene chat --script "$walk" --at mark:end --snap "$out/walk-end.png"
 
 failures=0
 check() { # check FILE yes|no PATTERN
@@ -67,6 +69,34 @@ check peek.json yes '"key": "peek"'
 check peek.json yes '"key": "peek-close"'
 check peek.json yes '"text": "Peeking at layout"'
 check peek.json no  '"key": "chat"'
+# Signed out: the sign-in replaces the chat.
+check signed-out.json yes '"key": "sign-in"'
+check signed-out.json yes '"key": "sign-in-button"'
+check signed-out.json yes '"key": "recheck"'
+check signed-out.json yes '"text": "Sign in with Claude"'
+check signed-out.json no  '"key": "chat-input"'
+# Signing in: `claude auth login` is running and printed its sign-in page.
+check signing-in.json yes '"text": "Finish signing in in your browser"'
+check signing-in.json yes '"key": "sign-in-url"'
+check signing-in.json yes 'https://claude.ai/oauth/authorize'
+check signing-in.json yes '"key": "open-sign-in"'
+check signing-in.json yes '"key": "cancel-sign-in"'
+check signing-in.json no  '"key": "chat-input"'
+# Signed in: the chat, its health line, and the fake's streamed reply.
+check signed-in.json yes '"key": "chat-input"'
+check signed-in.json yes '"text": "Claude Code · signed in with your Claude Max plan"'
+check signed-in.json yes '"text": "You said: What needs me today?"'
+check signed-in.json no  '"key": "sign-in"'
+# Errors: a rejected sign-in, no `claude`, and a failed turn.
+check expired.json yes '"text": "Your Claude sign-in has expired"'
+check expired.json yes '"key": "sign-in-button"'
+check expired.json no  '"key": "chat-input"'
+check cli-missing.json yes '"text": "Claude Code isn'"'"'t installed"'
+check cli-missing.json yes '"key": "recheck"'
+check cli-missing.json no  '"key": "sign-in-button"'
+check claude-error.json yes '"text": "Claude Code reported a problem"'
+check claude-error.json yes 'could not finish this turn'
+check claude-error.json yes '"key": "chat-input"'
 # The scripted run.
 check walk-sent.json yes '"text": "Ship it when CI is green."'
 check walk-sent.json yes 'Got it:'

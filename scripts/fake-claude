@@ -1,0 +1,102 @@
+#!/bin/sh
+# A stand-in for Claude Code's `claude` command, for tests and headless scenes. It speaks the
+# parts of the real protocol the app uses and needs no account or network.
+#
+# FAKE_CLAUDE_HOME is a scratch directory. Its `state` file holds one of:
+#   signed-out  `auth status` reports no sign-in
+#   signed-in   signed in with a Claude Max subscription
+#   expired     `auth status` reports a sign-in, but every message is rejected for it
+#   console     signed in with an API key, not a subscription
+#   broken      `auth status` fails
+# `auth login` waits until a `browser-done` file appears there (the captain approving in the
+# browser), then signs in. FAKE_CLAUDE_LOGIN=fail makes it fail instead. A message containing
+# "fail" gets an error result.
+set -eu
+home=${FAKE_CLAUDE_HOME:?FAKE_CLAUDE_HOME must name a scratch directory}
+state=$(cat "$home/state" 2>/dev/null || echo signed-out)
+
+case "${1:-}" in
+--version)
+  echo "9.9.9 (Claude Code fake)"
+  ;;
+auth)
+  case "${2:-}" in
+  status)
+    case $state in
+    broken)
+      echo "fake claude: the settings file is corrupt" >&2
+      exit 2
+      ;;
+    console)
+      echo '{"loggedIn":true,"authMethod":"api_key","apiProvider":"firstParty"}'
+      ;;
+    signed-in | expired)
+      echo '{"loggedIn":true,"authMethod":"claude.ai","apiProvider":"firstParty","subscriptionType":"max"}'
+      ;;
+    *)
+      echo '{"loggedIn":false,"authMethod":"none","apiProvider":"firstParty"}'
+      exit 1
+      ;;
+    esac
+    ;;
+  login)
+    # The real command is interactive and refuses to run without a terminal.
+    if ! [ -t 0 ] || ! [ -t 1 ]; then
+      echo "fake claude: auth login needs a terminal" >&2
+      exit 1
+    fi
+    printf '\033[2K\033[1GOpening browser to sign in\342\200\246\r\n'
+    printf "Browser didn't open? Use the url below to sign in\r\n\r\n"
+    printf '\033[36mhttps://claude.ai/oauth/authorize?code=true&client_id=fake-client&state=fake-state\033[39m\r\n\r\n'
+    printf 'Paste code here if prompted > '
+    if [ "${FAKE_CLAUDE_LOGIN:-}" = fail ]; then
+      sleep 0.2
+      printf '\r\nOAuth error: the fake sign-in was refused\r\n'
+      exit 1
+    fi
+    tries=0
+    until [ -e "$home/browser-done" ]; do
+      tries=$((tries + 1))
+      [ "$tries" -le 600 ] || exit 1
+      sleep 0.1
+    done
+    echo signed-in >"$home/state"
+    printf '\r\nLogin successful.\r\n'
+    ;;
+  *)
+    echo "fake claude: unknown auth command" >&2
+    exit 1
+    ;;
+  esac
+  ;;
+-p)
+  # stream-json in and out: one user record per line, one turn per record.
+  while IFS= read -r line; do
+    text=$(printf '%s' "$line" | sed -E 's/.*"content":"(([^"\\]|\\.)*)".*/\1/')
+    case $text in
+    *envcheck*) text="api-key:${ANTHROPIC_API_KEY:+reached} token:${ANTHROPIC_AUTH_TOKEN:+reached}" ;;
+    esac
+    echo '{"type":"system","subtype":"init","apiKeySource":"none","model":"fake"}'
+    if [ "$state" = expired ]; then
+      echo '{"type":"assistant","error":"authentication_failed","message":{"role":"assistant","content":[{"type":"text","text":"OAuth token has expired."}]}}'
+      echo '{"type":"result","subtype":"success","is_error":true,"result":"OAuth token has expired.","api_error_status":401}'
+      continue
+    fi
+    case $text in
+    *fail*)
+      echo '{"type":"result","subtype":"error_during_execution","is_error":true,"errors":["fake claude: the model could not finish this turn"]}'
+      continue
+      ;;
+    esac
+    echo '{"type":"stream_event","event":{"type":"message_start","message":{"role":"assistant","content":[]}}}'
+    echo '{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"You said: "}}}'
+    echo "{\"type\":\"stream_event\",\"event\":{\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"$text\"}}}"
+    echo "{\"type\":\"assistant\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"You said: $text\"}]}}"
+    echo "{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"result\":\"You said: $text\"}"
+  done
+  ;;
+*)
+  echo "fake claude: unsupported arguments: $*" >&2
+  exit 1
+  ;;
+esac
