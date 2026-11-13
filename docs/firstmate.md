@@ -30,6 +30,9 @@ The next install removes a leftover `firstmate.partial`.
 If the install fails, for example because the machine is offline or `git` is not installed, the
 Firstmate page shows git's own error and an **Install firstmate** button to try again.
 
+If `~/.velvet-hammer/firstmate` already exists but is not a git clone, the install stops and
+reports that. The app leaves the directory untouched; move it away and install again.
+
 ## The Firstmate page
 
 The card at the bottom of the agents column shows the clone's state in a few words. Select it to
