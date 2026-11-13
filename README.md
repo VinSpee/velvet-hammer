@@ -8,6 +8,9 @@ delegates work to subagents.
 
 Velvet Hammer is early and experimental. The chief of staff runs on your own installed Claude Code
 and your Claude subscription (see [Claude Code and your subscription](#claude-code-and-your-subscription)).
+The app installs and updates its own clone of
+[firstmate](https://github.com/kunchenguid/firstmate), which the chief of staff will run on (see
+[The managed firstmate clone](docs/firstmate.md)); the chat does not run inside it yet.
 The two panels show only the notes Claude Code adds with the app's `app_note` tool and the tool
 uses waiting for your approval; the agents list has no data source yet, and there is no
 persistence. A stub with sample data stands in for the agent layer in headless scenes and tests. The interface
@@ -21,7 +24,8 @@ been tested yet (see [Trying the real sign-in](#trying-the-real-sign-in)).
 The window has three columns:
 
 - **Agents** (left): the subagents the chief of staff manages. Selecting one opens a peek at its
-  transcript in place of the chat; **Back to chat** closes it.
+  transcript in place of the chat; **Back to chat** closes it. A **Firstmate** card at the bottom
+  shows the state of the managed firstmate clone and opens a page for installing and updating it.
 - **Chief of staff** (middle): the conversation, with a message field and a **Send** button. A
   line under the heading says what runs it, such as "Claude Code · signed in with your Claude Max
   plan". When Claude Code is not ready, a sign-in screen takes the conversation's place.
@@ -40,11 +44,14 @@ The window has three columns:
   `claude` command, as described below.
 - `src/bridge.rs`: the server the chat session's `claude` calls back into: one MCP tool and one
   PreToolUse hook (see [docs/extending.md](docs/extending.md)).
+- `src/firstmate.rs`: `Firstmate`, the managed firstmate clone. It runs `git` to install the
+  clone, compare it with upstream and update it, and never discards a local change. Its `lab`
+  module builds scratch git repositories for tests and scenes.
 - `scripts/fake-claude`: a stand-in for `claude` that speaks the same protocol without an account.
   Tests and the sign-in scenes run the app on it.
 - `src/view.rs`: the Rune view. Every element a test or script reaches has a key.
-- `src/main.rs`: the `App` state (workspace, chief of staff, sign-in status, message draft, peeked
-  agent), the headless scenes, and the tests.
+- `src/main.rs`: the `App` state (workspace, chief of staff, sign-in status, firstmate clone,
+  message draft, what the middle column shows), the headless scenes, and the tests.
 
 ## Claude Code and your subscription
 
@@ -161,11 +168,19 @@ It writes these files to `OUT_DIR`:
 | `approval.png`, `approval.json` | The PreToolUse hook is waiting for you to allow or deny a Bash command |
 | `approval-long.png`, `approval-long.json` | The same question for a very long command, shown whole in a scrollable block |
 | `approved.png`, `approved.json` | After you allowed it, with the reply |
+| `firstmate-missing.png`, `firstmate-missing.json` | The Firstmate page with no clone installed |
+| `firstmate-installing.png`, `firstmate-installing.json` | The clone is being installed |
+| `firstmate-up-to-date.png`, `firstmate-up-to-date.json` | The clone matches upstream |
+| `firstmate-update-available.png`, `firstmate-update-available.json` | Upstream has a new commit |
+| `firstmate-modified.png`, `firstmate-modified.json` | A file in the clone was edited |
+| `firstmate-blocked.png`, `firstmate-blocked.json` | An edit conflicts with the update, which is blocked |
 | `walk-sent.json` | `scripts/walkthrough.json` after typing and sending a message |
 | `walk-end.png`, `walk-end.json` | The same script after answering an item, finishing the task and opening a peek |
 
 The first four scenes use the stub. The sign-in scenes run the app on `scripts/fake-claude`, so
 they need no Claude account; each waits for the fake's real processes before rendering. The
+firstmate scenes run `git` on a scratch upstream repository under `target/`, so they need no
+network. The
 walkthrough runs on the stub's `chat` scene. The `.json` files are Rune element trees. The script then checks them for the keys and text each
 state must or must not have (for example `needs-input`, `input-1`, `for-you-empty`, `peek`) and
 exits non-zero if any check fails.

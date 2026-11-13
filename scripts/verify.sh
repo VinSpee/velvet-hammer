@@ -24,7 +24,10 @@ cargo test --manifest-path "$root/Cargo.toml"
 
 # PNGs of each scene (`$app --list-scenes`), and the element tree of each. The sign-in scenes
 # run the app on scripts/fake-claude, so they need no Claude account.
-for scene in chat replied empty peek signed-out signing-in signed-in expired cli-missing claude-error noted approval approval-long approved; do
+# The firstmate scenes run git on a scratch upstream under target/, so they need no network.
+for scene in chat replied empty peek signed-out signing-in signed-in expired cli-missing claude-error noted approval approval-long approved \
+  firstmate-missing firstmate-installing firstmate-up-to-date firstmate-update-available \
+  firstmate-modified firstmate-blocked; do
   headless --scene "$scene" --snap "$out/$scene.png"
   headless --scene "$scene" --tree "$out/$scene.json"
 done
@@ -113,6 +116,34 @@ check approval-long.json yes '; rm -rf ~'
 check approval-long.json yes '"key": "answer-1-0"'
 check approved.json yes 'Bash was allowed to run git push'
 check approved.json yes '"key": "needs-input-empty"'
+# The managed firstmate clone: a card under the agents, and its page in each state.
+check chat.json yes '"key": "firstmate"'
+check chat.json yes '"text": "up to date"'
+check chat.json no  '"key": "firstmate-page"'
+check firstmate-missing.json yes '"text": "Firstmate is not installed"'
+check firstmate-missing.json yes '"key": "firstmate-install"'
+check firstmate-missing.json yes '"text": "not installed"'
+check firstmate-missing.json no  '"key": "firstmate-check"'
+check firstmate-missing.json no  '"key": "chat"'
+check firstmate-installing.json yes '"text": "Installing firstmate"'
+check firstmate-installing.json yes '"key": "firstmate-progress"'
+check firstmate-installing.json no  '"key": "firstmate-install"'
+check firstmate-up-to-date.json yes '"text": "Firstmate is up to date"'
+check firstmate-up-to-date.json yes '"text": "The clone matches origin/main."'
+check firstmate-up-to-date.json yes '"key": "firstmate-check"'
+check firstmate-up-to-date.json no  '"key": "firstmate-update"'
+check firstmate-update-available.json yes '"text": "A firstmate update is available"'
+check firstmate-update-available.json yes '"text": "origin/main has 1 new commit."'
+check firstmate-update-available.json yes '"key": "firstmate-update"'
+check firstmate-update-available.json yes '"text": "Update"'
+check firstmate-modified.json yes '"text": "Firstmate has your changes"'
+check firstmate-modified.json yes '"text": "Edited and not committed: AGENTS.md"'
+check firstmate-modified.json no  '"key": "firstmate-update"'
+check firstmate-blocked.json yes '"text": "The firstmate update is blocked"'
+check firstmate-blocked.json yes '"key": "firstmate-conflicts"'
+check firstmate-blocked.json yes '"text": "AGENTS.md"'
+check firstmate-blocked.json yes '"text": "update blocked"'
+check firstmate-blocked.json no  '"key": "firstmate-update"'
 # The scripted run.
 check walk-sent.json yes '"text": "Ship it when CI is green."'
 check walk-sent.json yes 'Got it:'
