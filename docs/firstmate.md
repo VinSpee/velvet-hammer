@@ -162,7 +162,9 @@ is that a view renders that document and does not parse the record files. Velvet
 it: `src/bearings.rs` runs the script from the clone with `FM_HOME` set to the app's home and
 `FM_CREW_STATE_NO_FORGE=1`, so it makes no network request and writes nothing. It runs once when
 the app opens and again whenever a file in the home's `state/` or `data/` directory changes,
-which the app checks every two seconds.
+which the app checks every two seconds. If a run fails, for example while the clone is being
+updated, the app runs it again every 30 seconds until it succeeds, even when nothing in the home
+changes. A change in the home still runs it at once, and the same error is shown only once.
 
 | Panel | Source in the snapshot | What you see |
 | --- | --- | --- |
