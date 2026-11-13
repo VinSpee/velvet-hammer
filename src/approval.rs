@@ -420,7 +420,7 @@ impl Store {
             .and_then(|()| file.sync_all())
             .and_then(|()| {
                 if self.unreadable && self.path.exists() {
-                    fs::rename(&self.path, suffixed(&self.path, BAD_SUFFIX))?;
+                    fs::copy(&self.path, suffixed(&self.path, BAD_SUFFIX))?;
                 }
                 fs::rename(&temporary, &self.path)
             });
