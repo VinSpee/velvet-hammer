@@ -9,8 +9,9 @@ delegates work to subagents.
 Velvet Hammer is early and experimental. The chief of staff runs on your own installed Claude Code
 and your Claude subscription (see [Claude Code and your subscription](#claude-code-and-your-subscription)).
 The app installs and updates its own clone of
-[firstmate](https://github.com/kunchenguid/firstmate), which the chief of staff will run on (see
-[The managed firstmate clone](docs/firstmate.md)); the chat does not run inside it yet.
+[firstmate](https://github.com/kunchenguid/firstmate), and the chief of staff runs inside it as
+firstmate, with its own operational home (see
+[The managed firstmate clone](docs/firstmate.md)).
 The two panels show only the notes Claude Code adds with the app's `app_note` tool and the tool
 uses waiting for your approval; the agents list has no data source yet, and there is no
 persistence. A stub with sample data stands in for the agent layer in headless scenes and tests. The interface
@@ -70,7 +71,9 @@ talks to Anthropic:
 - **Chatting.** The first message starts one long-lived
   `claude -p --input-format stream-json --output-format stream-json --verbose
   --include-partial-messages --no-session-persistence` process. Each message is written to its
-  standard input, and the reply streams into the chat as Claude Code produces it.
+  standard input, and the reply streams into the chat as Claude Code produces it. The process
+  runs in the managed firstmate clone with `FM_HOME` set to the app's own firstmate home, so it
+  starts as firstmate (see [The managed firstmate clone](docs/firstmate.md)).
 - **Tools and hooks.** The chat session also gets `--mcp-config` and `--settings` flags that point
   at a server the app runs on `127.0.0.1` for that session only. Its `app_note` tool adds a note
   to **For you to do**, and its PreToolUse hook asks you in **Needs your input** before Claude
@@ -174,6 +177,7 @@ It writes these files to `OUT_DIR`:
 | `firstmate-update-available.png`, `firstmate-update-available.json` | Upstream has a new commit |
 | `firstmate-modified.png`, `firstmate-modified.json` | A file in the clone was edited |
 | `firstmate-blocked.png`, `firstmate-blocked.json` | An edit conflicts with the update, which is blocked |
+| `firstmate-session.png`, `firstmate-session.json` | The chat running as firstmate in the managed clone |
 | `walk-sent.json` | `scripts/walkthrough.json` after typing and sending a message |
 | `walk-end.png`, `walk-end.json` | The same script after answering an item, finishing the task and opening a peek |
 

@@ -8,7 +8,7 @@
 
 use std::collections::HashMap;
 use std::io::{self, BufRead, BufReader, Read, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Output, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, Sender, channel};
@@ -35,6 +35,7 @@ const DENY: &str = "Deny";
 pub struct Claude {
     program: PathBuf,
     env: Vec<(String, String)>,
+    workplace: Option<Workplace>,
     outbox: Outbox,
     inbox: Receiver<Msg>,
     status: Status,
@@ -57,6 +58,15 @@ pub struct Claude {
     notes: HashMap<Id, String>,
 }
 
+/// Where a firstmate chief of staff runs: the managed clone is the working directory, so
+/// Claude Code loads its `AGENTS.md`, skills and hooks, and `home` is the `FM_HOME` its scripts
+/// keep their records in.
+#[derive(Clone)]
+struct Workplace {
+    clone: PathBuf,
+    home: PathBuf,
+}
+
 /// A tool use waiting on the captain.
 struct Approval {
     ticket: u64,
@@ -70,6 +80,7 @@ impl Claude {
         Claude {
             program: program.into(),
             env: Vec::new(),
+            workplace: None,
             outbox: Outbox {
                 tx,
                 wake: Arc::new(OnceLock::new()),
@@ -93,6 +104,16 @@ impl Claude {
     /// Adds an environment variable for every `claude` the app starts.
     pub fn env(mut self, key: &str, value: impl Into<String>) -> Self {
         self.env.push((key.to_string(), value.into()));
+        self
+    }
+
+    /// Runs the chat as firstmate: in the managed clone at `clone`, with `home` as firstmate's
+    /// operational home.
+    pub fn in_firstmate(mut self, clone: impl Into<PathBuf>, home: impl Into<PathBuf>) -> Self {
+        self.workplace = Some(Workplace {
+            clone: clone.into(),
+            home: home.into(),
+        });
         self
     }
 
@@ -297,14 +318,21 @@ impl Claude {
         if self.session.is_none() {
             let id = self.id();
             self.session = Some(
-                Session::start(id, &self.program, &self.env, &self.outbox)
-                    .map_err(|e| format!("Could not start Claude Code: {e}"))?,
+                Session::start(
+                    id,
+                    &self.program,
+                    &self.env,
+                    self.workplace.as_ref(),
+                    &self.outbox,
+                )
+                .map_err(|e| format!("Could not start Claude Code: {e}"))?,
             );
         }
-        let session = self.session.as_mut().expect("started above");
+        let stdin = &mut self.session.as_mut().expect("started above").stdin;
+        let stdin = stdin.as_mut().expect("open until the session is dropped");
         let line = json!({"type": "user", "message": {"role": "user", "content": text}});
-        writeln!(session.stdin, "{line}")
-            .and_then(|()| session.stdin.flush())
+        writeln!(stdin, "{line}")
+            .and_then(|()| stdin.flush())
             .map_err(|e| format!("Could not send the message to Claude Code: {e}"))
     }
 }
@@ -317,6 +345,10 @@ impl ChiefOfStaff for Claude {
 
     fn connect(&mut self, wake: Waker) {
         let _ = self.outbox.wake.set(wake);
+    }
+
+    fn workplace(&self) -> Option<&Path> {
+        self.workplace.as_ref().map(|w| w.clone.as_path())
     }
 
     fn act(&mut self, _ws: &Workspace, action: &Action) {
@@ -648,8 +680,9 @@ fn first_https_url(line: &str) -> Option<String> {
 /// and calling back into the app through its bridge.
 struct Session {
     id: u64,
-    child: Child,
-    stdin: ChildStdin,
+    // Both are taken when the session is dropped.
+    child: Option<Child>,
+    stdin: Option<ChildStdin>,
     _bridge: Bridge,
 }
 
@@ -658,12 +691,18 @@ impl Session {
         id: u64,
         program: &PathBuf,
         env: &[(String, String)],
+        workplace: Option<&Workplace>,
         outbox: &Outbox,
     ) -> io::Result<Session> {
         let calls = outbox.clone();
         let bridge = Bridge::start(move |call| calls.send(Msg::Call(id, call)))?;
+        let mut command = Command::new(program);
+        if let Some(Workplace { clone, home }) = workplace {
+            crate::firstmate::prepare_home(home)?;
+            command.current_dir(clone).env("FM_HOME", home);
+        }
         let mut child = subscription_only(
-            Command::new(program)
+            command
                 .args([
                     "-p",
                     "--input-format",
@@ -706,16 +745,36 @@ impl Session {
         });
         Ok(Session {
             id,
-            child,
-            stdin,
+            child: Some(child),
+            stdin: Some(stdin),
             _bridge: bridge,
         })
     }
 }
 
+/// How long a session may take to exit after its input closes before the app kills it.
+const EXIT_GRACE: Duration = Duration::from_secs(5);
+
 impl Drop for Session {
+    /// Closes the session's input, which is how `claude -p` is asked to finish: it stops its
+    /// hooks' processes (for firstmate, the watcher) on the way out, which a kill would orphan.
+    /// It is killed only if it has not exited after [`EXIT_GRACE`].
     fn drop(&mut self) {
-        let _ = self.child.kill();
+        drop(self.stdin.take());
+        let Some(mut child) = self.child.take() else {
+            return;
+        };
+        thread::spawn(move || {
+            let deadline = Instant::now() + EXIT_GRACE;
+            while matches!(child.try_wait(), Ok(None)) {
+                if Instant::now() >= deadline {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return;
+                }
+                thread::sleep(Duration::from_millis(25));
+            }
+        });
     }
 }
 

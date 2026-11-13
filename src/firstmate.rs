@@ -5,6 +5,10 @@
 //! local commit and merges upstream into it, and when the two conflict the app stops and says
 //! which files, without changing anything. The app only ever runs `git clone`, `fetch`, `add`,
 //! `commit` and `merge` here, plus read-only queries; it never resets, cleans, forces or pushes.
+//!
+//! Beside the clone the app keeps firstmate's operational home, the directory firstmate calls
+//! `FM_HOME`: its backlog, task records and settings. The chief of staff runs with the clone as
+//! its working directory and that home in its environment (see [`crate::claude`]).
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -94,6 +98,15 @@ pub enum Work {
     Updating,
 }
 
+/// Creates firstmate's operational home if it is not there: the four directories firstmate
+/// expects. Firstmate fills them itself.
+pub fn prepare_home(home: &Path) -> std::io::Result<()> {
+    for part in ["state", "data", "config", "projects"] {
+        std::fs::create_dir_all(home.join(part))?;
+    }
+    Ok(())
+}
+
 pub struct Firstmate {
     clone: PathBuf,
     url: String,
@@ -154,6 +167,15 @@ impl Firstmate {
 
     pub fn clone_dir(&self) -> &Path {
         &self.clone
+    }
+
+    /// Firstmate's operational home, beside the clone.
+    pub fn home_dir(&self) -> PathBuf {
+        self.clone.with_file_name("home")
+    }
+
+    pub fn installed(&self) -> bool {
+        matches!(self.distro, Distro::Installed(_))
     }
 
     pub fn url(&self) -> &str {

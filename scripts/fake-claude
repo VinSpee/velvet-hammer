@@ -18,6 +18,10 @@
 # what the hook decided. "write: PATH CONTENT" asks the same about the Write tool, "big:" asks
 # about a Bash command far larger than the app will show, and "abandon: COMMAND" asks about
 # COMMAND but hangs up after a second, as Claude Code does when it stops waiting.
+#
+# A message containing "whereami" is answered with the session's working directory and FM_HOME.
+# After a message "wake: TEXT" and its reply, a second turn nobody asked for says TEXT, the way
+# a firstmate Stop hook wakes an idle session.
 set -eu
 home=${FAKE_CLAUDE_HOME:?FAKE_CLAUDE_HOME must name a scratch directory}
 state=$(cat "$home/state" 2>/dev/null || echo signed-out)
@@ -104,6 +108,7 @@ auth)
     text=$(printf '%s' "$line" | sed -E 's/.*"content":"(([^"\\]|\\.)*)".*/\1/')
     case $text in
     *envcheck*) text="api-key:${ANTHROPIC_API_KEY:+reached} token:${ANTHROPIC_AUTH_TOKEN:+reached}" ;;
+    *whereami*) text="cwd=$(pwd -P) FM_HOME=${FM_HOME:-unset}" ;;
     note:*)
       note=${text#note: }
       post "$mcp_url" "$mcp_auth" '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"fake-claude","version":"9.9.9"}}}' >/dev/null
@@ -151,6 +156,14 @@ auth)
     echo "{\"type\":\"stream_event\",\"event\":{\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"$text\"}}}"
     echo "{\"type\":\"assistant\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"You said: $text\"}]}}"
     echo "{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"result\":\"You said: $text\"}"
+    case $text in
+    wake:*)
+      sleep 0.3
+      echo '{"type":"stream_event","event":{"type":"message_start","message":{"role":"assistant","content":[]}}}'
+      echo "{\"type\":\"stream_event\",\"event\":{\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"${text#wake: }\"}}}"
+      echo "{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"result\":\"${text#wake: }\"}"
+      ;;
+    esac
   done
   ;;
 *)

@@ -2,6 +2,8 @@
 //! [`Stub`] simulates one for headless scenes and tests, and [`crate::claude::Claude`] runs the
 //! captain's own Claude Code.
 
+use std::path::Path;
+
 use rune::Waker;
 
 use crate::model::{
@@ -41,6 +43,10 @@ pub trait ChiefOfStaff {
     fn cancel_sign_in(&mut self) {}
     /// Ask the agent layer again whether it is signed in.
     fn recheck(&mut self) {}
+    /// The managed firstmate clone the chief of staff runs in, if it runs in one.
+    fn workplace(&self) -> Option<&Path> {
+        None
+    }
 }
 
 /// Simulated chief of staff: fixed starting data and canned replies.
