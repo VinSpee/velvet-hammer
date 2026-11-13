@@ -154,10 +154,10 @@ A spec is untrusted model output.
   the captain's own message to their chief of staff. An action the catalog lacks does nothing.
 - **Unknown input.** A component the catalog lacks draws as a small box naming its type. Props the
   catalog does not define, and literal props of the wrong kind, are dropped.
-- **Images.** An `Image` shows only a file that a tool use in this session already named (in its
-  input's `file_path`, `path` or `notebook_path`, or a `file://` link in its result), that exists
-  and is a png, jpg, gif, webp or heic file under 32 MB, the same rules as the image handler.
-  Any other path and every URL is refused with a line saying why, without being read.
+- **Images.** An `Image` shows only a file that another tool use in this session already named (in
+  its input's `file_path`, `path` or `notebook_path`, or a `file://` link in its result), that
+  exists and is a png, jpg, gif, webp or heic file under 32 MB, the same rules as the image
+  handler. An `app_ui` call never counts, so a view cannot name its own file. Any other path and every URL is refused with a line saying why, without being read.
 - **No network.** The renderer makes no request.
 
 ## Left out

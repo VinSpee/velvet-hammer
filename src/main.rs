@@ -2843,6 +2843,11 @@ mod tests {
                 .unwrap_err()
                 .contains("already named")
         );
+        // A view cannot name its own file: `path` on the spec is not an approval.
+        let mut selfnamed = input(&chart);
+        selfnamed["path"] = serde_json::json!(chart);
+        let selfnamed = viewing(selfnamed, true);
+        assert!(selfnamed.ui_images[&chart].is_err());
         let url = viewing(input("https://example.com/x.png"), true);
         assert!(url.ui_images["https://example.com/x.png"].is_err());
         // Once a tool use names the file, a view can show it.
