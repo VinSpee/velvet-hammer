@@ -6,7 +6,15 @@
 //! The settings live in the app's own data directory ([`Store`]), never in the captain's Claude
 //! settings or in a repository. A fresh install runs without asking, as recommended. A settings
 //! file the app cannot read makes every tool use ask until the captain saves new settings, so a
-//! damaged file never silently drops a deny rule.
+//! damaged file never silently drops a rule.
+//!
+//! Rules are a convenience filter, not a sandbox. They compare text and see neither what a shell
+//! would run nor where a path leads: a deny rule for `git push` misses `git  push` (two spaces),
+//! `env git push`, `sudo git push` and `bash -c "git push"`, and a deny rule for `/repo/.env`
+//! misses `../repo/.env` or a relative path.
+//!
+//! The activity log keeps the start of every command, so it can hold whatever the command
+//! contained. It is created readable by its owner only.
 //!
 //! No setting reaches the app's fixed limits: it never reads or stores a credential, it strips
 //! the API-billing variables from every `claude` it starts, and it never pushes, publishes or
@@ -141,6 +149,9 @@ impl Effect {
 /// by a space, and it is checked against each command of a compound command: an allow rule must
 /// match every one of them, an ask or deny rule any one. Other patterns match the whole argument,
 /// with `*` matching any text, slashes included.
+///
+/// A rule is a convenience filter, not a sandbox: it compares text, so extra spaces, an `env` or
+/// `sudo` prefix, `bash -c "..."` and relative or `..` paths all get past it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Rule {
     pub effect: Effect,
@@ -401,16 +412,18 @@ impl Store {
     fn save(&self, settings: &Settings) -> io::Result<()> {
         let dir = self.path.parent().expect("the file is in a directory");
         fs::create_dir_all(dir)?;
-        if self.unreadable && self.path.exists() {
-            fs::rename(&self.path, suffixed(&self.path, BAD_SUFFIX))?;
-        }
         let temporary = suffixed(&self.path, &format!(".tmp-{}", std::process::id()));
         let mut file = File::create(&temporary)?;
         let written = serde_json::to_vec_pretty(&settings.to_json())
             .map_err(io::Error::other)
             .and_then(|bytes| file.write_all(&bytes))
             .and_then(|()| file.sync_all())
-            .and_then(|()| fs::rename(&temporary, &self.path));
+            .and_then(|()| {
+                if self.unreadable && self.path.exists() {
+                    fs::rename(&self.path, suffixed(&self.path, BAD_SUFFIX))?;
+                }
+                fs::rename(&temporary, &self.path)
+            });
         if written.is_err() {
             let _ = fs::remove_file(&temporary);
         }
@@ -421,6 +434,38 @@ impl Store {
         }
         Ok(())
     }
+}
+
+/// Creates the directory, and any missing parents, readable by its owner only.
+fn create_private_dir(dir: &Path) -> io::Result<()> {
+    let mut builder = fs::DirBuilder::new();
+    builder.recursive(true);
+    #[cfg(unix)]
+    std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o700);
+    builder.create(dir)
+}
+
+/// Opens the log for appending, creating it with owner-only permissions and tightening a log an
+/// earlier version made.
+fn open_private(path: &Path) -> io::Result<File> {
+    let mut options = OpenOptions::new();
+    options.create(true).append(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+    let file = options.open(path)?;
+    make_private(path)?;
+    Ok(file)
+}
+
+#[cfg(unix)]
+fn make_private(path: &Path) -> io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(path, fs::Permissions::from_mode(0o600))
+}
+
+#[cfg(not(unix))]
+fn make_private(_: &Path) -> io::Result<()> {
+    Ok(())
 }
 
 fn suffixed(path: &Path, suffix: &str) -> PathBuf {
@@ -495,6 +540,7 @@ impl Activity {
         let path = dir.join(LOG_FILE);
         if fs::metadata(&path).is_ok_and(|m| m.len() > ROTATE_AT) {
             let _ = fs::rename(&path, suffixed(&path, ".1"));
+            let _ = make_private(&suffixed(&path, ".1"));
         }
         let entries: Vec<Entry> = fs::read_to_string(&path)
             .unwrap_or_default()
@@ -510,13 +556,8 @@ impl Activity {
     }
 
     pub fn record(&mut self, entry: Entry) {
-        let appended = fs::create_dir_all(self.path.parent().expect("in a directory"))
-            .and_then(|()| {
-                OpenOptions::new()
-                    .create(true)
-                    .append(true)
-                    .open(&self.path)
-            })
+        let appended = create_private_dir(self.path.parent().expect("in a directory"))
+            .and_then(|()| open_private(&self.path))
             .and_then(|mut file| writeln!(file, "{}", entry.to_json()));
         self.problem = appended.err().map(|e| {
             format!(
@@ -1066,6 +1107,27 @@ mod tests {
         assert_eq!(again.entries()[0].subject.chars().count(), SUBJECT_MAX + 1);
         assert!(!again.entries()[1].allowed);
         assert!(again.problem().is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_log_and_its_new_directory_are_private_even_after_rotation() {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = |p: &Path| fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        let dir = scratch().join("data");
+        let mut log = Activity::open(&dir);
+        log.record(Entry::new("Bash", &bash("ls"), true, "by the mode".into()));
+        assert!(log.problem().is_none());
+        assert_eq!(mode(&dir), 0o700);
+        assert_eq!(mode(&dir.join(LOG_FILE)), 0o600);
+
+        let path = dir.join(LOG_FILE);
+        fs::write(&path, "x".repeat(ROTATE_AT as usize + 1)).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+        let mut log = Activity::open(&dir);
+        log.record(Entry::new("Bash", &bash("ls"), true, "by the mode".into()));
+        assert_eq!(mode(&path), 0o600);
+        assert_eq!(mode(&suffixed(&path, ".1")), 0o600);
     }
 
     #[test]

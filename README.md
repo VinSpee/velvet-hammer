@@ -136,8 +136,10 @@ agents column):
   `|`, `$( )` or backticks: an allow rule must match every part, an ask or deny rule any part.
   Other patterns are globs on the file path (Read, Edit, Write), URL (WebFetch) or the whole
   input. A matching deny rule always wins, then ask, then allow, whatever their order; ask brings
-  up the full-input question even in **Run without asking**. A rule cannot see inside a script
-  or `sh -c`, so a deny rule is a guard rail, not a sandbox.
+  up the full-input question even in **Run without asking**. Rules are a convenience filter,
+  not a sandbox: they compare text, so extra spaces (`git  push`), an `env` or `sudo` prefix,
+  `bash -c "git push"`, a script that runs the command, or a relative or `..` path gets past
+  one.
 - **Asking.** A tool use that waits for you appears in **Needs your input** with all of its
   input, as before. An input larger than 64 KB that would be asked about is denied, because
   approving a partial view would approve what you never saw.
@@ -147,7 +149,8 @@ agents column):
   how it was decided: allowed or denied by the mode or by which rule, or asked and what you
   answered. It is kept in `tool-activity.jsonl` in the app's data directory
   (`~/.velvet-hammer`, or `$VELVET_HAMMER_DATA`), which the app moves to
-  `tool-activity.jsonl.1` when it passes 1 MB.
+  `tool-activity.jsonl.1` when it passes 1 MB. It is readable by your user only (mode 0600) but
+  holds command text as typed, so avoid putting secrets in commands.
 - **Where the settings live.** `tool-approval.json` in the same directory (versioned, written to a
   temporary file and renamed into place), never in your Claude settings or a repository.
   Changes apply to a running session at once. If the file cannot be read, every tool use asks

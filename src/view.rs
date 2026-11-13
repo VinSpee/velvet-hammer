@@ -566,7 +566,8 @@ fn approvals_page(s: &App, t: Theme, dark: bool) -> El {
                  running without asking. A Bash pattern matches commands that start with it, in \
                  every part of a command joined with && ; or |. Other patterns match the file \
                  path or main argument, and * matches any text. A rule cannot see inside a \
-                 script or sh -c, so a deny rule is a guard rail, not a sandbox.",
+                 script or sh -c. Rules are a convenience filter, not a sandbox: extra spaces, an env or \
+                 sudo prefix, bash -c, or a relative or .. path all get past a rule.",
                 t,
             ))
             .child(rules)
@@ -670,8 +671,8 @@ fn activity_page(s: &App, t: Theme, dark: bool) -> El {
         "activity-help",
         &format!(
             "Every tool use of your chief of staff and how it was decided, newest first. Each \
-             entry keeps the start of the command or path, not the whole input. The log is kept \
-             in {}.",
+             entry keeps the start of the command or path, not the whole input, so it can contain \
+             command text: avoid putting secrets in commands. The log is kept in {}.",
             s.activity.path().display()
         ),
         t,
