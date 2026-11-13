@@ -86,7 +86,8 @@ None of Claude Code's tools is a `delete` or `move`.
 The registry checks, in order: an `image` or `audio` block in the result; a `resource_link` or
 `resource` with a `file://` URI; an absolute file path in the tool's input (`file_path`, `path`
 or `notebook_path`); then the tool's kind. Video is not a standard content type, so a video is a
-file or resource link whose media type, or extension, is video.
+file or resource link whose extension is a video one. A file's kind comes from its extension
+alone; a `mimeType` a result claims for it is ignored.
 
 | Handler | Chosen for | What the chat shows |
 | --- | --- | --- |

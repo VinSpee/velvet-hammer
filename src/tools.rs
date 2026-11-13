@@ -50,12 +50,10 @@ pub enum Content {
     },
     ResourceLink {
         uri: String,
-        mime: Option<String>,
     },
     /// An embedded resource, with its text when it has text rather than a blob.
     Resource {
         uri: String,
-        mime: Option<String>,
         text: Option<String>,
     },
     /// A type none of the standards above define, by its `type`.
@@ -138,15 +136,15 @@ pub fn handler(tool: &ToolUse) -> Handler {
                 });
             }
             Content::Audio { .. } => return Handler::Audio,
-            Content::ResourceLink { uri, mime } | Content::Resource { uri, mime, .. } => {
-                if let Some(handler) = file_uri(uri).and_then(|p| media_file(p, mime.as_deref())) {
+            Content::ResourceLink { uri } | Content::Resource { uri, .. } => {
+                if let Some(handler) = file_uri(uri).and_then(media_file) {
                     return handler;
                 }
             }
             Content::Text(_) | Content::Other(_) => {}
         }
     }
-    if let Some(handler) = named_path(&tool.input).and_then(|p| media_file(p, None)) {
+    if let Some(handler) = named_path(&tool.input).and_then(media_file) {
         return handler;
     }
     match Kind::of(&tool.name) {
@@ -156,12 +154,11 @@ pub fn handler(tool: &ToolUse) -> Handler {
     }
 }
 
-/// The handler for a media file the tool use named, when it is an image or a video file that
+/// The handler for a media file the tool use named, decided by its extension alone (a media type
+/// a result claims is never trusted), when it is an image or a video file that
 /// exists and is not too large to read.
-fn media_file(path: PathBuf, mime: Option<&str>) -> Option<Handler> {
-    let media = mime
-        .map(str::to_ascii_lowercase)
-        .or_else(|| extension_type(&path).map(str::to_string))?;
+fn media_file(path: PathBuf) -> Option<Handler> {
+    let media = extension_type(&path)?;
     let handler = if media.starts_with("image/") {
         Handler::Image(Picture::File(path.clone()))
     } else if media.starts_with("video/") {
@@ -325,13 +322,11 @@ fn content_block(block: &Value) -> Content {
         },
         "resource_link" => Content::ResourceLink {
             uri: text("uri").unwrap_or_default(),
-            mime: text("mimeType"),
         },
         "resource" => {
             let resource = &block["resource"];
             Content::Resource {
                 uri: resource["uri"].as_str().unwrap_or_default().to_string(),
-                mime: resource["mimeType"].as_str().map(str::to_string),
                 text: resource["text"].as_str().map(str::to_string),
             }
         }
@@ -423,6 +418,22 @@ mod tests {
             handler(&used("mcp__x__record", json!({}), link)),
             Handler::Video(_)
         ));
+    }
+
+    #[test]
+    fn a_claimed_media_type_does_not_make_a_file_media() {
+        let script = scratch("run.command", b"#!/bin/sh");
+        let link = json!([{"type": "resource_link", "uri": format!("file://{}", script.display()), "name": "run.command", "mimeType": "video/mp4"}]);
+        assert_eq!(
+            handler(&used("mcp__x__record", json!({}), link)),
+            Handler::Generic
+        );
+        let mov = scratch("claimed.mov", b"x");
+        let link = json!([{"type": "resource_link", "uri": format!("file://{}", mov.display()), "name": "claimed.mov", "mimeType": "image/png"}]);
+        assert_eq!(
+            handler(&used("mcp__x__record", json!({}), link)),
+            Handler::Video(mov)
+        );
     }
 
     #[test]
