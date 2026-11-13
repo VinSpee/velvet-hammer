@@ -6,6 +6,7 @@
 #   signed-out  `auth status` reports no sign-in
 #   signed-in   signed in with a Claude Max subscription
 #   expired     `auth status` reports a sign-in, but every message is rejected for it
+#   console     signed in with an API key, not a subscription
 #   broken      `auth status` fails
 # `auth login` waits until a `browser-done` file appears there (the captain approving in the
 # browser), then signs in. FAKE_CLAUDE_LOGIN=fail makes it fail instead. A message containing
@@ -25,6 +26,9 @@ auth)
     broken)
       echo "fake claude: the settings file is corrupt" >&2
       exit 2
+      ;;
+    console)
+      echo '{"loggedIn":true,"authMethod":"api_key","apiProvider":"firstParty"}'
       ;;
     signed-in | expired)
       echo '{"loggedIn":true,"authMethod":"claude.ai","apiProvider":"firstParty","subscriptionType":"max"}'
@@ -69,6 +73,9 @@ auth)
   # stream-json in and out: one user record per line, one turn per record.
   while IFS= read -r line; do
     text=$(printf '%s' "$line" | sed -E 's/.*"content":"(([^"\\]|\\.)*)".*/\1/')
+    case $text in
+    *envcheck*) text="api-key:${ANTHROPIC_API_KEY:+reached} token:${ANTHROPIC_AUTH_TOKEN:+reached}" ;;
+    esac
     echo '{"type":"system","subtype":"init","apiKeySource":"none","model":"fake"}'
     if [ "$state" = expired ]; then
       echo '{"type":"assistant","error":"authentication_failed","message":{"role":"assistant","content":[{"type":"text","text":"OAuth token has expired."}]}}'

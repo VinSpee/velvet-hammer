@@ -123,7 +123,6 @@ fn health(plan: &Plan) -> String {
                 capitalized(kind)
             )
         }
-        Plan::Other(method) => format!("Claude Code \u{b7} signed in with {method}"),
         Plan::Simulated => "Simulated chief of staff \u{b7} no Claude Code".into(),
     }
 }
@@ -151,6 +150,12 @@ fn sign_in(status: &Status, t: Theme, dark: bool) -> El {
             "Your chief of staff runs on your own Claude Code, so its messages count against your \
              Claude subscription. Claude Code signs you in and keeps the sign-in; Velvet Hammer \
              never sees it.",
+        ),
+        Status::NotSubscription { .. } => (
+            "Sign in with a Claude subscription",
+            "Your chief of staff only runs on a Claude subscription (Pro or Max). Claude Code is \
+             signed in another way, so the chat is locked. Run `claude auth login --claudeai`, or \
+             choose Sign in with Claude, to switch.",
         ),
         Status::SigningIn { .. } => (
             "Finish signing in in your browser",
@@ -229,6 +234,21 @@ fn sign_in(status: &Status, t: Theme, dark: bool) -> El {
             body = body.child(buttons.child(button("cancel-sign-in", "Cancel", t, |s| {
                 s.cancel_sign_in()
             })));
+        }
+        Status::NotSubscription { method } => {
+            body = body
+                .child(warning(
+                    "status-detail",
+                    &format!("Claude Code reports its sign-in method as {method}."),
+                    dark,
+                ))
+                .child(
+                    buttons
+                        .child(button("sign-in-button", "Sign in with Claude", t, |s| {
+                            s.sign_in()
+                        }))
+                        .child(button("recheck", "Check again", t, |s| s.recheck())),
+                );
         }
         Status::Expired => {
             body = body.child(

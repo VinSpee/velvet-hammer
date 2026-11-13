@@ -341,16 +341,27 @@ fn auth_status(program: &PathBuf, env: &[(String, String)]) -> Status {
         return Status::SignedOut { problem: None };
     }
     let method = status["authMethod"].as_str().unwrap_or("an unknown method");
-    Status::Ready(if method == "claude.ai" {
-        Plan::Subscription(
-            status["subscriptionType"]
-                .as_str()
-                .unwrap_or("Claude")
-                .to_string(),
-        )
-    } else {
-        Plan::Other(method.to_string())
-    })
+    if method != "claude.ai" {
+        return Status::NotSubscription {
+            method: method.to_string(),
+        };
+    }
+    Status::Ready(Plan::Subscription(
+        status["subscriptionType"]
+            .as_str()
+            .unwrap_or("Claude")
+            .to_string(),
+    ))
+}
+
+/// Credentials that make Claude Code bill an API account instead of the subscription.
+const BILLING_ENV: [&str; 2] = ["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"];
+
+fn subscription_only(cmd: &mut Command) -> &mut Command {
+    for key in BILLING_ENV {
+        cmd.env_remove(key);
+    }
+    cmd
 }
 
 /// Runs a short command to completion, killing it after `timeout`.
@@ -360,13 +371,15 @@ fn run(
     env: &[(String, String)],
     timeout: Duration,
 ) -> io::Result<Output> {
-    let mut child = Command::new(program)
-        .args(args)
-        .envs(env.iter().map(|(k, v)| (k, v)))
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()?;
+    let mut child = subscription_only(
+        Command::new(program)
+            .args(args)
+            .envs(env.iter().map(|(k, v)| (k, v))),
+    )
+    .stdin(Stdio::null())
+    .stdout(Stdio::piped())
+    .stderr(Stdio::piped())
+    .spawn()?;
     let deadline = Instant::now() + timeout;
     while child.try_wait()?.is_none() {
         if Instant::now() >= deadline {
@@ -410,6 +423,9 @@ impl Login {
         cmd.args(["auth", "login", "--claudeai"]);
         for (k, v) in env {
             cmd.env(k, v);
+        }
+        for key in BILLING_ENV {
+            cmd.env_remove(key);
         }
         let mut child = pty.slave.spawn_command(cmd).map_err(|e| e.to_string())?;
         drop(pty.slave);
@@ -546,22 +562,24 @@ impl Session {
         env: &[(String, String)],
         outbox: &Outbox,
     ) -> io::Result<Session> {
-        let mut child = Command::new(program)
-            .args([
-                "-p",
-                "--input-format",
-                "stream-json",
-                "--output-format",
-                "stream-json",
-                "--verbose",
-                "--include-partial-messages",
-                "--no-session-persistence",
-            ])
-            .envs(env.iter().map(|(k, v)| (k, v)))
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()?;
+        let mut child = subscription_only(
+            Command::new(program)
+                .args([
+                    "-p",
+                    "--input-format",
+                    "stream-json",
+                    "--output-format",
+                    "stream-json",
+                    "--verbose",
+                    "--include-partial-messages",
+                    "--no-session-persistence",
+                ])
+                .envs(env.iter().map(|(k, v)| (k, v))),
+        )
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
         let stdin = child.stdin.take().expect("piped");
         let stdout = child.stdout.take().expect("piped");
         let mut stderr = child.stderr.take().expect("piped");

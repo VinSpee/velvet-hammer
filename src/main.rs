@@ -476,6 +476,39 @@ mod tests {
     }
 
     #[test]
+    fn an_api_key_sign_in_is_blocked_and_offers_the_subscription_sign_in() {
+        let mut rt = runtime_with(fake("console", &[]));
+        wait(&mut rt, settled);
+        assert_eq!(
+            rt.state.status,
+            Status::NotSubscription {
+                method: "api_key".into()
+            }
+        );
+        assert!(rt.find("sign-in-button").is_some());
+        assert!(rt.find("chat-input").is_none());
+    }
+
+    #[test]
+    fn api_billing_credentials_never_reach_claude() {
+        let mut rt = runtime_with(fake(
+            "signed-in",
+            &[
+                ("ANTHROPIC_API_KEY", "sk-test"),
+                ("ANTHROPIC_AUTH_TOKEN", "token-test"),
+            ],
+        ));
+        wait(&mut rt, settled);
+        rt.state.draft.text = "envcheck".into();
+        tap(&mut rt, "send");
+        wait(&mut rt, replied);
+        assert_eq!(
+            rt.state.ws.chat.last().unwrap().text,
+            "You said: api-key: token:"
+        );
+    }
+
+    #[test]
     fn a_missing_claude_says_so() {
         let mut rt = runtime_with(fake_program("/nonexistent/claude", "signed-out", &[]));
         wait(&mut rt, settled);

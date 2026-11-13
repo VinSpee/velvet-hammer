@@ -61,6 +61,12 @@ talks to Anthropic:
   `claude -p --input-format stream-json --output-format stream-json --verbose
   --include-partial-messages --no-session-persistence` process. Each message is written to its
   standard input, and the reply streams into the chat as Claude Code produces it.
+- **Subscription only.** If `claude auth status` reports a sign-in method other than `claude.ai`
+  (an Anthropic Console sign-in, an API key or anything else), the chat stays locked and the
+  sign-in screen asks for a Claude subscription sign-in: run `claude auth login --claudeai`, or
+  choose **Sign in with Claude**. The app also removes `ANTHROPIC_API_KEY` and
+  `ANTHROPIC_AUTH_TOKEN` from the environment of every `claude` process it starts, so a key set in
+  your shell cannot make the chat bill an API account.
 - **When something is wrong.** The sign-in screen says which case applies: not signed in, signing
   in, the sign-in expired (Claude Code reports a sign-in but Anthropic rejected it for a message,
   which Claude Code reports as `authentication_failed`), `claude` not on `PATH`, or `claude`

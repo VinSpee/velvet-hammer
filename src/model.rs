@@ -41,6 +41,9 @@ pub enum Status {
     SigningIn { url: Option<String> },
     /// Claude Code says it is signed in, but Anthropic rejected the sign-in on the last message.
     Expired,
+    /// Claude Code is signed in, but not with a Claude subscription (an Anthropic Console or API
+    /// key sign-in, say); `method` is what it reports. The chat stays locked.
+    NotSubscription { method: String },
     /// No `claude` on the app's PATH.
     CliMissing,
     /// `claude` is installed but failed in a way signing in cannot fix; the text is its own.
@@ -54,8 +57,6 @@ pub enum Status {
 pub enum Plan {
     /// A Claude subscription sign-in; the text is the plan Claude Code reports, such as "max".
     Subscription(String),
-    /// Anything else Claude Code reports, such as an Anthropic Console sign-in or an API key.
-    Other(String),
     /// The stub: nothing is billed.
     Simulated,
 }
