@@ -911,6 +911,29 @@ mod tests {
     }
 
     #[test]
+    fn dropping_the_app_stops_a_session_that_is_mid_turn() {
+        let home = scratch("signed-in");
+        let mut rt = runtime_with(on_fake(FAKE_CLAUDE, &home, &[]));
+        wait(&mut rt, settled);
+        rt.state.draft.text = "run: git push".into();
+        tap(&mut rt, "send");
+        wait(&mut rt, |s| s.ws.needs_input().next().is_some());
+        let pid: libc::pid_t = std::fs::read_to_string(home.join("pid"))
+            .expect("the fake wrote its pid")
+            .trim()
+            .parse()
+            .expect("a pid");
+        let alive = || unsafe { libc::kill(pid, 0) == 0 };
+        assert!(alive());
+        drop(rt);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while alive() && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(25));
+        }
+        assert!(!alive(), "the session outlived the app");
+    }
+
+    #[test]
     fn the_question_for_a_write_shows_the_path_and_the_content() {
         let (mut rt, item) = ask_about("write: /tmp/notes.txt hello there");
         assert_eq!(item.title, "Allow Write?");

@@ -149,8 +149,9 @@ Updating the clone while a session runs changes the scripts and hooks at once, b
 read from disk when used. A changed `AGENTS.md` is read when the next session starts, which is
 the next time you open the app.
 
-When a session ends, the app closes its input and gives `claude` five seconds to exit before
-killing it, so that Claude Code stops firstmate's watcher instead of leaving it running.
+When a session ends, or the app quits, the app closes its input and sends `claude` a termination
+signal at once, so that Claude Code stops firstmate's watcher instead of leaving it running. If
+`claude` has not exited after five seconds, the app kills it.
 
 ## Reset it
 

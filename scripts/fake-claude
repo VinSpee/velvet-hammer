@@ -103,6 +103,7 @@ auth)
     curl -sf --max-time "${4:-600}" -H 'Content-Type: application/json' -H "Authorization: $2" \
       --data "$3" "$1"
   }
+  echo $$ >"$home/pid"
   # stream-json in and out: one user record per line, one turn per record.
   while IFS= read -r line; do
     text=$(printf '%s' "$line" | sed -E 's/.*"content":"(([^"\\]|\\.)*)".*/\1/')

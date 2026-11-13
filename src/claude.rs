@@ -756,14 +756,22 @@ impl Session {
 const EXIT_GRACE: Duration = Duration::from_secs(5);
 
 impl Drop for Session {
-    /// Closes the session's input, which is how `claude -p` is asked to finish: it stops its
-    /// hooks' processes (for firstmate, the watcher) on the way out, which a kill would orphan.
-    /// It is killed only if it has not exited after [`EXIT_GRACE`].
+    /// Closes the session's input and, at once, asks `claude` to stop (SIGTERM on unix), so no
+    /// session outlives its owner, even when the app quits before the reaper below runs. `claude`
+    /// stops its hooks' processes (for firstmate, the watcher) on the way out, which a kill would
+    /// orphan. The reaper kills it only if it has not exited after [`EXIT_GRACE`].
     fn drop(&mut self) {
         drop(self.stdin.take());
         let Some(mut child) = self.child.take() else {
             return;
         };
+        #[cfg(unix)]
+        // SAFETY: `kill` only signals the pid of a child this session has not yet reaped.
+        unsafe {
+            libc::kill(child.id() as libc::pid_t, libc::SIGTERM);
+        }
+        #[cfg(not(unix))]
+        let _ = child.kill();
         thread::spawn(move || {
             let deadline = Instant::now() + EXIT_GRACE;
             while matches!(child.try_wait(), Ok(None)) {
