@@ -39,7 +39,7 @@ pub fn view(s: &App, cx: &mut Cx<App>) -> El {
                 .min_h(0.0)
                 .padding(space::S3)
                 .gap(space::S3)
-                .child(needs_input(s, t))
+                .child(needs_input(s, t, cx.system_dark()))
                 .child(for_you(s, t)),
         )
 }
@@ -308,7 +308,14 @@ fn chat(s: &App, plan: &Plan, t: Theme) -> El {
         .single_line()
         .grow(1.0)
         .color(t.text)
-        .placeholder("Message your chief of staff", t.text_secondary)
+        .placeholder(
+            if s.answering.is_some() {
+                "Your answer"
+            } else {
+                "Message your chief of staff"
+            },
+            t.text_secondary,
+        )
         .on_edit(|s: &mut App| &mut s.draft)
         .on_submit(|s: &mut App, _| s.send());
     let composer = row()
@@ -347,6 +354,23 @@ fn chat(s: &App, plan: &Plan, t: Theme) -> El {
         .gap(space::S3)
         .child(header)
         .child(transcript("messages", &s.ws.chat, t))
+        .children(s.answering.as_ref().map(|key| {
+            row()
+                .key("answering")
+                .gap(space::S2)
+                .center_y()
+                .child(
+                    text(format!(
+                        "Answering the captain hold {key}. Your next message goes to your \
+                         chief of staff as your answer, in your own words."
+                    ))
+                    .font(type_::LABEL)
+                    .color(t.text_secondary)
+                    .wrap()
+                    .grow(1.0),
+                )
+                .child(button("answer-cancel", "Cancel", t, |s| s.answering = None))
+        }))
         .child(composer)
 }
 
@@ -601,7 +625,7 @@ fn transcript(key: &str, messages: &[Message], t: Theme) -> El {
         .child(list)
 }
 
-fn needs_input(s: &App, t: Theme) -> El {
+fn needs_input(s: &App, t: Theme, dark: bool) -> El {
     let rows = s.ws.needs_input().map(|item| {
         let ItemKind::NeedsInput { options } = &item.kind else {
             unreachable!()
@@ -623,11 +647,54 @@ fn needs_input(s: &App, t: Theme) -> El {
         }
         card(&format!("input-{}", item.id), item, t).child(answers)
     });
+    let mut rows: Vec<El> = rows.collect();
+    // From firstmate's records: tasks held for the captain, then merges waiting for approval.
+    if let Some(problem) = &s.captain_problem {
+        rows.push(warning("captain-problem", problem, dark));
+    }
+    for hold in &s.captain.holds {
+        let key = hold.key.clone();
+        let answering = s.answering.as_deref() == Some(&hold.key);
+        rows.push(
+            words_card(&format!("hold-{key}"), &hold.key, &hold.question, t).child(row().child(
+                button(
+                    &format!("answer-{key}"),
+                    if answering {
+                        "Answering below"
+                    } else {
+                        "Answer"
+                    },
+                    t,
+                    move |s| {
+                        s.answering = Some(key.clone());
+                        s.showing = Showing::Chat;
+                    },
+                ),
+            )),
+        );
+    }
+    for merge in &s.captain.merges {
+        let (task, url) = (merge.task.clone(), merge.url.clone());
+        rows.push(
+            words_card(
+                &format!("merge-{task}"),
+                &format!("Approve the merge for {task}?"),
+                &format!("{}\n{}", merge.url, merge.reason),
+                t,
+            )
+            .child(row().child(button(
+                &format!("approve-{task}"),
+                "Approve",
+                t,
+                move |s| s.approve_merge(&task, &url),
+            ))),
+        );
+    }
     panel(
         "needs-input",
         "Needs your input",
         "Nothing is waiting on you.",
-        rows.collect(),
+        rows,
         t,
     )
 }
@@ -691,6 +758,10 @@ fn panel(key: &str, title: &str, empty: &str, rows: Vec<El>, t: Theme) -> El {
 const DETAIL_MAX_H: f32 = 240.0;
 
 fn card(key: &str, item: &Item, t: Theme) -> El {
+    words_card(key, &item.title, &item.detail, t)
+}
+
+fn words_card(key: &str, title: &str, detail: &str, t: Theme) -> El {
     col()
         .key(key)
         .padding(space::S3)
@@ -698,7 +769,7 @@ fn card(key: &str, item: &Item, t: Theme) -> El {
         .radius(radius::MD)
         .fill(t.bg)
         .child(
-            text(item.title.clone())
+            text(title.to_string())
                 .font(type_::TITLE)
                 .color(t.text)
                 .wrap(),
@@ -711,7 +782,7 @@ fn card(key: &str, item: &Item, t: Theme) -> El {
                     stick_bottom: false,
                 })
                 .child(
-                    text(item.detail.clone())
+                    text(detail.to_string())
                         .font(type_::LABEL)
                         .color(t.text_secondary)
                         .wrap()

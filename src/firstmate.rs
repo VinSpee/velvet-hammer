@@ -475,6 +475,12 @@ pub mod lab {
             };
             std::fs::create_dir_all(&lab.upstream).expect("scratch directory");
             git_ok(&lab.upstream, &["init", "--quiet", "-b", "main"]).expect("git init");
+            lab.script(
+                "bin/fm-bearings-snapshot.sh",
+                "#!/bin/sh\n\
+                 # Stands in for firstmate's bearings snapshot: prints what a test put in the home.\n\
+                 cat \"$FM_HOME/data/bearings.json\" 2>/dev/null || echo '{\"schema\":\"fm-bearings.v1\"}'\n",
+            );
             lab.release("AGENTS.md", "# Firstmate\n\nYou are the first mate.\n");
             lab
         }
@@ -489,6 +495,26 @@ pub mod lab {
 
         pub fn firstmate(&self) -> Firstmate {
             Firstmate::open(&self.data, &self.url())
+        }
+
+        /// Writes an executable `file` into upstream, for the next [`Lab::release`] to publish.
+        fn script(&self, file: &str, text: &str) {
+            let path = self.upstream.join(file);
+            std::fs::create_dir_all(path.parent().expect("a file in upstream")).expect("mkdir");
+            std::fs::write(&path, text).expect("write upstream script");
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
+                    .expect("make the script executable");
+            }
+        }
+
+        /// What firstmate's bearings snapshot reports for this lab's home from now on.
+        pub fn bearings(&self, json: &str) {
+            let data = self.data.join("home/data");
+            std::fs::create_dir_all(&data).expect("mkdir");
+            std::fs::write(data.join("bearings.json"), json).expect("write bearings");
         }
 
         /// Upstream publishes `text` as `file`.

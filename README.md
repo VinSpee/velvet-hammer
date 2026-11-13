@@ -12,9 +12,10 @@ The app installs and updates its own clone of
 [firstmate](https://github.com/kunchenguid/firstmate), and the chief of staff runs inside it as
 firstmate, with its own operational home (see
 [The managed firstmate clone](docs/firstmate.md)).
-The two panels show only the notes Claude Code adds with the app's `app_note` tool and the tool
-uses waiting for your approval; the agents list has no data source yet, and there is no
-persistence. A stub with sample data stands in for the agent layer in headless scenes and tests. The interface
+**Needs your input** shows the tasks firstmate holds for you and the merges waiting for your
+approval, read from firstmate's own records, together with the tool uses waiting for your
+approval. **For you to do** shows the notes Claude Code adds with the app's `app_note` tool. The
+agents list has no data source yet. A stub with sample data stands in for the agent layer in headless scenes and tests. The interface
 and code will change.
 
 The sign-in flow is tested against a fake `claude`; signing in with a real Claude account has not
@@ -48,6 +49,8 @@ The window has three columns:
 - `src/firstmate.rs`: `Firstmate`, the managed firstmate clone. It runs `git` to install the
   clone, compare it with upstream and update it, and never discards a local change. Its `lab`
   module builds scratch git repositories for tests and scenes.
+- `src/bearings.rs`: what waits on the captain, read from firstmate's records by running its
+  `bin/fm-bearings-snapshot.sh --json` whenever the records change.
 - `scripts/fake-claude`: a stand-in for `claude` that speaks the same protocol without an account.
   Tests and the sign-in scenes run the app on it.
 - `src/view.rs`: the Rune view. Every element a test or script reaches has a key.
@@ -178,6 +181,8 @@ It writes these files to `OUT_DIR`:
 | `firstmate-modified.png`, `firstmate-modified.json` | A file in the clone was edited |
 | `firstmate-blocked.png`, `firstmate-blocked.json` | An edit conflicts with the update, which is blocked |
 | `firstmate-session.png`, `firstmate-session.json` | The chat running as firstmate in the managed clone |
+| `firstmate-panels.png`, `firstmate-panels.json` | **Needs your input** filled from firstmate's records: two held tasks and a merge approval |
+| `firstmate-answering.png`, `firstmate-answering.json` | After choosing **Answer** on a held task |
 | `walk-sent.json` | `scripts/walkthrough.json` after typing and sending a message |
 | `walk-end.png`, `walk-end.json` | The same script after answering an item, finishing the task and opening a peek |
 

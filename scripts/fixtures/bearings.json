@@ -1,0 +1,96 @@
+{
+  "schema": "fm-bearings.v1",
+  "home": "lab/home",
+  "generated": "2026-11-13T17:41:38Z",
+  "prs": "not_requested (run: /bearings include PRs)",
+  "contributions": {
+    "scope": "owned contributions per home",
+    "known": 2,
+    "checked": 2,
+    "counts": {
+      "captain": 2,
+      "fleet": 0,
+      "maintainer": 0,
+      "nobody": 0
+    },
+    "complete": true,
+    "proven_clear": true,
+    "unmeasured_homes": 0,
+    "unreadable_records": 0,
+    "unmeasured": 0,
+    "stale_verdicts": 0,
+    "missing_verdicts": 0,
+    "captain_omitted": 0,
+    "captain": [
+      {
+        "task": "lab-panels",
+        "url": "https://github.com/example/app/pull/7",
+        "kind": "pr",
+        "head": "0a1b2c3",
+        "reason": "checks green; merge approval needed",
+        "hold": null,
+        "owner": "(main)"
+      },
+      {
+        "task": "lab-window-size",
+        "url": "https://github.com/example/app/pull/6",
+        "kind": "pr",
+        "head": "4d5e6f7",
+        "reason": "Pick the default window size: 1100x720 (fits small laptops) or 1280x800 (shows more chat).",
+        "hold": "lab-window-size",
+        "owner": "(main)"
+      }
+    ]
+  },
+  "in_flight": [],
+  "secondmates": [],
+  "secondmate_reconcile": [],
+  "decisions_open": [
+    {
+      "id": "lab-window-size",
+      "key": "lab-window-size",
+      "verb": "captain-hold",
+      "summary": "Default window size: Pick the default window size: 1100x720 (fits small laptops) or 1280x8…",
+      "question": "Default window size: Pick the default window size: 1100x720 (fits small laptops) or 1280x800 (shows more chat).",
+      "owner": "(main)"
+    },
+    {
+      "id": "lab-gh-login",
+      "key": "lab-gh-login",
+      "verb": "captain-hold",
+      "summary": "Sign in to GitHub: Run gh auth login in a terminal; agents cannot sign in for you.",
+      "question": "Sign in to GitHub: Run gh auth login in a terminal; agents cannot sign in for you.",
+      "owner": "(main)"
+    }
+  ],
+  "landed": [],
+  "gates": [],
+  "reports": [],
+  "recorded_prs": [],
+  "omitted": [
+    {
+      "surface": "backlog item bodies",
+      "reveal": "--fields bodies"
+    },
+    {
+      "surface": "task paths",
+      "reveal": "--fields paths"
+    },
+    {
+      "surface": "watch/steer actions",
+      "reveal": "--fields actions"
+    },
+    {
+      "surface": "healthy endpoint detail",
+      "reveal": "--fields endpoints"
+    },
+    {
+      "surface": "full scout-report inventory",
+      "reveal": "--all-reports"
+    },
+    {
+      "surface": "live PR discovery + checks",
+      "reveal": "--include-prs"
+    }
+  ]
+}
