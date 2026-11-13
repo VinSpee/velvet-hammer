@@ -18,6 +18,10 @@ pub fn view(s: &App, cx: &mut Cx<App>) -> El {
     let main = match (s.showing, peeked, &s.status) {
         (Showing::Firstmate, ..) => firstmate_page(&s.firstmate, t, cx.system_dark()),
         (_, Some(agent), _) => peek(agent, t),
+        // A chief of staff that runs in the managed clone cannot chat until it is installed.
+        (_, None, Status::Ready(_)) if !s.chat_ready() => {
+            firstmate_page(&s.firstmate, t, cx.system_dark())
+        }
         (_, None, Status::Ready(plan)) => chat(s, plan, t),
         (_, None, status) => sign_in(status, t, cx.system_dark()),
     };
@@ -323,6 +327,17 @@ fn chat(s: &App, plan: &Plan, t: Theme) -> El {
                 .child(input),
         )
         .child(button("send", "Send", t, |s| s.send()));
+    let mut header = col()
+        .gap(2.0)
+        .child(heading("Chief of staff", t))
+        .child(note("health", &health(plan), t));
+    if let Some(clone) = s.chief.workplace() {
+        header = header.child(note(
+            "workplace",
+            &format!("Running firstmate from {}", clone.display()),
+            t,
+        ));
+    }
     col()
         .key("chat")
         .grow(1.0)
@@ -330,12 +345,7 @@ fn chat(s: &App, plan: &Plan, t: Theme) -> El {
         .min_h(0.0)
         .padding(space::S6)
         .gap(space::S3)
-        .child(
-            col()
-                .gap(2.0)
-                .child(heading("Chief of staff", t))
-                .child(note("health", &health(plan), t)),
-        )
+        .child(header)
         .child(transcript("messages", &s.ws.chat, t))
         .child(composer)
 }

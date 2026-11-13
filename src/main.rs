@@ -92,9 +92,16 @@ impl App {
         self.drain();
     }
 
+    /// Whether the chat can run: Claude Code is signed in, and a chief of staff that runs in
+    /// the managed firstmate clone has that clone installed.
+    pub fn chat_ready(&self) -> bool {
+        matches!(self.status, Status::Ready(_))
+            && (self.chief.workplace().is_none() || self.firstmate.installed())
+    }
+
     pub fn send(&mut self) {
         let text = self.draft.text.trim().to_string();
-        if text.is_empty() || !matches!(self.status, Status::Ready(_)) {
+        if text.is_empty() || !self.chat_ready() {
             return;
         }
         self.draft.clear();
@@ -143,7 +150,8 @@ impl App {
 fn init() -> App {
     let mut firstmate = Firstmate::open(&firstmate::data_dir(), firstmate::UPSTREAM);
     firstmate.start();
-    App::new(Box::new(Claude::new("claude")), firstmate)
+    let claude = Claude::new("claude").in_firstmate(firstmate.clone_dir(), firstmate.home_dir());
+    App::new(Box::new(claude), firstmate)
 }
 
 fn stub() -> App {
@@ -225,6 +233,21 @@ fn on_fake(program: &str, home: &std::path::Path, extra_env: &[(&str, &str)]) ->
         claude = claude.env(k, *v);
     }
     App::new(Box::new(claude), installed_firstmate())
+}
+
+/// An app on the fake `claude`, signed in and running as firstmate in `lab`'s managed clone,
+/// which is installed first when `install` is set.
+fn fake_in_firstmate(lab: &Lab, install: bool) -> App {
+    let mut firstmate = lab.firstmate();
+    let claude = Claude::new(FAKE_CLAUDE)
+        .env("FAKE_CLAUDE_HOME", scratch("signed-in").to_string_lossy())
+        .in_firstmate(firstmate.clone_dir(), firstmate.home_dir());
+    if install {
+        firstmate.install();
+    }
+    let mut app = App::new(Box::new(claude), firstmate);
+    app.settle(|s| settled(s) && idle(s));
+    app
 }
 
 fn settled(s: &App) -> bool {
@@ -334,6 +357,14 @@ fn main() {
                 *s = fake("signed-in", &[]);
                 s.settle(settled);
                 s.draft.text = "Please fail this one.".into();
+                s.send();
+                s.settle(replied);
+            }),
+            // The chat running as firstmate: the fake `claude` in a managed clone of a scratch
+            // upstream, with its own operational home.
+            ("firstmate-session", |s| {
+                *s = fake_in_firstmate(&Lab::new(), true);
+                s.draft.text = "whereami".into();
                 s.send();
                 s.settle(replied);
             }),
@@ -463,6 +494,96 @@ mod tests {
         assert!(rt.find("chat").is_some());
     }
 
+    // The chat running as firstmate, on the fake `claude` and a scratch upstream.
+
+    #[test]
+    fn the_chat_runs_in_the_managed_clone_with_its_own_home() {
+        let lab = Lab::new();
+        let mut rt = runtime_with(fake_in_firstmate(&lab, true));
+        let home = lab.data.join("home");
+        assert!(!home.exists(), "the home is made when the session starts");
+        assert!(rt.find("workplace").is_some());
+        rt.state.draft.text = "whereami".into();
+        tap(&mut rt, "send");
+        wait(&mut rt, replied);
+        let clone = std::fs::canonicalize(lab.clone_dir()).unwrap();
+        assert_eq!(
+            rt.state.ws.chat.last().unwrap().text,
+            format!(
+                "You said: cwd={} FM_HOME={}",
+                clone.display(),
+                home.display()
+            )
+        );
+        for part in ["state", "data", "config", "projects"] {
+            assert!(home.join(part).is_dir(), "{part} is missing from the home");
+        }
+    }
+
+    #[test]
+    fn a_turn_nobody_asked_for_shows_in_the_chat() {
+        let mut rt = runtime_with(fake_in_firstmate(&Lab::new(), true));
+        rt.state.draft.text = "wake: A crewmate finished its task.".into();
+        tap(&mut rt, "send");
+        wait(&mut rt, |s| {
+            s.replying.is_none()
+                && s.ws
+                    .chat
+                    .last()
+                    .is_some_and(|m| m.text == "A crewmate finished its task.")
+        });
+        let chat = &rt.state.ws.chat;
+        assert_eq!(chat.len(), 3);
+        assert_eq!(
+            chat[1].text,
+            "You said: wake: A crewmate finished its task."
+        );
+        assert_eq!(chat[2].author, Author::ChiefOfStaff);
+    }
+
+    #[test]
+    fn the_chat_waits_for_firstmate_to_be_installed() {
+        let lab = Lab::new();
+        let mut rt = runtime_with(fake_in_firstmate(&lab, false));
+        assert!(matches!(rt.state.status, Status::Ready(_)));
+        assert!(rt.find("chat-input").is_none());
+        assert!(rt.find("firstmate-page").is_some());
+        rt.state.draft.text = "hello".into();
+        rt.state.send();
+        assert!(rt.state.ws.chat.is_empty());
+        tap(&mut rt, "firstmate-install");
+        wait(&mut rt, idle);
+        assert!(rt.find("chat-input").is_some());
+        assert!(rt.find("firstmate-page").is_none());
+    }
+
+    #[test]
+    #[ignore = "uses the real Claude account and clones firstmate from GitHub"]
+    fn real_claude_starts_as_firstmate() {
+        let data = scratch("unused").join("data");
+        let mut firstmate = Firstmate::open(&data, firstmate::UPSTREAM);
+        let claude = Claude::new("claude")
+            .env("ANTHROPIC_MODEL", "haiku")
+            .in_firstmate(firstmate.clone_dir(), firstmate.home_dir());
+        firstmate.install();
+        let mut rt = runtime_with(App::new(Box::new(claude), firstmate));
+        wait_for(&mut rt, Duration::from_secs(120), |s| settled(s) && idle(s));
+        assert!(rt.state.chat_ready(), "{:?}", rt.state.firstmate.problem());
+        rt.state.draft.text = "Use no tools. Quote the line of your session-start context that \
+            begins with SESSION START, then name the file your instructions come from."
+            .into();
+        tap(&mut rt, "send");
+        wait_for(&mut rt, Duration::from_secs(180), replied);
+        let reply = &rt.state.ws.chat.last().unwrap().text;
+        assert!(reply.contains("SESSION START"), "{reply}");
+        assert!(
+            reply.contains(&data.join("home").display().to_string()),
+            "{reply}"
+        );
+        assert!(reply.contains("AGENTS.md"), "{reply}");
+        assert!(data.join("home/state/.lock").exists());
+    }
+
     // The managed firstmate clone, on a scratch upstream (see `firstmate::lab`).
 
     fn standing(rt: &Runtime<App>) -> firstmate::Standing {
@@ -541,7 +662,11 @@ mod tests {
 
     /// Frames until `done` holds, letting the fake's real processes run.
     fn wait(rt: &mut Runtime<App>, done: impl Fn(&App) -> bool) {
-        let deadline = Instant::now() + Duration::from_secs(20);
+        wait_for(rt, Duration::from_secs(20), done);
+    }
+
+    fn wait_for(rt: &mut Runtime<App>, patience: Duration, done: impl Fn(&App) -> bool) {
+        let deadline = Instant::now() + patience;
         while !done(&rt.state) {
             assert!(
                 Instant::now() < deadline,
@@ -783,6 +908,56 @@ mod tests {
         assert!(rt.find(&format!("input-{}-detail", item.id)).is_some());
         tap(&mut rt, &format!("answer-{}-1", item.id));
         wait(&mut rt, replied);
+    }
+
+    #[test]
+    fn dropping_the_app_stops_a_session_that_is_mid_turn() {
+        let home = scratch("signed-in");
+        let mut rt = runtime_with(on_fake(FAKE_CLAUDE, &home, &[]));
+        wait(&mut rt, settled);
+        rt.state.draft.text = "run: git push".into();
+        tap(&mut rt, "send");
+        wait(&mut rt, |s| s.ws.needs_input().next().is_some());
+        let pid: libc::pid_t = std::fs::read_to_string(home.join("pid"))
+            .expect("the fake wrote its pid")
+            .trim()
+            .parse()
+            .expect("a pid");
+        let alive = || unsafe { libc::kill(pid, 0) == 0 };
+        assert!(alive());
+        drop(rt);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while alive() && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(25));
+        }
+        assert!(!alive(), "the session outlived the app");
+    }
+
+    #[test]
+    fn dropping_the_app_signals_a_session_that_never_finishes_its_turn() {
+        let home = scratch("signed-in");
+        let mut rt = runtime_with(on_fake(FAKE_CLAUDE, &home, &[]));
+        wait(&mut rt, settled);
+        rt.state.draft.text = "stuck: forever".into();
+        tap(&mut rt, "send");
+        let pid_file = home.join("pid");
+        let started = std::time::Instant::now();
+        while !pid_file.exists() && started.elapsed() < Duration::from_secs(5) {
+            std::thread::sleep(Duration::from_millis(25));
+        }
+        let pid: libc::pid_t = std::fs::read_to_string(&pid_file)
+            .expect("the fake wrote its pid")
+            .trim()
+            .parse()
+            .expect("a pid");
+        let alive = || unsafe { libc::kill(pid, 0) == 0 };
+        assert!(alive());
+        drop(rt);
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        while alive() && std::time::Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(25));
+        }
+        assert!(!alive(), "the session outlived the app");
     }
 
     #[test]

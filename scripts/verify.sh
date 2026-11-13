@@ -27,7 +27,7 @@ cargo test --manifest-path "$root/Cargo.toml"
 # The firstmate scenes run git on a scratch upstream under target/, so they need no network.
 for scene in chat replied empty peek signed-out signing-in signed-in expired cli-missing claude-error noted approval approval-long approved \
   firstmate-missing firstmate-installing firstmate-up-to-date firstmate-update-available \
-  firstmate-modified firstmate-blocked; do
+  firstmate-modified firstmate-blocked firstmate-session; do
   headless --scene "$scene" --snap "$out/$scene.png"
   headless --scene "$scene" --tree "$out/$scene.json"
 done
@@ -144,6 +144,13 @@ check firstmate-blocked.json yes '"key": "firstmate-conflicts"'
 check firstmate-blocked.json yes '"text": "AGENTS.md"'
 check firstmate-blocked.json yes '"text": "update blocked"'
 check firstmate-blocked.json no  '"key": "firstmate-update"'
+# The chat running as firstmate: in the managed clone, with its own operational home.
+check firstmate-session.json yes '"key": "chat-input"'
+check firstmate-session.json yes '"key": "workplace"'
+check firstmate-session.json yes 'Running firstmate from'
+check firstmate-session.json yes '/data/firstmate FM_HOME='
+check firstmate-session.json yes '/data/home"'
+check firstmate-session.json no  '"key": "firstmate-page"'
 # The scripted run.
 check walk-sent.json yes '"text": "Ship it when CI is green."'
 check walk-sent.json yes 'Got it:'
