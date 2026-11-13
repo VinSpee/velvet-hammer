@@ -534,6 +534,14 @@ pub mod lab {
             std::fs::write(data.join("bearings.json"), json).expect("write bearings");
         }
 
+        /// Firstmate's project registry in this lab's home from now on, as firstmate's
+        /// `project-management` procedure writes it.
+        pub fn registry(&self, text: &str) {
+            let data = self.data.join("home/data");
+            std::fs::create_dir_all(&data).expect("mkdir");
+            std::fs::write(data.join("projects.md"), text).expect("write registry");
+        }
+
         /// Upstream publishes `text` as `file`.
         pub fn release(&self, file: &str, text: &str) {
             std::fs::write(self.upstream.join(file), text).expect("write upstream file");

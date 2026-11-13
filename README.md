@@ -18,7 +18,10 @@ approval. Which tool uses wait for you is a setting: by default, as recommended,
 staff runs its tools without asking and every tool use is logged (see
 [Tool approval](#tool-approval)). **For you to do** shows the notes Claude Code adds with the app's `app_note` tool. The
 agents list shows the tasks firstmate has in flight, and selecting one shows that crewmate's
-terminal. [Where the integration stands](docs/firstmate.md#where-the-integration-stands) lists
+terminal. The **Projects** list shows the projects in firstmate's records, and **Add project**
+starts a guided conversation in which the chief of staff adds one with firstmate's own procedure;
+with no projects yet, the chat opens with a prompt to add the first (see
+[Projects](docs/firstmate.md#projects)). [Where the integration stands](docs/firstmate.md#where-the-integration-stands) lists
 what works end to end and what is not verified. A stub with sample data stands in for the agent layer in headless scenes and tests. The interface
 and code will change.
 
@@ -30,13 +33,17 @@ been tested yet (see [Trying the real sign-in](#trying-the-real-sign-in)).
 The window has three columns:
 
 - **Agents** (left): the subagents the chief of staff manages. Selecting one opens a peek at its
-  transcript in place of the chat; **Back to chat** closes it. A **Firstmate** card at the bottom
+  transcript in place of the chat; **Back to chat** closes it. Under them, **Projects** lists the
+  projects in firstmate's records with **Add project**. A **Firstmate** card at the bottom
   shows the state of the managed firstmate clone and opens a page for installing and updating it.
   A **Tool approval** card above it shows the approval mode and opens the settings page, which
   links to the activity log.
 - **Chief of staff** (middle): the conversation, with a message field and a **Send** button. A
   line under the heading says what runs it, such as "Claude Code · signed in with your Claude Max
-  plan". When Claude Code is not ready, a sign-in screen takes the conversation's place.
+  plan". When Claude Code is not ready, a sign-in screen takes the conversation's place. With no
+  projects yet, a card above the conversation explains them and offers **Add a project**; while
+  you add one, a row above the message field offers **Choose a folder…**, **Yes**, **No** and
+  **Done adding**.
 - **Needs your input** and **For you to do** (right): questions the agents are waiting on, each
   with answer buttons, and steps only you can take, each with a **Done** button.
 
@@ -57,6 +64,9 @@ The window has three columns:
   module builds scratch git repositories for tests and scenes.
 - `src/approval.rs`: the tool-approval settings (a mode and custom rules), the file they are
   saved in, the decision the hook makes for each tool use, and the activity log.
+- `src/projects.rs`: the projects in firstmate's records (its registry `data/projects.md` and
+  the clones under `projects/`), re-read every two seconds, and the system folder dialog the add
+  flow uses.
 - `src/bearings.rs`: what waits on the captain, read from firstmate's records by running its
   `bin/fm-bearings-snapshot.sh --json` whenever the records change.
 - `scripts/fake-claude`: a stand-in for `claude` that speaks the same protocol without an account.
@@ -241,13 +251,18 @@ It writes these files to `OUT_DIR`:
 | `firstmate-panels.png`, `firstmate-panels.json` | **Needs your input** filled from firstmate's records: two held tasks and a merge approval |
 | `firstmate-crew.png`, `firstmate-crew.json` | Peeking at a crewmate's terminal from the agents list |
 | `firstmate-answering.png`, `firstmate-answering.json` | After choosing **Answer** on a held task |
+| `projects-fresh.png`, `projects-fresh.json` | A fresh install: no home yet, no projects, and adding waits for the chat |
+| `projects-empty.png`, `projects-empty.json` | An installed home with no projects: the prompt to add the first one |
+| `projects-adding.png`, `projects-adding.json` | After **Add a project**: the request in the chat, the reply and the add controls |
+| `projects-listed.png`, `projects-listed.json` | Three projects from firstmate's registry |
 | `walk-sent.json` | `scripts/walkthrough.json` after typing and sending a message |
 | `walk-end.png`, `walk-end.json` | The same script after answering an item, finishing the task and opening a peek |
 
 The first four scenes and `approval-settings` use the stub. The sign-in scenes run the app on `scripts/fake-claude`, so
 they need no Claude account; each waits for the fake's real processes before rendering. The
-firstmate scenes run `git` on a scratch upstream repository under `target/`, so they need no
-network. The
+firstmate and projects scenes run `git` on a scratch upstream repository under `target/`, so
+they need no network; the projects scenes write the registry firstmate's procedure would write,
+because the fake `claude` cannot run that procedure. The
 walkthrough runs on the stub's `chat` scene. The `.json` files are Rune element trees. The script then checks them for the keys and text each
 state must or must not have (for example `needs-input`, `input-1`, `for-you-empty`, `peek`) and
 exits non-zero if any check fails.

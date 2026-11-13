@@ -9,9 +9,11 @@ mod bridge;
 mod claude;
 mod firstmate;
 mod model;
+mod projects;
 mod view;
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::mpsc::{Receiver, channel};
 use std::time::{Duration, Instant};
 
 use rune::{AppSpec, TextEdit, Tx, Waker};
@@ -22,6 +24,7 @@ use bearings::Bearings;
 use claude::Claude;
 use firstmate::{Checkout, Distro, Firstmate, Work, lab::Lab};
 use model::{Action, Author, Id, Message, Status, Workspace};
+use projects::Project;
 
 /// All app state: the workspace the agent layer fills, plus what only the UI needs.
 pub struct App {
@@ -43,6 +46,20 @@ pub struct App {
     pub captain_problem: Option<String>,
     /// The crewmate whose terminal is being read, while `showing` is [`Showing::Crew`].
     pub peek: Option<bearings::Peek>,
+    /// Keeps `projects` current from firstmate's records, when the chief of staff is firstmate.
+    project_watcher: Option<projects::Watcher>,
+    /// The projects firstmate's records list, or why they could not be read. `None` until the
+    /// first read, and always for a chief of staff that is not firstmate.
+    pub projects: Option<Result<Vec<Project>, String>>,
+    /// The captain started adding a project with the chief of staff, so the chat offers the
+    /// small controls that help answer its questions.
+    pub adding: bool,
+    /// The folder dialog: [`projects::pick_folder`], or a stand-in in tests.
+    pub picker: fn() -> Result<Option<PathBuf>, String>,
+    /// The folder dialog that is open, while it is.
+    picking: Option<Receiver<Result<Option<PathBuf>, String>>>,
+    /// Why the folder dialog could not open.
+    pub pick_problem: Option<String>,
     wake: Option<Waker>,
     /// The captain hold the next message answers, by its key.
     pub answering: Option<String>,
@@ -75,6 +92,9 @@ impl App {
         let watcher = chief
             .workplace()
             .map(|clone| bearings::Watcher::start(clone, &firstmate.home_dir()));
+        let project_watcher = chief
+            .workplace()
+            .map(|_| projects::Watcher::start(&firstmate.home_dir()));
         let approvals = Store::open(data);
         chief.approve_with(approvals.policy());
         let mut app = App {
@@ -89,6 +109,12 @@ impl App {
             captain: Bearings::default(),
             captain_problem: None,
             peek: None,
+            project_watcher,
+            projects: None,
+            adding: false,
+            picker: projects::pick_folder,
+            picking: None,
+            pick_problem: None,
             wake: None,
             answering: None,
             draft: TextEdit::default(),
@@ -104,6 +130,20 @@ impl App {
         let events = self.chief.events();
         let mut changed = self.firstmate.poll() | !events.is_empty();
         changed |= self.follow_peek();
+        if let Some(projects) = self.project_watcher.as_mut().and_then(|w| w.poll()) {
+            self.projects = Some(projects);
+            changed = true;
+        }
+        if let Some(picked) = self.picking.as_ref().and_then(|rx| rx.try_recv().ok()) {
+            self.picking = None;
+            match picked {
+                // The captain reads the path and sends it, like any other answer.
+                Ok(Some(folder)) => self.draft.text = folder.display().to_string(),
+                Ok(None) => {}
+                Err(problem) => self.pick_problem = Some(problem),
+            }
+            changed = true;
+        }
         if let Some(snapshot) = self.watcher.as_mut().and_then(|w| w.poll()) {
             match snapshot {
                 Ok(captain) => {
@@ -193,6 +233,57 @@ impl App {
         self.act(Action::Say(text));
     }
 
+    /// Whether firstmate's records list no project, including in a home that does not exist yet.
+    pub fn has_no_projects(&self) -> bool {
+        matches!(&self.projects, Some(Ok(list)) if list.is_empty())
+    }
+
+    /// Starts adding a project: asks the chief of staff, in the chat, to walk the captain
+    /// through firstmate's own procedure. Firstmate clones and registers the project; the app
+    /// only sees the result in firstmate's records.
+    pub fn add_project(&mut self) {
+        if !self.chat_ready() {
+            return;
+        }
+        self.adding = true;
+        self.answering = None;
+        self.showing = Showing::Chat;
+        self.act(Action::Say(ADD_PROJECT.into()));
+    }
+
+    /// Sends one of the add flow's quick replies, such as the captain's yes.
+    pub fn reply(&mut self, words: &str) {
+        if self.chat_ready() {
+            self.act(Action::Say(words.into()));
+        }
+    }
+
+    pub fn finish_adding(&mut self) {
+        self.adding = false;
+        self.pick_problem = None;
+    }
+
+    /// Opens the folder dialog on a background thread; the chosen path lands in the draft.
+    pub fn pick_folder(&mut self) {
+        if self.picking.is_some() {
+            return;
+        }
+        self.pick_problem = None;
+        let (tx, rx) = channel();
+        let (picker, wake) = (self.picker, self.wake.clone());
+        std::thread::spawn(move || {
+            let _ = tx.send(picker());
+            if let Some(wake) = wake {
+                wake();
+            }
+        });
+        self.picking = Some(rx);
+    }
+
+    pub fn picking(&self) -> bool {
+        self.picking.is_some()
+    }
+
     /// Tells the chief of staff, in the chat, that the captain approves merging `url`.
     pub fn approve_merge(&mut self, task: &str, url: &str) {
         if self.chat_ready() {
@@ -240,6 +331,19 @@ impl App {
         }
     }
 }
+
+/// What the captain says to start adding a project. Firstmate's `project-management` skill owns
+/// the procedure; this asks for it one question at a time and repeats the consent rules the
+/// captain wants kept.
+pub const ADD_PROJECT: &str = "I want to add a project. Follow your project-management \
+    procedure and walk me through it one question at a time, waiting for my answer before the \
+    next: first the repository (a git URL, or a folder on this computer), then the project's \
+    name, then each delivery choice the procedure needs, with the default you recommend. Before \
+    you clone, register or initialize anything, tell me exactly what you will clone or register \
+    and where, and wait for my yes. Do not create, push to or publish anything remote unless I \
+    say yes to that here. If something goes wrong or you refuse, tell me why in plain words and \
+    leave everything as it is. When the project is added, tell me the result in plain words and \
+    ask whether I want to add another.";
 
 fn init() -> App {
     let mut firstmate = Firstmate::open(&firstmate::data_dir(), firstmate::UPSTREAM);
@@ -375,6 +479,9 @@ fn poll(s: &mut App, _: f64, _: &mut Tx) -> bool {
 fn setup(s: &mut App, wake: Waker) {
     s.firstmate.connect(wake.clone());
     if let Some(watcher) = &mut s.watcher {
+        watcher.connect(wake.clone());
+    }
+    if let Some(watcher) = &mut s.project_watcher {
         watcher.connect(wake.clone());
     }
     s.wake = Some(wake.clone());
@@ -543,6 +650,30 @@ fn main() {
                 *s = fake_in_firstmate(&lab, true);
                 s.settle(|s| !s.captain.is_empty());
                 s.answering = Some("lab-window-size".into());
+            }),
+            // Projects from firstmate's records: none yet in a fresh install, none in an
+            // installed home, adding the first one with the chief of staff, and three listed.
+            ("projects-fresh", |s| {
+                *s = fake_in_firstmate(&Lab::new(), false);
+                s.settle(|s| s.projects.is_some());
+            }),
+            ("projects-empty", |s| {
+                *s = fake_in_firstmate(&Lab::new(), true);
+                s.settle(|s| s.projects.is_some());
+            }),
+            ("projects-adding", |s| {
+                *s = fake_in_firstmate(&Lab::new(), true);
+                s.settle(|s| s.projects.is_some());
+                s.add_project();
+                s.settle(replied);
+            }),
+            ("projects-listed", |s| {
+                let lab = Lab::new();
+                lab.registry(projects::SAMPLE_REGISTRY);
+                *s = fake_in_firstmate(&lab, true);
+                s.settle(|s| {
+                    s.projects.as_ref().is_some_and(|p| p.is_ok()) && !s.has_no_projects()
+                });
             }),
             // The managed firstmate clone. All but the first two run git on a scratch upstream.
             ("firstmate-missing", |s| {
@@ -932,6 +1063,177 @@ mod tests {
         wait(&mut rt, idle);
         assert!(rt.find("chat-input").is_some());
         assert!(rt.find("firstmate-page").is_none());
+    }
+
+    // Projects, from firstmate's records, and adding one with the chief of staff.
+
+    fn projects_read(s: &App) -> bool {
+        s.projects.is_some()
+    }
+
+    #[test]
+    fn a_fresh_install_has_no_projects_and_adds_them_once_it_can_chat() {
+        let lab = Lab::new();
+        let mut rt = runtime_with(fake_in_firstmate(&lab, false));
+        wait(&mut rt, projects_read);
+        assert!(!lab.data.join("home").exists(), "reading made no home");
+        assert!(rt.state.has_no_projects());
+        assert!(rt.find("projects-none").is_some());
+        assert!(rt.find("add-project-later").is_some());
+        assert!(rt.find("add-project").is_none());
+        rt.state.add_project();
+        assert!(!rt.state.adding);
+        assert!(rt.state.ws.chat.is_empty());
+        tap(&mut rt, "firstmate-install");
+        wait(&mut rt, idle);
+        assert!(rt.find("projects-empty").is_some());
+        assert!(rt.find("add-first-project").is_some());
+        assert!(rt.find("add-project").is_some());
+    }
+
+    #[test]
+    fn adding_a_project_is_a_conversation_and_the_project_appears_when_firstmate_registers_it() {
+        let lab = Lab::new();
+        let mut rt = runtime_with(fake_in_firstmate(&lab, true));
+        wait(&mut rt, projects_read);
+        assert!(rt.find("adding").is_none());
+        tap(&mut rt, "add-first-project");
+        assert!(rt.state.adding);
+        wait(&mut rt, replied);
+        assert_eq!(rt.state.ws.chat[0].text, ADD_PROJECT);
+        assert_eq!(rt.state.ws.chat[1].text, format!("You said: {ADD_PROJECT}"));
+        assert!(rt.find("projects-empty").is_none());
+        assert!(rt.find("adding").is_some());
+        // The chief of staff asked; the captain's yes goes to it in the chat.
+        tap(&mut rt, "add-yes");
+        assert_eq!(rt.state.ws.chat[2].text, "Yes.");
+        wait(&mut rt, replied);
+        assert!(rt.find("add-yes").is_some());
+        // Firstmate's procedure registered the project: it appears without a restart.
+        lab.registry("- notes [local-only] - Meeting notes (added 2026-11-13)\n");
+        wait(&mut rt, |s| !s.has_no_projects());
+        assert!(rt.find("project-notes").is_some());
+        assert!(rt.find("projects-none").is_none());
+        // The captain can add another, or stop.
+        assert!(rt.find("add-project").is_some());
+        tap(&mut rt, "add-finish");
+        assert!(!rt.state.adding);
+        assert!(rt.find("adding").is_none());
+        assert!(rt.find("projects-empty").is_none());
+    }
+
+    #[test]
+    fn choosing_a_folder_puts_its_path_in_the_draft_to_send() {
+        let mut rt = runtime_with(fake_in_firstmate(&Lab::new(), true));
+        wait(&mut rt, projects_read);
+        tap(&mut rt, "add-project");
+        wait(&mut rt, replied);
+        let sent = rt.state.ws.chat.len();
+        rt.state.picker = || Ok(Some(PathBuf::from("/Users/captain/code/notes")));
+        tap(&mut rt, "add-pick-folder");
+        wait(&mut rt, |s| !s.picking());
+        assert_eq!(rt.state.draft.text, "/Users/captain/code/notes");
+        assert_eq!(
+            rt.state.ws.chat.len(),
+            sent,
+            "nothing is sent until the captain sends it"
+        );
+        // Cancelling the dialog changes nothing; a dialog that cannot open says why.
+        rt.state.draft.clear();
+        rt.state.picker = || Ok(None);
+        tap(&mut rt, "add-pick-folder");
+        wait(&mut rt, |s| !s.picking());
+        assert!(rt.state.draft.text.is_empty());
+        rt.state.picker = || Err("Could not open a folder dialog.".into());
+        tap(&mut rt, "add-pick-folder");
+        wait(&mut rt, |s| !s.picking());
+        assert!(rt.find("add-pick-problem").is_some());
+    }
+
+    #[test]
+    fn a_registry_that_cannot_be_read_says_why_instead_of_prompting() {
+        let lab = Lab::new();
+        // A directory where the registry file belongs.
+        std::fs::create_dir_all(lab.data.join("home/data/projects.md")).unwrap();
+        let mut rt = runtime_with(fake_in_firstmate(&lab, true));
+        wait(&mut rt, projects_read);
+        assert!(!rt.state.has_no_projects());
+        assert!(rt.find("projects-problem").is_some());
+        assert!(rt.find("projects-empty").is_none());
+    }
+
+    #[test]
+    #[ignore = "uses the real Claude account and clones firstmate from GitHub"]
+    fn real_firstmate_adds_a_local_folder_as_a_project() {
+        let data = scratch("unused").join("data");
+        let folder = data.with_file_name("notes-repo");
+        std::fs::create_dir_all(&folder).unwrap();
+        let git = |args: &[&str]| {
+            let ok = std::process::Command::new("git")
+                .args(args)
+                .current_dir(&folder)
+                .status()
+                .unwrap()
+                .success();
+            assert!(ok, "git {args:?}");
+        };
+        git(&["init", "--quiet", "-b", "main"]);
+        std::fs::write(folder.join("README.md"), "Meeting notes\n").unwrap();
+        git(&["add", "-A"]);
+        git(&[
+            "-c",
+            "user.name=Lab",
+            "-c",
+            "user.email=lab@example.invalid",
+            "commit",
+            "--quiet",
+            "-m",
+            "first",
+        ]);
+        let mut firstmate = Firstmate::open(&data, firstmate::UPSTREAM);
+        let claude = Claude::new("claude")
+            .env("ANTHROPIC_MODEL", "sonnet")
+            .in_firstmate(firstmate.clone_dir(), firstmate.home_dir());
+        firstmate.install();
+        let mut rt = runtime_with(App::new(Box::new(claude), firstmate, &data));
+        wait_for(&mut rt, Duration::from_secs(120), |s| {
+            settled(s) && idle(s) && s.projects.is_some()
+        });
+        assert!(rt.state.has_no_projects());
+        tap(&mut rt, "add-first-project");
+        wait_for(&mut rt, Duration::from_secs(300), replied);
+        let answers = [
+            folder.display().to_string(),
+            "Name it notes.".to_string(),
+            "local-only, with no remote and yolo off.".to_string(),
+        ];
+        for answer in answers.iter().map(String::as_str).chain(["Yes."; 4]) {
+            if !rt.state.has_no_projects() {
+                break;
+            }
+            rt.state.draft.text = answer.into();
+            tap(&mut rt, "send");
+            wait_for(&mut rt, Duration::from_secs(300), replied);
+        }
+        wait_for(&mut rt, Duration::from_secs(10), |s| !s.has_no_projects());
+        for m in &rt.state.ws.chat {
+            eprintln!("--- {:?}\n{}", m.author, m.text);
+        }
+        let projects = rt.state.projects.clone().unwrap().unwrap();
+        eprintln!("{projects:?}");
+        eprintln!(
+            "{}",
+            std::fs::read_to_string(data.join("home/data/projects.md")).unwrap_or_default()
+        );
+        assert!(projects.iter().any(|p| p.name == "notes"), "{projects:?}");
+        assert!(rt.find("project-notes").is_some());
+    }
+
+    #[test]
+    fn the_stub_shows_no_projects_section() {
+        let rt = runtime();
+        assert!(rt.find("projects").is_none());
+        assert!(rt.find("projects-empty").is_none());
     }
 
     #[test]

@@ -28,7 +28,8 @@ cargo test --manifest-path "$root/Cargo.toml"
 for scene in chat replied empty peek signed-out signing-in signed-in expired cli-missing claude-error noted approval approval-long approved \
   approval-settings approval-by-rule approval-activity approval-corrupt \
   firstmate-missing firstmate-installing firstmate-up-to-date firstmate-update-available \
-  firstmate-modified firstmate-blocked firstmate-session firstmate-panels firstmate-answering firstmate-crew; do
+  firstmate-modified firstmate-blocked firstmate-session firstmate-panels firstmate-answering firstmate-crew \
+  projects-fresh projects-empty projects-adding projects-listed; do
   headless --scene "$scene" --snap "$out/$scene.png"
   headless --scene "$scene" --tree "$out/$scene.json"
 done
@@ -205,6 +206,32 @@ check firstmate-crew.json yes '"key": "crew-pane"'
 check firstmate-crew.json yes 'rendering peek.png'
 check firstmate-crew.json yes '"key": "peek-close"'
 check firstmate-crew.json no  '"key": "chat-input"'
+# Projects from firstmate's records: a fresh install with no home, an installed home with none,
+# adding the first one with the chief of staff, and a registry of three.
+check projects-fresh.json yes '"key": "projects-none"'
+check projects-fresh.json yes '"key": "add-project-later"'
+check projects-fresh.json yes '"key": "firstmate-page"'
+check projects-fresh.json no  '"key": "add-project"'
+check projects-empty.json yes '"key": "projects-empty"'
+check projects-empty.json yes '"text": "Add your first project"'
+check projects-empty.json yes '"key": "add-first-project"'
+check projects-empty.json yes '"key": "add-project"'
+check projects-empty.json no  '"key": "adding"'
+check projects-adding.json yes '"key": "adding"'
+check projects-adding.json yes 'I want to add a project. Follow your project-management procedure'
+check projects-adding.json yes 'You said: I want to add a project.'
+check projects-adding.json yes '"key": "add-pick-folder"'
+check projects-adding.json yes '"key": "add-yes"'
+check projects-adding.json yes '"key": "add-finish"'
+check projects-adding.json no  '"key": "projects-empty"'
+check projects-listed.json yes '"key": "project-velvet-hammer"'
+check projects-listed.json yes '"text": "no-mistakes-prod-only"'
+check projects-listed.json yes '"key": "project-notes"'
+check projects-listed.json yes '"key": "project-site"'
+check projects-listed.json yes '"key": "add-project"'
+check projects-listed.json no  '"key": "projects-empty"'
+check projects-listed.json no  '"key": "projects-none"'
+check chat.json no  '"key": "projects"'
 # The scripted run.
 check walk-sent.json yes '"text": "Ship it when CI is green."'
 check walk-sent.json yes 'Got it:'
