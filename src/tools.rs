@@ -13,8 +13,9 @@ use std::sync::Arc;
 use base64::Engine;
 use serde_json::Value;
 
-/// The largest image or video file the chat reads, and the largest image a result may carry.
-/// Rune's decoder caps the pixel size on top of this.
+/// The largest image file the chat reads, and the largest image block a result may carry.
+/// Rune's decoder caps the pixel size on top of this. Videos are not capped: the player
+/// streams the file.
 pub const MAX_MEDIA_BYTES: u64 = 32 * 1024 * 1024;
 
 /// One tool use of the chief of staff: what it called, and what came back once it has.
