@@ -24,7 +24,7 @@ cargo test --manifest-path "$root/Cargo.toml"
 
 # PNGs of each scene (`$app --list-scenes`), and the element tree of each. The sign-in scenes
 # run the app on scripts/fake-claude, so they need no Claude account.
-for scene in chat replied empty peek signed-out signing-in signed-in expired cli-missing claude-error; do
+for scene in chat replied empty peek signed-out signing-in signed-in expired cli-missing claude-error noted approval approval-long approved; do
   headless --scene "$scene" --snap "$out/$scene.png"
   headless --scene "$scene" --tree "$out/$scene.json"
 done
@@ -97,6 +97,22 @@ check cli-missing.json no  '"key": "sign-in-button"'
 check claude-error.json yes '"text": "Claude Code reported a problem"'
 check claude-error.json yes 'could not finish this turn'
 check claude-error.json yes '"key": "chat-input"'
+# The bridge: a note from the app_note tool, a tool use waiting on the captain, and the reply after
+# the captain allowed it.
+check noted.json yes '"text": "Renew the velvet-hammer.dev domain"'
+check noted.json yes '"text": "Noted by your chief of staff."'
+check noted.json yes '"key": "task-1"'
+check noted.json yes 'I noted it for you: Renew the velvet-hammer.dev domain'
+check approval.json yes '"text": "Allow Bash?"'
+check approval.json yes '"text": "command: git push"'
+check approval.json yes '"key": "answer-1-0"'
+check approval.json yes '"key": "answer-1-1"'
+check approval.json no  '"key": "needs-input-empty"'
+check approval-long.json yes '"key": "input-1-detail"'
+check approval-long.json yes '; rm -rf ~'
+check approval-long.json yes '"key": "answer-1-0"'
+check approved.json yes 'Bash was allowed to run git push'
+check approved.json yes '"key": "needs-input-empty"'
 # The scripted run.
 check walk-sent.json yes '"text": "Ship it when CI is green."'
 check walk-sent.json yes 'Got it:'

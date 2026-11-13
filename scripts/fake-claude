@@ -11,6 +11,13 @@
 # `auth login` waits until a `browser-done` file appears there (the captain approving in the
 # browser), then signs in. FAKE_CLAUDE_LOGIN=fail makes it fail instead. A message containing
 # "fail" gets an error result.
+#
+# In a chat session it calls back into the app the way the real `claude` does, with curl: a
+# message "note: TEXT" calls the `app_note` tool of the MCP server in --mcp-config, and a message
+# "run: COMMAND" asks the PreToolUse hook in --settings whether Bash may run COMMAND, then says
+# what the hook decided. "write: PATH CONTENT" asks the same about the Write tool, "big:" asks
+# about a Bash command far larger than the app will show, and "abandon: COMMAND" asks about
+# COMMAND but hangs up after a second, as Claude Code does when it stops waiting.
 set -eu
 home=${FAKE_CLAUDE_HOME:?FAKE_CLAUDE_HOME must name a scratch directory}
 state=$(cat "$home/state" 2>/dev/null || echo signed-out)
@@ -70,11 +77,62 @@ auth)
   esac
   ;;
 -p)
+  # The app passes compact JSON; these pull out the one server and the one hook it names.
+  mcp_url='' hook_url='' mcp_auth='' hook_auth=''
+  while [ $# -gt 0 ]; do
+    case $1 in
+    --mcp-config)
+      mcp_url=$(printf '%s' "$2" | sed -E 's/.*"url":"([^"]*)".*/\1/')
+      mcp_auth=$(printf '%s' "$2" | sed -E 's/.*"Authorization":"([^"]*)".*/\1/')
+      shift
+      ;;
+    --settings)
+      hook_url=$(printf '%s' "$2" | sed -E 's/.*"url":"([^"]*)".*/\1/')
+      hook_auth=$(printf '%s' "$2" | sed -E 's/.*"Authorization":"([^"]*)".*/\1/')
+      shift
+      ;;
+    esac
+    shift
+  done
+  # POSTs JSON to the app: post URL AUTH BODY. Prints the response body.
+  post() {
+    curl -sf --max-time "${4:-600}" -H 'Content-Type: application/json' -H "Authorization: $2" \
+      --data "$3" "$1"
+  }
   # stream-json in and out: one user record per line, one turn per record.
   while IFS= read -r line; do
     text=$(printf '%s' "$line" | sed -E 's/.*"content":"(([^"\\]|\\.)*)".*/\1/')
     case $text in
     *envcheck*) text="api-key:${ANTHROPIC_API_KEY:+reached} token:${ANTHROPIC_AUTH_TOKEN:+reached}" ;;
+    note:*)
+      note=${text#note: }
+      post "$mcp_url" "$mcp_auth" '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"fake-claude","version":"9.9.9"}}}' >/dev/null
+      if post "$mcp_url" "$mcp_auth" "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\"params\":{\"name\":\"app_note\",\"arguments\":{\"text\":\"$note\"}}}" | grep -q '"content"'; then
+        text="I noted it for you: $note"
+      else
+        text="the app_note tool did not answer"
+      fi
+      ;;
+    run:* | abandon:* | big:* | write:*)
+      case $text in
+      run:*) tool=Bash what=${text#run: } patience=600 input="{\"command\":\"${text#run: }\"}" ;;
+      abandon:*) tool=Bash what=${text#abandon: } patience=1 input="{\"command\":\"${text#abandon: }\"}" ;;
+      big:*) tool=Bash what=big patience=600 input="{\"command\":\"$(head -c 70000 /dev/zero | tr '\0' x)\"}" ;;
+      write:*)
+        rest=${text#write: }
+        tool=Write what=${rest%% *} patience=600 input="{\"file_path\":\"${rest%% *}\",\"content\":\"${rest#* }\"}"
+        ;;
+      esac
+      if decision=$(post "$hook_url" "$hook_auth" "{\"hook_event_name\":\"PreToolUse\",\"tool_name\":\"$tool\",\"tool_input\":$input,\"tool_use_id\":\"toolu_fake\"}" "$patience"); then
+        case $decision in
+        *'"permissionDecision":"allow"'*) text="$tool was allowed to run $what" ;;
+        *'too large to review'*) text="$tool was denied: too large to review" ;;
+        *) text="$tool was denied: $what" ;;
+        esac
+      else
+        text="the hook did not answer, so $tool was blocked"
+      fi
+      ;;
     esac
     echo '{"type":"system","subtype":"init","apiKeySource":"none","model":"fake"}'
     if [ "$state" = expired ]; then

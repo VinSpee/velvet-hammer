@@ -449,6 +449,9 @@ fn panel(key: &str, title: &str, empty: &str, rows: Vec<El>, t: Theme) -> El {
         )
 }
 
+/// The tallest the detail of a card grows before it scrolls.
+const DETAIL_MAX_H: f32 = 240.0;
+
 fn card(key: &str, item: &Item, t: Theme) -> El {
     col()
         .key(key)
@@ -463,10 +466,19 @@ fn card(key: &str, item: &Item, t: Theme) -> El {
                 .wrap(),
         )
         .child(
-            text(item.detail.clone())
-                .font(type_::LABEL)
-                .color(t.text_secondary)
-                .wrap(),
+            col()
+                .key(format!("{key}-detail"))
+                .max_h(DETAIL_MAX_H)
+                .scroll(ScrollSpec {
+                    stick_bottom: false,
+                })
+                .child(
+                    text(item.detail.clone())
+                        .font(type_::LABEL)
+                        .color(t.text_secondary)
+                        .wrap()
+                        .selectable(true),
+                ),
         )
 }
 
