@@ -29,7 +29,8 @@ for scene in chat replied empty peek signed-out signing-in signed-in expired cli
   approval-settings approval-by-rule approval-activity approval-corrupt \
   firstmate-missing firstmate-installing firstmate-up-to-date firstmate-update-available \
   firstmate-modified firstmate-blocked firstmate-session firstmate-panels firstmate-answering firstmate-crew \
-  projects-fresh projects-empty projects-adding projects-listed; do
+  projects-fresh projects-empty projects-adding projects-listed \
+  formatted formatted-all formatted-streaming tool-image tool-image-broken tool-video tool-generic tool-picture; do
   headless --scene "$scene" --snap "$out/$scene.png"
   headless --scene "$scene" --tree "$out/$scene.json"
 done
@@ -107,7 +108,9 @@ check claude-error.json yes '"key": "chat-input"'
 check noted.json yes '"text": "Renew the velvet-hammer.dev domain"'
 check noted.json yes '"text": "Noted by your chief of staff."'
 check noted.json yes '"key": "task-1"'
-check noted.json yes 'I noted it for you: Renew the velvet-hammer.dev domain'
+# The reply is formatted, so Rune's direction marks surround the domain name.
+check noted.json yes 'I noted it for you: Renew the'
+check noted.json yes 'velvet-hammer.dev'
 check approval.json yes '"text": "Allow Bash?"'
 check approval.json yes '"text": "command: git push"'
 check approval.json yes '"key": "answer-1-0"'
@@ -179,8 +182,9 @@ check firstmate-blocked.json no  '"key": "firstmate-update"'
 check firstmate-session.json yes '"key": "chat-input"'
 check firstmate-session.json yes '"key": "workplace"'
 check firstmate-session.json yes 'Running firstmate from'
-check firstmate-session.json yes '/data/firstmate FM_HOME='
-check firstmate-session.json yes '/data/home"'
+check firstmate-session.json yes '/data/firstmate'
+check firstmate-session.json yes 'FM_HOME='
+check firstmate-session.json yes '/data/home'
 check firstmate-session.json no  '"key": "firstmate-page"'
 # The panel fed from firstmate's records: two captain holds and a merge approval.
 check firstmate-panels.json yes '"key": "hold-lab-window-size"'
@@ -232,6 +236,36 @@ check projects-listed.json yes '"key": "add-project"'
 check projects-listed.json no  '"key": "projects-empty"'
 check projects-listed.json no  '"key": "projects-none"'
 check chat.json no  '"key": "projects"'
+# The chief of staff's Markdown, formatted: the screenshot's headings bold on their own lines with
+# no asterisks, every construct, HTML shown as text, and a reply still arriving with its bold
+# unclosed.
+check formatted.json yes '"key": "msg-2-text"'
+check formatted.json yes '"text": "Recently Landed\nNo recent completions are in the current baseline."'
+check formatted.json no  '**'
+check formatted-all.json yes '"text": "Heading one"'
+check formatted-all.json yes '"text": "Nested bullet"'
+check formatted-all.json yes '"text": "A quoted line."'
+check formatted-all.json yes 'println!(\"hello\");'
+check formatted-all.json yes 'alert(1)</script>'
+check formatted-all.json no  '~~'
+check formatted-streaming.json yes '"text": "The fleet is empty: nothing"'
+check formatted-streaming.json no  '**'
+# Tool uses: an image inline, one that cannot be decoded, a video with its actions, a command's
+# output unfolded, and an image enlarged.
+check tool-image.json yes '"key": "tool-2-image"'
+check tool-image.json yes '"text": "Read"'
+check tool-image.json no  '"key": "tool-2-placeholder"'
+check tool-image-broken.json yes '"key": "tool-2-placeholder"'
+check tool-image-broken.json yes 'broken.png. It could not be decoded'
+check tool-video.json yes '"key": "tool-2-video"'
+check tool-video.json yes '"key": "tool-2-play"'
+check tool-video.json yes '"text": "Open in your video player"'
+check tool-generic.json yes '"text": "Bash"'
+check tool-generic.json yes '"key": "tool-2-result"'
+check tool-generic.json yes '"text": "one\ntwo\nthree"'
+check tool-picture.json yes '"key": "picture"'
+check tool-picture.json yes '"key": "picture-close"'
+check tool-picture.json no  '"key": "chat-input"'
 # The scripted run.
 check walk-sent.json yes '"text": "Ship it when CI is green."'
 check walk-sent.json yes 'Got it:'

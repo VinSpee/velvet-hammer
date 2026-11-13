@@ -44,6 +44,15 @@ The window has three columns:
   projects yet, a card above the conversation explains them and offers **Add a project**; while
   you add one, a row above the message field offers **Choose a folder…**, **Yes**, **No** and
   **Done adding**.
+  The chief of staff's messages are Markdown, shown formatted: bold, italic, strikethrough,
+  inline code and code blocks, headings, lists, block quotes and links. A line break shows as
+  written, HTML shows as text, and a reply still arriving never shows a half-written marker. A link
+  opens in your default browser when you press it, and only `http`, `https` and `mailto` links
+  open. Your own messages and error lines show as written.
+  Each tool use the chief of staff makes appears where it happened: an image it read or made
+  shows inline (press it to see it larger), a video file plays inline with **Play** and
+  **Open in your video player**, and any other tool shows its name, its main argument and its
+  result folded behind a button. See [Tool calls in the chat](docs/tool-calls.md).
 - **Needs your input** and **For you to do** (right): questions the agents are waiting on, each
   with answer buttons, and steps only you can take, each with a **Done** button.
 
@@ -71,7 +80,13 @@ The window has three columns:
   `bin/fm-bearings-snapshot.sh --json` whenever the records change.
 - `scripts/fake-claude`: a stand-in for `claude` that speaks the same protocol without an account.
   Tests and the sign-in scenes run the app on it.
-- `src/view.rs`: the Rune view. Every element a test or script reaches has a key.
+- `src/tools.rs`: the chief of staff's tool uses and the registry that picks how each is drawn,
+  keyed on the Model Context Protocol's content types and the Agent Client Protocol's tool kinds
+  (see [docs/tool-calls.md](docs/tool-calls.md)).
+- `src/markdown.rs`: prepares the chief of staff's Markdown for Rune's Markdown view, keeping
+  line breaks and showing HTML as text.
+- `src/view.rs`: the Rune view, with the tool-use views in `src/view/tool.rs`. Every element a
+  test or script reaches has a key.
 - `src/main.rs`: the `App` state (workspace, chief of staff, sign-in status, firstmate clone,
   message draft, what the middle column shows), the headless scenes, and the tests.
 
@@ -255,10 +270,19 @@ It writes these files to `OUT_DIR`:
 | `projects-empty.png`, `projects-empty.json` | An installed home with no projects: the prompt to add the first one |
 | `projects-adding.png`, `projects-adding.json` | After **Add a project**: the request in the chat, the reply and the add controls |
 | `projects-listed.png`, `projects-listed.json` | Three projects from firstmate's registry |
+| `formatted.png`, `formatted.json` | A reply that once showed raw `**` asterisks, formatted |
+| `formatted-all.png`, `formatted-all.json` | Every Markdown construct the chat formats, and HTML shown as text |
+| `formatted-streaming.png`, `formatted-streaming.json` | A reply still arriving, with its bold not yet closed |
+| `tool-image.png`, `tool-image.json` | An image the Read tool returned, inline |
+| `tool-image-broken.png`, `tool-image-broken.json` | An image that cannot be decoded: its path and why |
+| `tool-video.png`, `tool-video.json` | A video file, with its poster frame, **Play** and **Open in your video player** |
+| `tool-generic.png`, `tool-generic.json` | A Bash command with its output unfolded |
+| `tool-picture.png`, `tool-picture.json` | An image from the chat, enlarged |
 | `walk-sent.json` | `scripts/walkthrough.json` after typing and sending a message |
 | `walk-end.png`, `walk-end.json` | The same script after answering an item, finishing the task and opening a peek |
 
-The first four scenes and `approval-settings` use the stub. The sign-in scenes run the app on `scripts/fake-claude`, so
+The first four scenes, `approval-settings` and the `formatted` scenes use the stub; the `tool`
+scenes have the fake `claude` use Read and Bash on the files in `scripts/fixtures`. The sign-in scenes run the app on `scripts/fake-claude`, so
 they need no Claude account; each waits for the fake's real processes before rendering. The
 firstmate and projects scenes run `git` on a scratch upstream repository under `target/`, so
 they need no network; the projects scenes write the registry firstmate's procedure would write,
