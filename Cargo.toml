@@ -1,0 +1,19 @@
+[package]
+name = "velvet-hammer"
+version = "0.1.0"
+edition = "2024"
+license = "UNLICENSED"
+publish = false
+
+[dependencies]
+# Rune is pinned to a rev of its `dev` branch, which is never rewritten. Bump all five revs together.
+rune = { git = "https://github.com/anomalyco/rune", rev = "f3be67ace9631ea95565b5263f7aa7c9dd73cdb4", features = ["tooling"] }
+
+# Rune patches these crates in its own workspace; a dependency's [patch] does not reach this one,
+# so the app repeats Rune's [patch.crates-io] table from the same rev (see Rune's README,
+# "Depending on Rune").
+[patch.crates-io]
+winit = { git = "https://github.com/anomalyco/rune", rev = "f3be67ace9631ea95565b5263f7aa7c9dd73cdb4" }
+parley_engine = { git = "https://github.com/anomalyco/rune", rev = "f3be67ace9631ea95565b5263f7aa7c9dd73cdb4" }
+wgpu-hal = { git = "https://github.com/anomalyco/rune", rev = "f3be67ace9631ea95565b5263f7aa7c9dd73cdb4" }
+accesskit_windows = { git = "https://github.com/anomalyco/rune", rev = "f3be67ace9631ea95565b5263f7aa7c9dd73cdb4" }

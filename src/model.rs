@@ -1,0 +1,120 @@
+//! The app's data: one chief-of-staff conversation, the items waiting on the captain, and the
+//! subagents the chief of staff manages. Everything the view draws comes from a [`Workspace`],
+//! and every change the captain makes is an [`Action`] applied to it.
+
+pub type Id = u32;
+
+/// Who wrote a message: the captain, the chief of staff, or a subagent (in a peek transcript).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Author {
+    Captain,
+    ChiefOfStaff,
+    Subagent,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Message {
+    pub author: Author,
+    pub text: String,
+}
+
+impl Message {
+    pub fn new(author: Author, text: impl Into<String>) -> Self {
+        Message {
+            author,
+            text: text.into(),
+        }
+    }
+}
+
+/// What an item asks of the captain.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ItemKind {
+    /// The agent is blocked until the captain picks one of these answers.
+    NeedsInput { options: Vec<String> },
+    /// A step only the captain can take; the agent waits for it to be marked done.
+    ForYou,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Item {
+    pub id: Id,
+    pub kind: ItemKind,
+    pub title: String,
+    pub detail: String,
+    /// The subagent that raised it, if any; otherwise the chief of staff did.
+    pub agent: Option<Id>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AgentStatus {
+    Working,
+    Waiting,
+    Done,
+}
+
+impl AgentStatus {
+    pub fn label(self) -> &'static str {
+        match self {
+            AgentStatus::Working => "working",
+            AgentStatus::Waiting => "waiting",
+            AgentStatus::Done => "done",
+        }
+    }
+}
+
+/// A subagent the chief of staff delegated to. The captain can peek at its transcript.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Agent {
+    pub id: Id,
+    pub name: String,
+    pub task: String,
+    pub status: AgentStatus,
+    pub transcript: Vec<Message>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Workspace {
+    pub chat: Vec<Message>,
+    pub items: Vec<Item>,
+    pub agents: Vec<Agent>,
+}
+
+/// Something the captain did.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Action {
+    Say(String),
+    Answer { item: Id, choice: String },
+    Done { item: Id },
+}
+
+impl Workspace {
+    pub fn needs_input(&self) -> impl Iterator<Item = &Item> {
+        self.items
+            .iter()
+            .filter(|i| matches!(i.kind, ItemKind::NeedsInput { .. }))
+    }
+
+    pub fn for_you(&self) -> impl Iterator<Item = &Item> {
+        self.items.iter().filter(|i| i.kind == ItemKind::ForYou)
+    }
+
+    pub fn item(&self, id: Id) -> Option<&Item> {
+        self.items.iter().find(|i| i.id == id)
+    }
+
+    pub fn agent(&self, id: Id) -> Option<&Agent> {
+        self.agents.iter().find(|a| a.id == id)
+    }
+
+    /// Records the captain's side of `action`: what they said goes into the chat, and an
+    /// answered or finished item leaves its panel. The agent layer replies separately.
+    pub fn apply(&mut self, action: &Action) {
+        match action {
+            Action::Say(text) => self.chat.push(Message::new(Author::Captain, text.clone())),
+            Action::Answer { item, .. } | Action::Done { item } => {
+                self.items.retain(|i| i.id != *item)
+            }
+        }
+    }
+}

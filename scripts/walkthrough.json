@@ -1,0 +1,10 @@
+{"events": [
+  {"t": 0.1, "type": "tap", "key": "chat-input"},
+  {"t": 0.3, "type": "type", "text": "Ship it when CI is green."},
+  {"t": 1.6, "type": "key", "name": "Enter"},
+  {"t": 1.8, "type": "mark", "name": "sent"},
+  {"t": 2.2, "type": "tap", "key": "answer-1-0"},
+  {"t": 2.6, "type": "tap", "key": "done-3"},
+  {"t": 3.0, "type": "tap", "key": "agent-2"},
+  {"t": 3.6, "type": "mark", "name": "end"}
+]}
