@@ -179,6 +179,10 @@ fn serve(
             _ => {}
         }
     }
+    // Read the body before any reply: closing with unread bytes resets the connection and can
+    // discard the response.
+    let mut body = vec![0; if length <= MAX_BODY { length } else { 0 }];
+    reader.read_exact(&mut body)?;
     let reply = if !authorized {
         Reply::Status(401, "Unauthorized")
     } else if origin {
@@ -189,8 +193,6 @@ fn serve(
     } else if length > MAX_BODY {
         Reply::Status(413, "Content Too Large")
     } else {
-        let mut body = vec![0; length];
-        reader.read_exact(&mut body)?;
         match (path.as_str(), serde_json::from_slice::<Value>(&body)) {
             ("/mcp", Ok(request)) => mcp(&request, on_call).map_or(Reply::Accepted, Reply::Json),
             ("/hooks/pre-tool-use", Ok(input)) => {
