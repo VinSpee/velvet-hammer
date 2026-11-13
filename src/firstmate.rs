@@ -356,8 +356,14 @@ fn conflicts(clone: &Path) -> Result<Vec<String>, String> {
 }
 
 fn install(clone: &Path, url: &str) -> Result<(), String> {
-    if clone.exists() {
+    if clone.join(".git").exists() {
         return Ok(());
+    }
+    if clone.exists() {
+        return Err(format!(
+            "{} already exists and is not a git clone",
+            clone.display()
+        ));
     }
     let data = clone
         .parent()
@@ -538,6 +544,27 @@ mod tests {
                 .is_some_and(|p| p.contains("/nonexistent/firstmate"))
         );
         assert!(!lab.clone_dir().exists());
+    }
+
+    #[test]
+    fn install_refuses_a_path_that_exists_but_is_not_a_clone() {
+        let lab = Lab::new();
+        let squatter = lab.clone_dir();
+        std::fs::create_dir_all(&squatter).unwrap();
+        std::fs::write(squatter.join("notes.txt"), "mine").unwrap();
+        let mut fm = lab.firstmate();
+        fm.install();
+        finish(&mut fm);
+        assert_eq!(fm.distro(), &Distro::Missing);
+        assert!(
+            fm.problem()
+                .is_some_and(|p| p.contains("not a git clone") && p.contains("firstmate"))
+        );
+        assert_eq!(
+            std::fs::read_to_string(squatter.join("notes.txt")).unwrap(),
+            "mine"
+        );
+        assert_eq!(std::fs::read_dir(&squatter).unwrap().count(), 1);
     }
 
     #[test]
