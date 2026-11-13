@@ -6,7 +6,8 @@ use std::path::Path;
 
 use rune::Waker;
 
-use crate::approval::{Entry, Policy};
+use crate::approval::Entry;
+use crate::bridge::Policies;
 use crate::model::{
     Action, Agent, AgentStatus, Author, Id, Item, ItemKind, Message, Plan, Status, Workspace,
 };
@@ -42,6 +43,8 @@ pub enum Event {
     Withdrawn(Id),
     /// A tool use and what was decided, for the activity log.
     Activity(Entry),
+    /// Something Velvet Hammer itself did in the conversation, shown in the chat in its words.
+    Notice(String),
 }
 
 pub trait ChiefOfStaff {
@@ -63,8 +66,9 @@ pub trait ChiefOfStaff {
     fn workplace(&self) -> Option<&Path> {
         None
     }
-    /// The captain's tool-approval settings, shared so a change applies at once.
-    fn approve_with(&mut self, _policy: Policy) {}
+    /// The captain's tool-approval, visual-replies and firstmate-rule settings, shared so a
+    /// change applies at once.
+    fn approve_with(&mut self, _policies: Policies) {}
 }
 
 /// Simulated chief of staff: fixed starting data and canned replies.

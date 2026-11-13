@@ -16,7 +16,12 @@ firstmate, with its own operational home (see
 approval, read from firstmate's own records, together with the tool uses waiting for your
 approval. Which tool uses wait for you is a setting: by default, as recommended, the chief of
 staff runs its tools without asking and every tool use is logged (see
-[Tool approval](#tool-approval)). **For you to do** shows the notes Claude Code adds with the app's `app_note` tool. The
+[Tool approval](#tool-approval)). Ahead of that setting, the same hook enforces the firstmate rules
+a tool call shows: a merge, a forced push, a teardown that discards work, a write into a project
+or a publish is denied or waits for your word (see
+[Firstmate's rules, enforced by hook](docs/firstmate-rules.md)). The chief of staff shows status
+digests, lists, choices and tables as views by default, and a reply of that kind that arrives as
+text is sent back once for a view (see [Visual replies](docs/visual-replies.md)). **For you to do** shows the notes Claude Code adds with the app's `app_note` tool. The
 agents list shows the tasks firstmate has in flight, and selecting one shows that crewmate's
 terminal. The **Projects** list shows the projects in firstmate's records, and **Add project**
 starts a guided conversation in which the chief of staff adds one with firstmate's own procedure;
@@ -36,8 +41,8 @@ The window has three columns:
   transcript in place of the chat; **Back to chat** closes it. Under them, **Projects** lists the
   projects in firstmate's records with **Add project**. A **Firstmate** card at the bottom
   shows the state of the managed firstmate clone and opens a page for installing and updating it.
-  A **Tool approval** card above it shows the approval mode and opens the settings page, which
-  links to the activity log.
+  Above it, **Visual replies**, **Firstmate rules** and **Tool approval** cards show each
+  setting in a few words and open its page; the tool-approval page links to the activity log.
 - **Chief of staff** (middle): the conversation, with a message field and a **Send** button. A
   line under the heading says what runs it, such as "Claude Code · signed in with your Claude Max
   plan". When Claude Code is not ready, a sign-in screen takes the conversation's place. With no
@@ -72,13 +77,20 @@ The window has three columns:
   replies, problems). `Stub` simulates it for headless scenes and tests.
 - `src/claude.rs`: `Claude`, the chief of staff on the user's own Claude Code. It runs only the
   `claude` command, as described below.
-- `src/bridge.rs`: the server the chat session's `claude` calls back into: two MCP tools and one
-  PreToolUse hook (see [docs/extending.md](docs/extending.md)).
+- `src/bridge.rs`: the server the chat session's `claude` calls back into: two MCP tools and three
+  hooks, PreToolUse, UserPromptSubmit and Stop (see [docs/extending.md](docs/extending.md)).
 - `src/firstmate.rs`: `Firstmate`, the managed firstmate clone. It runs `git` to install the
   clone, compare it with upstream and update it, and never discards a local change. Its `lab`
   module builds scratch git repositories for tests and scenes.
-- `src/approval.rs`: the tool-approval settings (a mode and custom rules), the file they are
-  saved in, the decision the hook makes for each tool use, and the activity log.
+- `src/approval.rs`: the tool-approval settings (a mode and custom rules), the decision the hook
+  makes for each tool use, and the activity log.
+- `src/guard.rs`: firstmate's rules the PreToolUse hook enforces, each matching one tool-call
+  shape (see [docs/firstmate-rules.md](docs/firstmate-rules.md)).
+- `src/visual.rs`: visual replies: the mode, the shapes of reply that read better as a view, the
+  standing instruction and the stop check with its retry cap (see
+  [docs/visual-replies.md](docs/visual-replies.md)).
+- `src/store.rs`: a settings file in the data directory, written whole and shared with the hooks;
+  tool approval, visual replies and firstmate's rules each keep one.
 - `src/projects.rs`: the projects in firstmate's records (its registry `data/projects.md` and
   the clones under `projects/`), re-read every two seconds, and the system folder dialog the add
   flow uses.
@@ -94,8 +106,9 @@ The window has three columns:
   [docs/json-render.md](docs/json-render.md)).
 - `src/markdown.rs`: prepares the chief of staff's Markdown for Rune's Markdown view, keeping
   line breaks and showing HTML as text.
-- `src/view.rs`: the Rune view, with the tool-use views in `src/view/tool.rs` and the
-  json-render views in `src/view/ui.rs`. Every element a
+- `src/view.rs`: the Rune view, with the tool-use views in `src/view/tool.rs`, the
+  json-render views in `src/view/ui.rs`, and the visual-replies and firstmate-rules pages in
+  `src/view/policy.rs`. Every element a
   test or script reaches has a key.
 - `src/main.rs`: the `App` state (workspace, chief of staff, sign-in status, firstmate clone,
   message draft, what the middle column shows), the headless scenes, and the tests.
@@ -122,9 +135,11 @@ talks to Anthropic:
   starts as firstmate (see [The managed firstmate clone](docs/firstmate.md)).
 - **Tools and hooks.** The chat session also gets `--mcp-config` and `--settings` flags that point
   at a server the app runs on `127.0.0.1` for that session only. Its `app_note` tool adds a note
-  to **For you to do**, its `app_ui` tool shows a view in the chat, and its PreToolUse hook applies your [tool-approval](#tool-approval)
-  settings to every tool use: it runs it, refuses it, or asks you in **Needs your input**. Your
-  Claude settings files are not changed. See
+  to **For you to do**, its `app_ui` tool shows a view in the chat, and its PreToolUse hook applies
+  [firstmate's rules](docs/firstmate-rules.md) and your [tool-approval](#tool-approval) settings
+  to every tool use: it runs it, refuses it, or asks you in **Needs your input**. Its
+  UserPromptSubmit and Stop hooks carry [visual replies](docs/visual-replies.md). Your Claude
+  settings files are not changed. See
   [docs/extending.md](docs/extending.md), which also covers skills, subagents, the Agent SDK and
   what Anthropic's terms say.
 - **Subscription only.** If `claude auth status` reports a sign-in method other than `claude.ai`
@@ -157,7 +172,8 @@ check the terms again for that case.
 
 Every tool use of the chief of staff goes through the app's PreToolUse hook, which decides it
 with settings you choose on the **Tool approval** page (the card above **Firstmate** in the
-agents column):
+agents column). While the chief of staff runs as firstmate, [firstmate's rules](docs/firstmate-rules.md)
+are checked first; a rule's deny is final, and its question is asked whatever these settings say.
 
 - **Mode.** **Run without asking** (recommended, and what a fresh install uses): the chief of
   staff will edit files, run commands and use tools without stopping for you, and every tool use
@@ -194,8 +210,9 @@ agents column):
 No setting changes the app's fixed limits: it never reads or stores your Claude sign-in, it
 always removes `ANTHROPIC_API_KEY` and `ANTHROPIC_AUTH_TOKEN` from `claude`'s environment, and it
 never pushes, publishes or merges anything itself. In **Run without asking** the chief of staff
-can run `git push` or `gh pr merge` like any other command; add an ask or deny rule for any
-command you want to see first.
+runs any command that no firstmate rule matches; with the firstmate rules on, as they are by
+default, a push or a merge through firstmate's script waits for you, and `gh pr merge` or a forced
+push is denied. Add an ask or deny rule for any other command you want to see first.
 
 ### Trying the real sign-in
 
@@ -294,11 +311,19 @@ It writes these files to `OUT_DIR`:
 | `view-action.png`, `view-action.json` | After **Send the list**: what you did in the chat, and the reply to the submit |
 | `view-unknown.png`, `view-unknown.json` | A view naming a component the catalog lacks, shown as a placeholder |
 | `view-too-large.png`, `view-too-large.json` | A view over the element limit, refused with why |
+| `visuals-settings.png`, `visuals-settings.json` | The Visual replies page: Enforce recommended, the shapes, the instruction and an example |
+| `visuals-enforced.png`, `visuals-enforced.json` | A list the fake sent as text, sent back once by the stop hook and shown as a view |
+| `visuals-capped.png`, `visuals-capped.json` | A reply that ignored the feedback, sent back only once |
+| `rules-settings.png`, `rules-settings.json` | The Firstmate rules page after a forced push was denied and a merge was asked about and allowed |
+| `rules-merge-ask.png`, `rules-merge-ask.json` | A merge through firstmate's script waiting for you, naming the pull request |
+| `rules-project-ask.png`, `rules-project-ask.json` | A write into a project waiting for you, naming the file |
 | `walk-sent.json` | `scripts/walkthrough.json` after typing and sending a message |
 | `walk-end.png`, `walk-end.json` | The same script after answering an item, finishing the task and opening a peek |
 
-The first four scenes, `approval-settings`, the `formatted` scenes and the `view` scenes use
-the stub; the `tool`
+The first four scenes, `approval-settings`, the `formatted` scenes, the `view` scenes and
+`visuals-settings` use the stub; the other `visuals` scenes have the fake `claude` call the prompt
+and stop hooks; the `rules` scenes run the fake `claude` as firstmate in a scratch clone under
+`/tmp/velvet-hammer`; the `tool`
 scenes have the fake `claude` use Read and Bash on the files in `scripts/fixtures`. The sign-in scenes run the app on `scripts/fake-claude`, so
 they need no Claude account; each waits for the fake's real processes before rendering. The
 firstmate and projects scenes run `git` on a scratch upstream repository under `target/`, so

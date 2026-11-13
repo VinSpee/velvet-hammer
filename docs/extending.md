@@ -16,8 +16,13 @@ that one `claude -p` process with two flags. Nothing is written to the user's Cl
   It has two tools. `app_note` adds a note to the **For you to do** panel; marking the note
   done tells the chief of staff which note it was. `app_ui` shows a json-render view in the chat
   (see [Views in the chat](json-render.md)).
-- **A hook.** `--settings` adds an HTTP `PreToolUse` hook for every tool, including the app's
-  own. It decides each tool use with the tool-approval settings (`src/approval.rs`, described in
+- **Hooks.** `--settings` adds three HTTP hooks. The `UserPromptSubmit` and `Stop` hooks carry
+  [visual replies](visual-replies.md): a standing instruction to show digests, lists, choices and
+  tables as views, and a check that sends such a reply back once when it arrives as text. The
+  `PreToolUse` hook covers every tool, including the app's own. While the chief of staff runs as
+  firstmate it first applies [firstmate's rules](firstmate-rules.md), which deny or ask about
+  merges, forced pushes, discarding teardowns, writes into projects and publishing. It then
+  decides each tool use with the tool-approval settings (`src/approval.rs`, described in
   the README's [Tool approval](../README.md#tool-approval) section): a mode, **Run without
   asking** by default, and custom allow, ask and deny rules on top of it. An allowed or denied
   tool use gets its answer at once, with a reason that names the mode or the rule. A tool use
@@ -39,7 +44,11 @@ The sign-in guarantees are unchanged: the app still strips `ANTHROPIC_API_KEY` a
 `ANTHROPIC_AUTH_TOKEN` from every `claude` it starts, and it never reads or stores a credential.
 
 `scripts/fake-claude` calls the server the same way the real `claude` does, so `cargo test` and
-`scripts/verify.sh` cover both paths, every approval mode and the rules without an account. One
+`scripts/verify.sh` cover both paths, every approval mode, the rules, firstmate's rules and the
+visual-replies hooks without an account. The ignored test `real_claude_shows_a_list_as_a_view`
+ran on 2026-11-13 against Claude Code 2.1.311: the `UserPromptSubmit` and `Stop` hooks passed with
+`--settings` were called, and the `Stop` hook's `additionalContext` continued the turn into a
+view (see [Visual replies](visual-replies.md#verified)). One
 ignored test, `cargo test real_claude -- --ignored`, sends one short message to the real
 `claude` on the Haiku model in **Ask every time**. On Claude Code 2.1.311, before the approval
 settings existed, it passed: `claude` accepted both flags, the hook asked about Claude Code's

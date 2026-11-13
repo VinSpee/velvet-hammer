@@ -146,6 +146,11 @@ Limits of the headless session:
   `PreToolUse` command guards are separate hooks, and this setting does not change them. Choosing **Ask every time** puts each of firstmate's
   script runs in **Needs your input**; see the README's
   [Tool approval](../README.md#tool-approval) section for the modes and rules.
+- **Firstmate's hard rules are also enforced by the app's hook.** Ahead of the tool-approval
+  setting, the hook denies a merge around firstmate's merge script, an admin-bypass merge and a
+  forced push, and asks you about every merge, a forced teardown, a write into a project and a
+  push or publish, whatever the mode. See [Firstmate's rules, enforced by hook](firstmate-rules.md)
+  for each rule, its switch, and what a hook cannot enforce.
 - **Firstmate's companion tools are yours to install.** The digest lists any that are missing
   (`tasks-axi`, `treehouse`, `no-mistakes`, `gh`, `tmux` and others), and the chief of staff will
   tell you.
@@ -190,7 +195,9 @@ take into **For you to do** with `app_note`.
 records your exact words with its own command, `bin/fm-captain-hold.sh answer`, and the hold
 leaves the panel when firstmate's records say it is closed. **Approve** on a merge sends "I
 approve merging *url* (task *task-id*)." the same way, and firstmate checks the pull request
-again before it merges.
+again before it merges. When firstmate then runs its merge script, the rule **Every merge waits
+for your word** asks once more in **Needs your input**, naming the pull request, because the hook
+cannot read your approval in the chat (see [Firstmate's rules](firstmate-rules.md)).
 
 The app does not call `fm-captain-hold.sh answer` or the keyed-answer intake
 (`fm-captain-hold.sh answers`) itself, for two reasons taken from that script and firstmate's

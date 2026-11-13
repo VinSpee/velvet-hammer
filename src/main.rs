@@ -8,12 +8,15 @@ mod bearings;
 mod bridge;
 mod claude;
 mod firstmate;
+mod guard;
 mod markdown;
 mod model;
 mod projects;
+mod store;
 mod tools;
 mod ui;
 mod view;
+mod visual;
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -44,6 +47,12 @@ pub struct App {
     pub form: approval::Form,
     /// Every tool use and what was decided.
     pub activity: Activity,
+    /// Whether the chief of staff is steered towards views, and how firmly.
+    pub visuals: store::Store<visual::Mode>,
+    /// The reply typed on the visual-replies page to see what the check makes of it.
+    pub visual_example: TextEdit,
+    /// Which of firstmate's rules the hook enforces.
+    pub rules: store::Store<guard::Settings>,
     /// Keeps `captain` current from firstmate's records, when the chief of staff is firstmate.
     watcher: Option<bearings::Watcher>,
     /// What firstmate's records say waits on the captain.
@@ -113,6 +122,10 @@ pub enum Showing {
     Approvals,
     /// The activity log of tool uses.
     Activity,
+    /// The visual-replies setting.
+    Visuals,
+    /// Firstmate's rules the hook enforces, and what each did lately.
+    Rules,
     /// One image from the chat, enlarged, by its tool use's id.
     Picture(String),
 }
@@ -127,7 +140,13 @@ impl App {
             .workplace()
             .map(|_| projects::Watcher::start(&firstmate.home_dir()));
         let approvals = Store::open(data);
-        chief.approve_with(approvals.policy());
+        let visuals = store::Store::<visual::Mode>::open(data);
+        let rules = store::Store::<guard::Settings>::open(data);
+        chief.approve_with(bridge::Policies {
+            approval: approvals.shared(),
+            visual: visuals.shared(),
+            rules: rules.shared(),
+        });
         let window_wake: Arc<OnceLock<Waker>> = Arc::new(OnceLock::new());
         let media_wake: Waker = Arc::new({
             let slot = window_wake.clone();
@@ -145,6 +164,9 @@ impl App {
             approvals,
             form: approval::Form::default(),
             activity: Activity::open(data),
+            visuals,
+            visual_example: TextEdit::new(visual::EXAMPLE),
+            rules,
             watcher,
             captain: Bearings::default(),
             captain_problem: None,
@@ -236,6 +258,7 @@ impl App {
             Event::Item(item) => self.ws.items.push(item),
             Event::Withdrawn(id) => self.ws.items.retain(|i| i.id != id),
             Event::Activity(entry) => self.activity.record(entry),
+            Event::Notice(text) => self.ws.chat.push(Message::new(Author::App, text)),
             // A view tool use arrives first as it starts streaming, then whole.
             Event::Tool(tool) => {
                 let id = tool.id.clone();
@@ -1013,12 +1036,77 @@ fn main() {
                 *s = viewing(spec("ui-unknown.json"), true)
             }),
             ("view-too-large", |s| *s = viewing(too_large(), true)),
+            // Visual replies: the settings page, a list the fake sent as text that was sent back
+            // once and shown as a view, and a reply that ignored the feedback, sent back once.
+            ("visuals-settings", |s| {
+                *s = stub();
+                s.showing = Showing::Visuals;
+            }),
+            ("visuals-enforced", |s| {
+                *s = fake_in(Mode::Run);
+                say_until(s, LIST, "Shown above.");
+            }),
+            ("visuals-capped", |s| {
+                *s = fake_in(Mode::Run);
+                say_until(
+                    s,
+                    "stubborn: Merge the docs PR, Renew the domain, Answer the question",
+                    "Left as text.",
+                );
+            }),
+            // Firstmate's rules, on the fake `claude` running as firstmate: the page after a
+            // forced push was denied and a merge was asked about and allowed, the merge question,
+            // and a write into a project.
+            ("rules-settings", |s| {
+                *s = rules_lab("rules-settings");
+                say(s, "run: git push --force origin main");
+                s.draft.text = format!("run: {MERGE}");
+                s.send();
+                s.settle(|s| s.ws.needs_input().next().is_some());
+                let item = s.ws.needs_input().next().map(|i| i.id).unwrap();
+                s.act(Action::Answer {
+                    item,
+                    choice: "Allow".into(),
+                });
+                s.settle(replied);
+                s.showing = Showing::Rules;
+            }),
+            ("rules-merge-ask", |s| {
+                *s = rules_lab("rules-merge-ask");
+                s.draft.text = format!("run: {MERGE}");
+                s.send();
+                s.settle(|s| s.ws.needs_input().next().is_some());
+            }),
+            ("rules-project-ask", |s| {
+                *s = rules_lab("rules-project-ask");
+                let file = s.firstmate.home_dir().join("projects/site/README.md");
+                s.draft.text = format!("write: {} Hello", file.display());
+                s.send();
+                s.settle(|s| s.ws.needs_input().next().is_some());
+            }),
         ],
         min_size: Some((900.0, 560.0)),
         setup: Some(setup),
         poll: Some(poll),
         ..AppSpec::new("Velvet Hammer", (1100.0, 720.0), init, view::view)
     });
+}
+
+/// The list the visual-replies scenes and tests have the fake send as text.
+const LIST: &str = "list: Merge the docs PR, Renew the domain, Answer the window-size question";
+
+/// A merge through firstmate's script, which its rules ask the captain about.
+const MERGE: &str = "bin/fm-pr-merge.sh site-docs https://github.com/captain/site/pull/7";
+
+/// The fake `claude` running as firstmate in a lab under `/tmp/velvet-hammer/NAME`, so the
+/// screenshots show a short path that names no one's home directory, with three projects
+/// registered.
+fn rules_lab(name: &str) -> App {
+    let lab = Lab::at(&Path::new("/tmp/velvet-hammer").join(name));
+    lab.registry(projects::SAMPLE_REGISTRY);
+    let mut app = fake_in_firstmate(&lab, true);
+    app.settle(|s| s.projects.as_ref().is_some_and(|p| p.is_ok()) && !s.has_no_projects());
+    app
 }
 
 /// Rules for the tool-approval scenes: ask before any push, never force one, and allow edits
@@ -1215,6 +1303,14 @@ fn say(s: &mut App, text: &str) {
     s.settle(replied);
 }
 
+/// Sends `text` and waits until the chief of staff's last words are `end`, for turns the stop
+/// hook continues past a first reply.
+fn say_until(s: &mut App, text: &str, end: &str) {
+    s.draft.text = text.into();
+    s.send();
+    s.settle(|s| s.replying.is_none() && s.ws.chat.last().is_some_and(|m| m.text == end));
+}
+
 /// A command whose dangerous part sits far past where a short preview would have cut it off.
 fn long_command() -> String {
     format!("echo {}; rm -rf ~", "a harmless-looking prefix ".repeat(20))
@@ -1242,6 +1338,10 @@ mod tests {
     }
 
     fn tap(rt: &mut Runtime<App>, key: &str) {
+        // Lets any transition finish first, so the element is where the pointer goes.
+        for _ in 0..30 {
+            rt.frame(1.0 / 60.0);
+        }
         let (x, y) = rt
             .find(key)
             .unwrap_or_else(|| panic!("no element keyed {key}"));
@@ -2450,6 +2550,40 @@ mod tests {
         assert_eq!(note.title, "bridge check");
     }
 
+    /// The real `claude` on the Haiku model, with visual replies enforced: a list asked for as
+    /// plain text is shown as a view, either at once because of the standing instruction or
+    /// after the stop hook sends it back. Run it with `cargo test real_claude -- --ignored`.
+    #[test]
+    #[ignore = "uses the real Claude account"]
+    fn real_claude_shows_a_list_as_a_view() {
+        let claude = Claude::new("claude").env("ANTHROPIC_MODEL", "haiku");
+        let mut rt = runtime_with(App::new(
+            Box::new(claude),
+            installed_firstmate(),
+            &scratch("unused"),
+        ));
+        wait(&mut rt, settled);
+        assert!(matches!(rt.state.status, Status::Ready(_)), "not signed in");
+        assert_eq!(*rt.state.visuals.settings(), visual::Mode::Enforce);
+        rt.state.draft.text = "Name three fruits I could buy today, as a short list.".into();
+        tap(&mut rt, "send");
+        let viewed = |s: &App| {
+            s.ws.chat.iter().any(|m| {
+                m.tool
+                    .as_ref()
+                    .is_some_and(|t| t.name == ui::tool_name() && t.result.is_some())
+            })
+        };
+        let deadline = Instant::now() + Duration::from_secs(180);
+        while !(viewed(&rt.state) && replied(&rt.state)) {
+            assert!(Instant::now() < deadline, "no view: {:?}", rt.state.ws.chat);
+            std::thread::sleep(Duration::from_millis(50));
+            rt.frame(1.0 / 60.0);
+        }
+        eprintln!("notices: {:?}", notices(&rt));
+        eprintln!("chat: {:?}", rt.state.ws.chat);
+    }
+
     #[test]
     fn a_missing_claude_says_so() {
         let mut rt = runtime_with(fake_program("/nonexistent/claude", "signed-out", &[]));
@@ -2864,5 +2998,241 @@ mod tests {
         let image = app.ui_images[&chart].as_ref().unwrap();
         let _ = image.wait();
         assert!(image.error().is_none());
+    }
+
+    // Visual replies, on the fake `claude` and its real calls to the prompt and stop hooks.
+
+    /// Sends `message` and waits until the chief of staff's last words are `end`.
+    fn send_until(rt: &mut Runtime<App>, message: &str, end: &str) {
+        rt.state.draft.text = message.into();
+        tap(rt, "send");
+        wait(rt, |s| {
+            s.replying.is_none() && s.ws.chat.last().is_some_and(|m| m.text == end)
+        });
+    }
+
+    /// Scrolls the element keyed `key` to the middle of whatever scrolls it, then taps it.
+    fn tap_scrolled(rt: &mut Runtime<App>, key: &str) {
+        let centered = key.to_string();
+        rt.update(move |_, tx| tx.scroll_center(centered));
+        tap(rt, key);
+    }
+
+    fn notices(rt: &Runtime<App>) -> Vec<String> {
+        rt.state
+            .ws
+            .chat
+            .iter()
+            .filter(|m| m.author == Author::App)
+            .map(|m| m.text.clone())
+            .collect()
+    }
+
+    #[test]
+    fn a_list_sent_as_text_is_sent_back_once_and_shown_as_a_view() {
+        let mut rt = runtime_with(fake_in(Mode::Run));
+        assert_eq!(*rt.state.visuals.settings(), visual::Mode::Enforce);
+        send_until(&mut rt, LIST, "Shown above.");
+        assert_eq!(
+            notices(&rt),
+            [
+                "Velvet Hammer asked the chief of staff to show this as a view: the reply lists 3 \
+              items."
+            ]
+        );
+        let chat = &rt.state.ws.chat;
+        let at = |want: &dyn Fn(&Message) -> bool| chat.iter().position(want).unwrap();
+        let text = at(&|m| m.text.starts_with("Open items:"));
+        let notice = at(&|m| m.author == Author::App);
+        let view = at(&|m| m.tool.as_ref().is_some_and(|t| t.name == ui::tool_name()));
+        assert!(text < notice && notice < view, "{text} {notice} {view}");
+        assert!(texts(&rt).iter().any(|t| t == "Renew the domain"));
+        assert!(rt.find(&format!("msg-{notice}")).is_some());
+    }
+
+    #[test]
+    fn a_reply_that_ignores_the_feedback_is_not_sent_back_again() {
+        let mut rt = runtime_with(fake_in(Mode::Run));
+        send_until(&mut rt, "stubborn: a, b, c", "Left as text.");
+        assert_eq!(notices(&rt).len(), 1);
+        // The next reply is checked again.
+        send_until(&mut rt, "stubborn: d, e, f", "Left as text.");
+        assert_eq!(notices(&rt).len(), 2);
+    }
+
+    #[test]
+    fn the_instruction_and_the_check_follow_the_visuals_page() {
+        let mut rt = runtime_with(fake_in(Mode::Run));
+        assert_eq!(
+            send_and_wait(&mut rt, "context?"),
+            "You said: context: the app asked for views"
+        );
+        tap(&mut rt, "visuals");
+        assert_eq!(rt.state.showing, Showing::Visuals);
+        tap(&mut rt, "visual-mode-off");
+        assert_eq!(*rt.state.visuals.settings(), visual::Mode::Off);
+        tap(&mut rt, "visuals-close");
+        assert_eq!(
+            send_and_wait(&mut rt, "context?"),
+            "You said: context: none"
+        );
+        let reply = send_and_wait(&mut rt, LIST);
+        assert!(reply.starts_with("Open items:"), "{reply}");
+        assert!(notices(&rt).is_empty());
+        // Nudge only adds the instruction and checks nothing.
+        rt.state.visuals.change(|m| *m = visual::Mode::Nudge);
+        assert_eq!(
+            send_and_wait(&mut rt, "context?"),
+            "You said: context: the app asked for views"
+        );
+        send_and_wait(&mut rt, LIST);
+        assert!(notices(&rt).is_empty());
+    }
+
+    #[test]
+    fn the_visuals_page_tries_a_reply_and_keeps_its_mode() {
+        let mut rt = runtime();
+        tap(&mut rt, "visuals");
+        assert!(
+            texts(&rt)
+                .iter()
+                .any(|t| t == "\u{25cf} Enforce (Recommended)")
+        );
+        assert!(rt.find("visual-instruction").is_some());
+        assert!(rt.find("visual-shape-4").is_some());
+        assert_eq!(
+            texts_under(&rt, "visual-example-result"),
+            ["Sent back once to be shown as a view: the reply lists 3 items."]
+        );
+        rt.state.visual_example.text = "Done. The build is green.".into();
+        rt.invalidate();
+        rt.frame(1.0 / 60.0);
+        assert_eq!(
+            texts_under(&rt, "visual-example-result"),
+            ["Stays plain text."]
+        );
+        tap(&mut rt, "visual-mode-nudge");
+        let dir = rt.state.visuals.path().parent().unwrap().to_path_buf();
+        assert_eq!(
+            *store::Store::<visual::Mode>::open(&dir).settings(),
+            visual::Mode::Nudge
+        );
+        assert!(texts(&rt).iter().any(|t| t == "Nudge only"));
+    }
+
+    // Firstmate's rules, on the fake `claude` running as firstmate.
+
+    #[test]
+    fn firstmate_rules_deny_a_force_push_and_ask_about_a_merge_by_name() {
+        let lab = Lab::new();
+        let mut rt = runtime_with(fake_in_firstmate(&lab, true));
+        assert_eq!(rt.state.approvals.settings().mode, Mode::Run);
+        assert_eq!(
+            send_and_wait(&mut rt, "run: git push --force origin main"),
+            "You said: Bash was denied: git push --force origin main"
+        );
+        let entry = last_entry(&rt);
+        assert_eq!(entry.rule.as_deref(), Some("no-force-push"));
+        assert_eq!(
+            entry.how,
+            "denied by firstmate rule \u{201c}No force pushes\u{201d}"
+        );
+        // A merge asks even while tools run without asking.
+        rt.state.draft.text = format!("run: {MERGE}");
+        tap(&mut rt, "send");
+        wait(&mut rt, |s| s.ws.needs_input().next().is_some());
+        let item = rt.state.ws.needs_input().next().unwrap().clone();
+        assert_eq!(item.title, "Merge https://github.com/captain/site/pull/7?");
+        assert!(item.detail.starts_with("Firstmate's hard rule 2"));
+        assert!(item.detail.ends_with(&format!("command: {MERGE}")));
+        tap(&mut rt, &format!("answer-{}-0", item.id));
+        wait(&mut rt, replied);
+        assert_eq!(
+            rt.state.ws.chat.last().unwrap().text,
+            format!("You said: Bash was allowed to run {MERGE}")
+        );
+        // The page shows what each rule did.
+        tap(&mut rt, "rules");
+        assert_eq!(rt.state.showing, Showing::Rules);
+        assert!(rt.find("guard-no-force-push-recent-0").is_some());
+        assert!(rt.find("guard-merge-asks-captain-recent-0").is_some());
+        assert!(rt.find("guard-publish-asks-captain-quiet").is_some());
+        // Turned off, the forced push is no longer denied, and still asks as a push.
+        tap_scrolled(&mut rt, "guard-no-force-push-toggle");
+        assert!(!rt.state.rules.settings().on(guard::Rule::NoForcePush));
+        assert!(
+            !store::Store::<guard::Settings>::open(&lab.data)
+                .settings()
+                .on(guard::Rule::NoForcePush)
+        );
+        tap(&mut rt, "rules-close");
+        rt.state.draft.text = "run: git push --force origin main".into();
+        tap(&mut rt, "send");
+        wait(&mut rt, |s| s.ws.needs_input().next().is_some());
+        let item = rt.state.ws.needs_input().next().unwrap().clone();
+        assert_eq!(item.title, "Push to origin from /?");
+        tap(&mut rt, &format!("answer-{}-1", item.id));
+        wait(&mut rt, replied);
+        assert_eq!(
+            last_entry(&rt).how,
+            "asked by firstmate rule \u{201c}Publishing waits for your word\u{201d}; you denied it"
+        );
+    }
+
+    #[test]
+    fn a_write_into_a_project_asks_and_names_the_file() {
+        let lab = Lab::new();
+        let mut rt = runtime_with(fake_in_firstmate(&lab, true));
+        let home = rt.state.firstmate.home_dir();
+        let file = home.join("projects/site/README.md");
+        rt.state.draft.text = format!("write: {} Hello", file.display());
+        tap(&mut rt, "send");
+
+        wait(&mut rt, |s| s.ws.needs_input().next().is_some());
+        let item = rt.state.ws.needs_input().next().unwrap().clone();
+        assert_eq!(
+            item.title,
+            format!("Let the chief of staff edit {}?", file.display())
+        );
+        tap_scrolled(&mut rt, &format!("answer-{}-1", item.id));
+        wait(&mut rt, replied);
+        assert_eq!(
+            rt.state.ws.chat.last().unwrap().text,
+            format!("You said: Write was denied: {}", file.display())
+        );
+        // Firstmate's own records are not a project.
+        let notes = home.join("data/notes.md");
+        assert_eq!(
+            send_and_wait(&mut rt, &format!("write: {} Hello", notes.display())),
+            format!("You said: Write was allowed to run {}", notes.display())
+        );
+    }
+
+    #[test]
+    fn a_chief_of_staff_that_is_not_firstmate_has_no_firstmate_rules() {
+        let mut rt = runtime_with(fake_in(Mode::Run));
+        assert_eq!(
+            send_and_wait(&mut rt, "run: git push --force"),
+            "You said: Bash was allowed to run git push --force"
+        );
+        assert!(last_entry(&rt).rule.is_none());
+    }
+
+    #[test]
+    fn the_rules_page_lists_every_rule_on_by_default() {
+        let mut rt = runtime();
+        assert_eq!(texts_under(&rt, "rules-summary"), ["7 of 7 on"]);
+        tap(&mut rt, "rules");
+        for rule in guard::Rule::ALL {
+            assert!(
+                rt.find(&format!("guard-{}", rule.key())).is_some(),
+                "{rule:?}"
+            );
+            assert!(rt.find(&format!("guard-{}-toggle", rule.key())).is_some());
+        }
+        tap_scrolled(&mut rt, "guard-publish-asks-captain-toggle");
+        assert_eq!(texts_under(&rt, "rules-summary"), ["6 of 7 on"]);
+        tap(&mut rt, "rules-activity");
+        assert_eq!(rt.state.showing, Showing::Activity);
     }
 }

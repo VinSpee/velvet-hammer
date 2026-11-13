@@ -5,31 +5,40 @@
 //! - an MCP server (`--mcp-config`) with two tools: `app_note`, which puts a note in the
 //!   captain's For you to do panel, and `app_ui`, which shows a json-render view in the chat
 //!   (see [`crate::ui`]);
-//! - a PreToolUse hook (`--settings`), which applies the captain's tool-approval settings (see
-//!   [`crate::approval`]) to each tool use: it allows it, denies it, or asks the captain to allow
-//!   or deny it in the Needs your input panel. Every decision is reported for the activity log.
+//! - a PreToolUse hook (`--settings`), which applies firstmate's rules (see [`crate::guard`])
+//!   and the captain's tool-approval settings (see [`crate::approval`]) to each tool use: it
+//!   allows it, denies it, or asks the captain to allow or deny it in the Needs your input panel.
+//!   Every decision is reported for the activity log;
+//! - a UserPromptSubmit hook and a Stop hook (also `--settings`), which steer the chief of staff
+//!   towards views for the replies that read better as one (see [`crate::visual`]).
 //!
 //! Every request must carry the bearer token made for this server, so other programs and web
 //! pages cannot reach it. A hook the server cannot answer blocks the tool use (`onFailure`).
 
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
-use std::sync::Arc;
+use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, channel};
+use std::sync::{Arc, Mutex, RwLock};
 use std::thread;
 use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 
-use crate::approval::{self, Effect, Entry, Policy};
+use crate::approval::{self, Effect, Entry, Policy, Settings};
+use crate::guard::{self, Home};
+use crate::store::Shared;
 use crate::ui;
+use crate::visual::{self, Turn};
 
 /// The MCP server's name; Claude Code calls its tools `mcp__velvet-hammer__<tool>`.
 pub const SERVER: &str = "velvet-hammer";
 const NOTE_TOOL: &str = "app_note";
 /// Claude Code's timeout for the hook, in seconds (its default).
 const HOOK_TIMEOUT_SECS: u64 = 600;
+/// Claude Code's timeout for the prompt and stop hooks, which answer at once.
+const QUICK_TIMEOUT_SECS: u64 = 30;
 /// How long the hook waits for the captain: a little less than Claude Code waits for the hook,
 /// so an unanswered question becomes a deny the app chose rather than a timeout.
 const APPROVAL_WAIT: Duration = Duration::from_secs(HOOK_TIMEOUT_SECS - 10);
@@ -46,11 +55,13 @@ static NEXT_TICKET: AtomicU64 = AtomicU64::new(1);
 pub enum Call {
     /// `app_note` was called with this text.
     Note(String),
-    /// `claude` wants to use `tool`; `input` is all of what it would do, as text. Send true to
-    /// allow it, false to deny it; dropping `answer` denies it.
+    /// `claude` wants to use a tool; `title` is the question for the captain, such as "Allow
+    /// Bash?", and `input` is all of what it would do, as text, after any firstmate rule's
+    /// reason. Send true to allow it,
+    /// false to deny it; dropping `answer` denies it.
     Approve {
         ticket: u64,
-        tool: String,
+        title: String,
         input: String,
         answer: Sender<bool>,
     },
@@ -59,6 +70,42 @@ pub enum Call {
     Expired(u64),
     /// The hook decided a tool use, for the activity log.
     Logged(Entry),
+    /// The stop hook sent the reply back to be shown as a view, because it has this shape (in
+    /// words, such as "lists 4 items").
+    Nudged(String),
+}
+
+/// The settings the hooks decide with, each read at every call so a change applies at once.
+#[derive(Clone)]
+pub struct Policies {
+    pub approval: Policy,
+    pub visual: Shared<visual::Mode>,
+    pub rules: Shared<guard::Settings>,
+}
+
+impl Policies {
+    /// Asks about every tool use and steers nothing: what a session runs on until the app hands
+    /// over the captain's settings.
+    pub fn ask_every_time() -> Policies {
+        Policies {
+            approval: Arc::new(RwLock::new(Settings::ask_every_time())),
+            visual: Arc::new(RwLock::new(visual::Mode::Off)),
+            rules: Arc::new(RwLock::new(guard::Settings::default())),
+        }
+    }
+}
+
+/// What the server's threads share.
+struct Serving {
+    policies: Policies,
+    /// Firstmate's home, when the chief of staff runs as firstmate; its rules apply then.
+    home: Option<Home>,
+    /// The reply in progress, for the stop hook.
+    turn: Mutex<Turn>,
+}
+
+fn read<T: Clone>(shared: &Shared<T>) -> T {
+    shared.read().unwrap_or_else(|e| e.into_inner()).clone()
 }
 
 pub struct Bridge {
@@ -68,10 +115,12 @@ pub struct Bridge {
 }
 
 impl Bridge {
-    /// Starts serving on a free port of 127.0.0.1. The hook decides with `policy` as it stands at
-    /// each tool use. `on_call` runs on the server's threads.
+    /// Starts serving on a free port of 127.0.0.1. The hooks decide with `policies` as they
+    /// stand at each call, and firstmate's rules apply when `home` is firstmate's home.
+    /// `on_call` runs on the server's threads.
     pub fn start(
-        policy: Policy,
+        policies: Policies,
+        home: Option<Home>,
         on_call: impl Fn(Call) + Send + Sync + 'static,
     ) -> io::Result<Bridge> {
         let listener = TcpListener::bind(("127.0.0.1", 0))?;
@@ -80,6 +129,11 @@ impl Bridge {
         getrandom::fill(&mut bytes).map_err(|e| io::Error::other(e.to_string()))?;
         let token: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
         let stopped = Arc::new(AtomicBool::new(false));
+        let serving = Arc::new(Serving {
+            policies,
+            home,
+            turn: Mutex::new(Turn::default()),
+        });
         let (expected, done, on_call) = (
             format!("Bearer {token}"),
             stopped.clone(),
@@ -91,10 +145,10 @@ impl Bridge {
                     break;
                 }
                 let Ok(stream) = stream else { continue };
-                let (expected, policy, on_call) =
-                    (expected.clone(), policy.clone(), on_call.clone());
+                let (expected, serving, on_call) =
+                    (expected.clone(), serving.clone(), on_call.clone());
                 thread::spawn(move || {
-                    let _ = serve(stream, &expected, &policy, &*on_call);
+                    let _ = serve(stream, &expected, &serving, &*on_call);
                 });
             }
         });
@@ -119,15 +173,24 @@ impl Bridge {
         .to_string()
     }
 
-    /// The `--settings` value adding the PreToolUse hook for this session only.
+    /// The `--settings` value adding the hooks for this session only. A PreToolUse hook the app
+    /// cannot answer blocks the tool use; a prompt or stop hook it cannot answer changes nothing.
     pub fn settings(&self) -> String {
-        json!({"hooks": {"PreToolUse": [{"matcher": "*", "hooks": [{
-            "type": "http",
-            "url": self.url("/hooks/pre-tool-use"),
-            "headers": {"Authorization": format!("Bearer {}", self.token)},
-            "timeout": HOOK_TIMEOUT_SECS,
-            "onFailure": "block",
-        }]}]}})
+        let hook = |path: &str, timeout: u64| {
+            json!({
+                "type": "http",
+                "url": self.url(path),
+                "headers": {"Authorization": format!("Bearer {}", self.token)},
+                "timeout": timeout,
+            })
+        };
+        let mut pre = hook("/hooks/pre-tool-use", HOOK_TIMEOUT_SECS);
+        pre["onFailure"] = json!("block");
+        json!({"hooks": {
+            "PreToolUse": [{"matcher": "*", "hooks": [pre]}],
+            "UserPromptSubmit": [{"hooks": [hook("/hooks/user-prompt-submit", QUICK_TIMEOUT_SECS)]}],
+            "Stop": [{"hooks": [hook("/hooks/stop", QUICK_TIMEOUT_SECS)]}],
+        }})
         .to_string()
     }
 }
@@ -152,7 +215,7 @@ enum Reply {
 fn serve(
     stream: TcpStream,
     expected: &str,
-    policy: &Policy,
+    serving: &Serving,
     on_call: &dyn Fn(Call),
 ) -> io::Result<()> {
     stream.set_read_timeout(Some(Duration::from_secs(10)))?;
@@ -196,11 +259,18 @@ fn serve(
         Reply::Status(413, "Content Too Large")
     } else {
         match (path.as_str(), serde_json::from_slice::<Value>(&body)) {
-            ("/mcp", Ok(request)) => mcp(&request, on_call).map_or(Reply::Accepted, Reply::Json),
-            ("/hooks/pre-tool-use", Ok(input)) => {
-                Reply::Json(pre_tool_use(&input, &stream, policy, on_call))
+            ("/mcp", Ok(request)) => {
+                mcp(&request, serving, on_call).map_or(Reply::Accepted, Reply::Json)
             }
-            ("/mcp" | "/hooks/pre-tool-use", Err(_)) => Reply::Status(400, "Bad Request"),
+            ("/hooks/pre-tool-use", Ok(input)) => {
+                Reply::Json(pre_tool_use(&input, &stream, serving, on_call))
+            }
+            ("/hooks/user-prompt-submit", Ok(_)) => Reply::Json(user_prompt_submit(serving)),
+            ("/hooks/stop", Ok(input)) => Reply::Json(stop(&input, serving, on_call)),
+            (
+                "/mcp" | "/hooks/pre-tool-use" | "/hooks/user-prompt-submit" | "/hooks/stop",
+                Err(_),
+            ) => Reply::Status(400, "Bad Request"),
             _ => Reply::Status(404, "Not Found"),
         }
     };
@@ -223,7 +293,7 @@ fn respond(mut stream: TcpStream, reply: Reply) -> io::Result<()> {
 }
 
 /// Answers one MCP JSON-RPC message; None for a notification, which gets no answer.
-fn mcp(request: &Value, on_call: &dyn Fn(Call)) -> Option<Value> {
+fn mcp(request: &Value, serving: &Serving, on_call: &dyn Fn(Call)) -> Option<Value> {
     let id = request.get("id")?.clone();
     let params = &request["params"];
     let outcome = match request["method"].as_str().unwrap_or_default() {
@@ -262,7 +332,10 @@ fn mcp(request: &Value, on_call: &dyn Fn(Call)) -> Option<Value> {
         // The chat draws the view from the tool use itself; the call only checks it, so the
         // model learns what was refused or left out.
         "tools/call" if params["name"] == ui::TOOL => Ok(match ui::answer(&params["arguments"]) {
-            Ok(text) => json!({"content": [{"type": "text", "text": text}]}),
+            Ok(text) => {
+                lock(&serving.turn).viewed = true;
+                json!({"content": [{"type": "text", "text": text}]})
+            }
             Err(problem) => {
                 json!({"isError": true, "content": [{"type": "text", "text": problem}]})
             }
@@ -309,24 +382,75 @@ fn wait_for(
     }
 }
 
-/// Decides one PreToolUse hook with the captain's settings. A tool use they leave to the
-/// captain waits in Needs your input with all of its input shown or, when it is too large to
-/// show, is denied rather than approved from a partial view.
+fn lock(turn: &Mutex<Turn>) -> std::sync::MutexGuard<'_, Turn> {
+    turn.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// A message from the captain starts a new reply, and carries the standing instruction to use
+/// views when the visual-replies mode asks for one.
+fn user_prompt_submit(serving: &Serving) -> Value {
+    lock(&serving.turn).prompt();
+    match read(&serving.policies.visual).instruction() {
+        Some(text) => json!({"hookSpecificOutput": {
+            "hookEventName": "UserPromptSubmit",
+            "additionalContext": text,
+        }}),
+        None => json!({}),
+    }
+}
+
+/// Decides one Stop hook: a final reply of a qualifying shape with no view in its turn is sent
+/// back once to be shown as one (see [`crate::visual`]). Anything else lets the turn end.
+fn stop(input: &Value, serving: &Serving, on_call: &dyn Fn(Call)) -> Value {
+    let mode = read(&serving.policies.visual);
+    let reply = input["last_assistant_message"].as_str().unwrap_or_default();
+    let continuing = input["stop_hook_active"] == true;
+    let Some(shape) = lock(&serving.turn).stop(mode, reply, continuing) else {
+        return json!({});
+    };
+    on_call(Call::Nudged(shape.describe()));
+    json!({"hookSpecificOutput": {
+        "hookEventName": "Stop",
+        "additionalContext": visual::feedback(&shape),
+    }})
+}
+
+/// Decides one PreToolUse hook. A firstmate rule decides first, when the chief of staff runs as
+/// firstmate, and the captain's tool-approval settings decide the rest; they can still deny what
+/// a rule would ask about. A tool use left to the captain waits in Needs your input with all of
+/// its input shown or, when it is too large to show, is denied rather than approved from a
+/// partial view.
 fn pre_tool_use(
     input: &Value,
     stream: &TcpStream,
-    policy: &Policy,
+    serving: &Serving,
     on_call: &dyn Fn(Call),
 ) -> Value {
     let tool = input["tool_name"].as_str().unwrap_or_default();
     let tool_input = &input["tool_input"];
-    let verdict = policy
-        .read()
-        .unwrap_or_else(|e| e.into_inner())
-        .decide(tool, tool_input);
-    let why = verdict.why();
+    let cwd = Path::new(input["cwd"].as_str().unwrap_or("/"));
+    let verdict = read(&serving.policies.approval).decide(tool, tool_input);
     let review = approval::input_text(tool_input);
-    let (allow, how) = match verdict.effect {
+    let hit = serving
+        .home
+        .as_ref()
+        .and_then(|home| read(&serving.policies.rules).check(tool, tool_input, cwd, home))
+        .filter(|hit| hit.effect == Effect::Deny || verdict.effect != Effect::Deny);
+    let (effect, why, title, shown) = match &hit {
+        Some(hit) => (
+            hit.effect,
+            format!("by firstmate rule \u{201c}{}\u{201d}", hit.rule.title()),
+            hit.question.clone(),
+            format!("{}\n\n{review}", hit.why),
+        ),
+        None => (
+            verdict.effect,
+            verdict.why(),
+            format!("Allow {tool}?"),
+            review.clone(),
+        ),
+    };
+    let (allow, how) = match effect {
         Effect::Allow => (true, format!("allowed {why}")),
         Effect::Deny => (false, format!("denied {why}")),
         Effect::Ask if review.len() > MAX_REVIEW => (
@@ -338,8 +462,8 @@ fn pre_tool_use(
             let ticket = NEXT_TICKET.fetch_add(1, Ordering::Relaxed);
             on_call(Call::Approve {
                 ticket,
-                tool: tool.to_string(),
-                input: review,
+                title,
+                input: shown,
                 answer,
             });
             match wait_for(stream, ticket, &decision, on_call) {
@@ -349,8 +473,16 @@ fn pre_tool_use(
             }
         }
     };
-    let reason = format!("Velvet Hammer: {how}.");
-    on_call(Call::Logged(Entry::new(tool, tool_input, allow, how)));
+    // A rule's deny says what to do instead, so the model can act on it.
+    let reason = match &hit {
+        Some(hit) if effect == Effect::Deny => format!("Velvet Hammer: {how}. {}", hit.why),
+        _ => format!("Velvet Hammer: {how}."),
+    };
+    let mut entry = Entry::new(tool, tool_input, allow, how);
+    if let Some(hit) = &hit {
+        entry = entry.by_rule(hit.rule.key());
+    }
+    on_call(Call::Logged(entry));
     json!({"hookSpecificOutput": {
         "hookEventName": "PreToolUse",
         "permissionDecision": if allow { "allow" } else { "deny" },
@@ -361,8 +493,7 @@ fn pre_tool_use(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::approval::{Mode, Rule, Settings};
-    use std::sync::{Mutex, RwLock};
+    use crate::approval::{Mode, Rule};
 
     /// A bridge in "Ask every time" mode whose calls arrive on the returned receiver.
     fn bridge() -> (Bridge, Receiver<Call>) {
@@ -374,14 +505,25 @@ mod tests {
     }
 
     fn bridge_with(settings: Settings) -> (Bridge, Receiver<Call>, Policy) {
+        let (bridge, calls, policies) = bridge_on(settings, None);
+        (bridge, calls, policies.approval)
+    }
+
+    /// A bridge deciding with `settings`, visual replies enforced, every firstmate rule on, and
+    /// firstmate's home at `home` if given.
+    fn bridge_on(settings: Settings, home: Option<Home>) -> (Bridge, Receiver<Call>, Policies) {
         let (tx, rx) = channel();
         let tx = Mutex::new(tx);
-        let policy = Arc::new(RwLock::new(settings));
-        let bridge = Bridge::start(policy.clone(), move |call| {
+        let policies = Policies {
+            approval: Arc::new(RwLock::new(settings)),
+            visual: Arc::new(RwLock::new(visual::Mode::Enforce)),
+            rules: Arc::new(RwLock::new(guard::Settings::default())),
+        };
+        let bridge = Bridge::start(policies.clone(), home, move |call| {
             tx.lock().unwrap().send(call).unwrap()
         })
         .unwrap();
-        (bridge, rx, policy)
+        (bridge, rx, policies)
     }
 
     /// The next call that is not an activity log entry.
@@ -534,7 +676,7 @@ mod tests {
                 }
             });
             let Some(Call::Approve {
-                tool,
+                title,
                 input,
                 answer,
                 ..
@@ -543,8 +685,8 @@ mod tests {
                 panic!("expected an approval");
             };
             assert_eq!(
-                (tool.as_str(), input.as_str()),
-                ("Bash", "command: git push")
+                (title.as_str(), input.as_str()),
+                ("Allow Bash?", "command: git push")
             );
             // `None`: the app dropped the question, as when the session ends.
             match allow {
@@ -769,5 +911,283 @@ mod tests {
             Ok(Call::Expired(t)) if t == ticket
         ));
         drop(answer);
+    }
+
+    #[test]
+    fn the_settings_add_three_hooks_and_only_the_tool_hook_blocks_on_failure() {
+        let (bridge, _) = bridge();
+        let settings: Value = serde_json::from_str(&bridge.settings()).unwrap();
+        let hooks = &settings["hooks"];
+        assert_eq!(hooks["PreToolUse"][0]["hooks"][0]["onFailure"], "block");
+        for (event, path) in [
+            ("UserPromptSubmit", "/hooks/user-prompt-submit"),
+            ("Stop", "/hooks/stop"),
+        ] {
+            let hook = &hooks[event][0]["hooks"][0];
+            assert!(hook["url"].as_str().unwrap().ends_with(path), "{event}");
+            assert_eq!(hook["onFailure"], Value::Null, "{event}");
+            assert_eq!(hook["timeout"], QUICK_TIMEOUT_SECS, "{event}");
+        }
+    }
+
+    #[test]
+    fn each_message_carries_the_standing_instruction_unless_visuals_are_off() {
+        let (bridge, _, policies) = bridge_on(Settings::default(), None);
+        let auth = bearer(&bridge);
+        let prompt = json!({"hook_event_name": "UserPromptSubmit", "prompt": "status?"});
+        for (mode, wants) in [
+            (visual::Mode::Enforce, true),
+            (visual::Mode::Nudge, true),
+            (visual::Mode::Off, false),
+        ] {
+            *policies.visual.write().unwrap() = mode;
+            let (status, out) = post(
+                &bridge,
+                "/hooks/user-prompt-submit",
+                Some(&auth),
+                prompt.clone(),
+            );
+            assert_eq!(status, 200);
+            let context = out["hookSpecificOutput"]["additionalContext"].as_str();
+            assert_eq!(
+                context.is_some_and(|c| c.contains("app_ui")),
+                wants,
+                "{mode:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_list_without_a_view_is_sent_back_once_and_a_view_lets_it_through() {
+        let (bridge, calls, policies) = bridge_on(Settings::default(), None);
+        let auth = bearer(&bridge);
+        let stop = |active: bool| {
+            post(&bridge, "/hooks/stop", Some(&auth), json!({"hook_event_name": "Stop",
+                "stop_hook_active": active, "last_assistant_message": "Open items:\n- a\n- b\n- c"}))
+            .1
+        };
+        let out = stop(false);
+        assert_eq!(out["hookSpecificOutput"]["hookEventName"], "Stop");
+        assert!(
+            out["hookSpecificOutput"]["additionalContext"]
+                .as_str()
+                .unwrap()
+                .contains("lists 3 items")
+        );
+        assert!(matches!(calls.try_recv(), Ok(Call::Nudged(why)) if why == "lists 3 items"));
+        // The retry cap: the next stop ends the turn, whatever Claude Code reports.
+        assert_eq!(stop(false), json!({}));
+        assert_eq!(stop(false)["hookSpecificOutput"]["hookEventName"], "Stop");
+        assert_eq!(stop(true), json!({}));
+        // A view shown in the turn satisfies it.
+        let (_, shown) = post(
+            &bridge,
+            "/mcp",
+            Some(&auth),
+            json!({"jsonrpc": "2.0", "id": 1,
+            "method": "tools/call", "params": {"name": "app_ui", "arguments":
+            {"root": "t", "elements": {"t": {"type": "Text", "props": {"text": "Hi"}}}}}}),
+        );
+        assert_eq!(shown["result"]["isError"], Value::Null);
+        assert_eq!(stop(false), json!({}));
+        *policies.visual.write().unwrap() = visual::Mode::Nudge;
+        assert_eq!(stop(false), json!({}));
+    }
+
+    /// A firstmate home under `target/` with no tasks.
+    fn firstmate_home() -> Home {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        static RUN: AtomicU32 = AtomicU32::new(0);
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("target/bridge-home")
+            .join(format!(
+                "{}-{}",
+                std::process::id(),
+                RUN.fetch_add(1, Ordering::Relaxed)
+            ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("state")).unwrap();
+        Home::new(dir)
+    }
+
+    #[test]
+    fn a_firstmate_rule_denies_with_what_to_do_whatever_the_mode() {
+        let (bridge, calls, _) = bridge_on(Settings::default(), Some(firstmate_home()));
+        let auth = bearer(&bridge);
+        let (_, out) = post(
+            &bridge,
+            "/hooks/pre-tool-use",
+            Some(&auth),
+            json!({"tool_name": "Bash",
+            "cwd": "/clone", "tool_input": {"command": "git push --force origin main"}}),
+        );
+        let (decision, reason) = decision(&out);
+        assert_eq!(decision, "deny");
+        assert!(reason.starts_with(
+            "Velvet Hammer: denied by firstmate rule \u{201c}No force pushes\u{201d}. "
+        ));
+        assert!(reason.contains("Push without forcing"));
+        let entry = next_logged(&calls);
+        assert_eq!(entry.rule.as_deref(), Some("no-force-push"));
+        assert!(!entry.allowed);
+    }
+
+    #[test]
+    fn a_merge_asks_the_captain_by_name_and_no_allow_rule_answers_for_them() {
+        let allow_all = Settings {
+            mode: Mode::Run,
+            rules: vec![Rule {
+                effect: Effect::Allow,
+                tool: "Bash".into(),
+                pattern: None,
+            }],
+        };
+        let (bridge, calls, policies) = bridge_on(allow_all, Some(firstmate_home()));
+        let auth = bearer(&bridge);
+        let bridge = Arc::new(bridge);
+        let merge = json!({"tool_name": "Bash", "cwd": "/clone", "tool_input":
+            {"command": "bin/fm-pr-merge.sh site-fix https://github.com/o/site/pull/7"}});
+        for allow in [true, false] {
+            let hook = thread::spawn({
+                let (bridge, auth, merge) = (bridge.clone(), auth.clone(), merge.clone());
+                move || post(&bridge, "/hooks/pre-tool-use", Some(&auth), merge).1
+            });
+            let Some(Call::Approve {
+                title,
+                input,
+                answer,
+                ..
+            }) = next_call(&calls)
+            else {
+                panic!("a merge should ask");
+            };
+            assert_eq!(title, "Merge https://github.com/o/site/pull/7?");
+            assert!(input.starts_with("Firstmate's hard rule 2"));
+            assert!(input.ends_with(
+                "command: bin/fm-pr-merge.sh site-fix https://github.com/o/site/pull/7"
+            ));
+            answer.send(allow).unwrap();
+            let out = hook.join().unwrap();
+            assert_eq!(decision(&out).0, if allow { "allow" } else { "deny" });
+            let entry = next_logged(&calls);
+            assert_eq!(entry.rule.as_deref(), Some("merge-asks-captain"));
+        }
+        // A deny rule of the captain's still wins over the rule's question.
+        policies.approval.write().unwrap().rules.push(Rule {
+            effect: Effect::Deny,
+            tool: "Bash".into(),
+            pattern: Some("bin/fm-pr-merge.sh".into()),
+        });
+        let (_, out) = post(&bridge, "/hooks/pre-tool-use", Some(&auth), merge.clone());
+        assert_eq!(decision(&out).0, "deny");
+        assert!(next_logged(&calls).rule.is_none());
+        // Turned off, the rule leaves the merge to the approval settings.
+        policies.approval.write().unwrap().rules.pop();
+        policies
+            .rules
+            .write()
+            .unwrap()
+            .set(guard::Rule::MergeAsks, false);
+        let (_, out) = post(&bridge, "/hooks/pre-tool-use", Some(&auth), merge);
+        assert_eq!(decision(&out).0, "allow");
+    }
+
+    #[test]
+    fn firstmate_rules_apply_only_to_a_firstmate_session() {
+        let (bridge, calls, _) = bridge_on(Settings::default(), None);
+        let auth = bearer(&bridge);
+        let (_, out) = post(
+            &bridge,
+            "/hooks/pre-tool-use",
+            Some(&auth),
+            json!({"tool_name": "Bash",
+            "tool_input": {"command": "git push --force"}}),
+        );
+        assert_eq!(decision(&out).0, "allow");
+        assert!(next_logged(&calls).rule.is_none());
+    }
+
+    #[test]
+    fn every_rule_denies_or_asks_and_the_captains_answer_decides() {
+        let home = firstmate_home();
+        let project = home.dir.join("projects/site");
+        let (bridge, calls, _) = bridge_on(Settings::default(), Some(home));
+        let auth = bearer(&bridge);
+        let bridge = Arc::new(bridge);
+        let bash = |command: &str| {
+            json!({"tool_name": "Bash", "cwd": "/clone",
+            "tool_input": {"command": command}})
+        };
+        let hook = |input: Value| {
+            let (bridge, auth) = (bridge.clone(), auth.clone());
+            thread::spawn(move || post(&bridge, "/hooks/pre-tool-use", Some(&auth), input).1)
+        };
+        let denied = [
+            ("merge-through-script", bash("gh pr merge 7 --squash")),
+            (
+                "no-admin-merge",
+                bash("bin/fm-pr-merge.sh t https://x.test/o/r/pull/7 -- --admin"),
+            ),
+            ("no-force-push", bash("git push --force origin main")),
+            (
+                "discard-asks-captain",
+                bash("git worktree remove --force /pool/1/site"),
+            ),
+        ];
+        for (rule, input) in denied {
+            let out = hook(input).join().unwrap();
+            assert_eq!(decision(&out).0, "deny", "{rule}");
+            let entry = next_logged(&calls);
+            assert_eq!(entry.rule.as_deref(), Some(rule));
+        }
+        let asked = [
+            (
+                "merge-asks-captain",
+                bash("bin/fm-pr-merge.sh t https://x.test/o/r/pull/7"),
+            ),
+            ("merge-asks-captain", bash("bin/fm-merge-local.sh t")),
+            ("discard-asks-captain", bash("bin/fm-teardown.sh t --force")),
+            (
+                "projects-read-only",
+                json!({"tool_name": "Edit", "cwd": "/clone", "tool_input":
+                    {"file_path": project.join("a.rs"), "old_string": "a", "new_string": "b"}}),
+            ),
+            (
+                "projects-read-only",
+                bash(&format!("git -C {} commit -am x", project.display())),
+            ),
+            ("publish-asks-captain", bash("git push origin fix")),
+            (
+                "publish-asks-captain",
+                bash("gh repo create o/new --private"),
+            ),
+        ];
+        for (rule, input) in asked {
+            for allow in [true, false] {
+                let waiting = hook(input.clone());
+                let Some(Call::Approve { answer, .. }) = next_call(&calls) else {
+                    panic!("{rule} should ask about {input}");
+                };
+                answer.send(allow).unwrap();
+                let out = waiting.join().unwrap();
+                assert_eq!(
+                    decision(&out).0,
+                    if allow { "allow" } else { "deny" },
+                    "{rule}"
+                );
+                assert_eq!(next_logged(&calls).rule.as_deref(), Some(rule));
+            }
+        }
+        // What no rule matches goes on to the mode, which runs it.
+        for command in [
+            "gh pr view 7",
+            "git status",
+            "bin/fm-teardown.sh t",
+            "ls projects",
+        ] {
+            let out = hook(bash(command)).join().unwrap();
+            assert_eq!(decision(&out).0, "allow", "{command}");
+            assert!(next_logged(&calls).rule.is_none());
+        }
     }
 }

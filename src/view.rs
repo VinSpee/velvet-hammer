@@ -8,13 +8,16 @@ use rune::{Cx, El, ScrollSpec, TextEdit, col, el, row, text, text_input};
 use rune_kit::{Kit, Markdown};
 
 use crate::approval::{self, Effect, Mode};
+use crate::guard;
 
 use crate::firstmate::{Checkout, Distro, Firstmate, Standing, Work};
 use crate::model::{Action, Agent, Author, Item, ItemKind, Message, Plan, Status};
 use crate::projects::Project;
 
+mod policy;
 mod tool;
 mod ui;
+use policy::{rules_page, visuals_page};
 use tool::{picture_page, tool_use};
 
 pub fn view(s: &App, cx: &mut Cx<App>) -> El {
@@ -28,6 +31,8 @@ pub fn view(s: &App, cx: &mut Cx<App>) -> El {
         (Showing::Firstmate, ..) => firstmate_page(&s.firstmate, t, cx.system_dark()),
         (Showing::Approvals, ..) => approvals_page(s, t, cx.system_dark()),
         (Showing::Activity, ..) => activity_page(s, t, cx.system_dark()),
+        (Showing::Visuals, ..) => visuals_page(s, t, cx.system_dark()),
+        (Showing::Rules, ..) => rules_page(s, t, cx.system_dark()),
         (Showing::Picture(id), ..) => picture_page(s, id, t, cx.system_dark()),
         (_, Some(agent), _) => peek(s, agent, t, cx.system_dark()),
         // A chief of staff that runs in the managed clone cannot chat until it is installed.
@@ -123,53 +128,65 @@ fn agents(s: &App, t: Theme, dark: bool) -> El {
     if let Some(projects) = &s.projects {
         list = list.child(project_list(s, projects, t, dark));
     }
+    let on = guard::Rule::ALL
+        .iter()
+        .filter(|r| s.rules.settings().on(**r))
+        .count();
     list.child(el().grow(1.0))
-        .child(
-            col()
-                .key("approvals")
-                .role("button")
-                .label("Tool approval")
-                .focusable(true)
-                .padding(space::S2)
-                .gap(2.0)
-                .radius(radius::SM)
-                .fill(
-                    if matches!(s.showing, Showing::Approvals | Showing::Activity) {
-                        t.control_off
-                    } else {
-                        t.card
-                    },
-                )
-                .on_press(|s: &mut App| s.showing = Showing::Approvals)
-                .child(text("Tool approval").font(type_::TITLE).color(t.text))
-                .child(note(
-                    "approvals-summary",
-                    s.approvals.settings().mode.label(),
-                    t,
-                )),
-        )
-        .child(
-            col()
-                .key("firstmate")
-                .role("button")
-                .label("Firstmate")
-                .focusable(true)
-                .padding(space::S2)
-                .gap(2.0)
-                .radius(radius::SM)
-                .fill(if s.showing == Showing::Firstmate {
-                    t.control_off
-                } else {
-                    t.card
-                })
-                .on_press(|s: &mut App| s.showing = Showing::Firstmate)
-                .child(text("Firstmate").font(type_::TITLE).color(t.text))
-                .child(note(
-                    "firstmate-summary",
-                    firstmate_summary(&s.firstmate),
-                    t,
-                )),
-        )
+        .child(nav_card(
+            s,
+            "visuals",
+            "Visual replies",
+            s.visuals.settings().label().to_string(),
+            &[Showing::Visuals],
+            t,
+        ))
+        .child(nav_card(
+            s,
+            "rules",
+            "Firstmate rules",
+            format!("{on} of {} on", guard::Rule::ALL.len()),
+            &[Showing::Rules],
+            t,
+        ))
+        .child(nav_card(
+            s,
+            "approvals",
+            "Tool approval",
+            s.approvals.settings().mode.label().to_string(),
+            &[Showing::Approvals, Showing::Activity],
+            t,
+        ))
+        .child(nav_card(
+            s,
+            "firstmate",
+            "Firstmate",
+            firstmate_summary(&s.firstmate).to_string(),
+            &[Showing::Firstmate],
+            t,
+        ))
+}
+
+/// A card at the bottom of the agents column that opens the first of `pages`, and is
+/// highlighted while any of them shows. Its summary is keyed `<key>-summary`.
+fn nav_card(s: &App, key: &str, title: &str, summary: String, pages: &[Showing], t: Theme) -> El {
+    let open = pages[0].clone();
+    col()
+        .key(key)
+        .role("button")
+        .label(title.to_string())
+        .focusable(true)
+        .padding(space::S2)
+        .gap(2.0)
+        .radius(radius::SM)
+        .fill(if pages.contains(&s.showing) {
+            t.control_off
+        } else {
+            t.card
+        })
+        .on_press(move |s: &mut App| s.showing = open.clone())
+        .child(text(title.to_string()).font(type_::TITLE).color(t.text))
+        .child(note(&format!("{key}-summary"), &summary, t))
 }
 
 /// The projects in firstmate's records, and the way to add one.
@@ -438,46 +455,15 @@ fn approvals_page(s: &App, t: Theme, dark: bool) -> El {
 
     let mut modes = col().key("modes").role("radiogroup").gap(space::S2);
     for mode in Mode::ALL {
-        let selected = settings.mode == mode;
-        let title = if mode == Mode::RECOMMENDED {
-            format!("{} (Recommended)", mode.label())
-        } else {
-            mode.label().to_string()
-        };
-        modes = modes.child(
-            col()
-                .key(format!("mode-{}", mode.key()))
-                .role("radio")
-                .label(title.clone())
-                .checked(selected)
-                .focusable(true)
-                .padding(space::S3)
-                .gap(2.0)
-                .radius(radius::MD)
-                .fill(if selected { t.control_off } else { t.bg })
-                .border(
-                    1.0,
-                    if selected {
-                        tok::accent(0, true)
-                    } else {
-                        t.card_border
-                    },
-                )
-                .on_press(move |s: &mut App| s.approvals.change(|x| x.mode = mode))
-                .child(
-                    text(format!(
-                        "{} {title}",
-                        if selected { "\u{25cf}" } else { "\u{25cb}" }
-                    ))
-                    .font(type_::TITLE)
-                    .color(t.text),
-                )
-                .child(note(
-                    &format!("mode-{}-why", mode.key()),
-                    mode.explanation(),
-                    t,
-                )),
-        );
+        modes = modes.child(choice(
+            &format!("mode-{}", mode.key()),
+            mode.label(),
+            mode == Mode::RECOMMENDED,
+            mode.explanation(),
+            settings.mode == mode,
+            t,
+            move |s: &mut App| s.approvals.change(|x| x.mode = mode),
+        ));
     }
     let reset = if form.confirm_reset {
         row()
@@ -761,6 +747,52 @@ fn activity_page(s: &App, t: Theme, dark: bool) -> El {
         col().gap(space::S3).child(help).child(body),
         t,
     )
+}
+
+/// One choice of a radio group: its label, marked (Recommended) when it is, and why to pick it.
+/// Its explanation is keyed `<key>-why`.
+fn choice(
+    key: &str,
+    label: &str,
+    recommended: bool,
+    why: &str,
+    selected: bool,
+    t: Theme,
+    on_press: impl Fn(&mut App) + 'static,
+) -> El {
+    let title = if recommended {
+        format!("{label} (Recommended)")
+    } else {
+        label.to_string()
+    };
+    col()
+        .key(key)
+        .role("radio")
+        .label(title.clone())
+        .checked(selected)
+        .focusable(true)
+        .padding(space::S3)
+        .gap(2.0)
+        .radius(radius::MD)
+        .fill(if selected { t.control_off } else { t.bg })
+        .border(
+            1.0,
+            if selected {
+                tok::accent(0, true)
+            } else {
+                t.card_border
+            },
+        )
+        .on_press(on_press)
+        .child(
+            text(format!(
+                "{} {title}",
+                if selected { "\u{25cf}" } else { "\u{25cb}" }
+            ))
+            .font(type_::TITLE)
+            .color(t.text),
+        )
+        .child(note(&format!("{key}-why"), why, t))
 }
 
 /// A page in the middle column: a heading with its buttons over a card that scrolls.
@@ -1302,6 +1334,7 @@ fn transcript(
             Author::Subagent => "Subagent",
             Author::Problem => "Claude Code reported a problem",
             Author::Tool => "Tool",
+            Author::App => "Velvet Hammer",
         };
         let words = if m.author == Author::ChiefOfStaff {
             markdown(&m.text, replying == Some(i), dark).key(format!("msg-{i}-text"))
