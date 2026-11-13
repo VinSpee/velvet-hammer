@@ -674,7 +674,10 @@ fn git_hits(
             ]
             .contains(&a.as_str())
         }),
-        "tag" => sub_args.iter().all(|a| a.starts_with('-')) && !flag("-d"),
+        "tag" => {
+            sub_args.iter().all(|a| a.starts_with('-')) && !flag("-d")
+                || flag("-l") || flag("--list")
+        }
         "stash" => sub_args.first().is_some_and(|a| a == "list" || a == "show"),
         "worktree" => sub_args.first().is_some_and(|a| a == "list"),
         _ => false,
@@ -1063,6 +1066,10 @@ mod tests {
             format!("git -C {p} log --oneline"),
             format!("git -C {p} fetch"),
             format!("git -C {p} branch"),
+            format!("git -C {p} tag -l 'v*'"),
+            format!("git -C {p} tag --list v1.*"),
+            format!("cd {p} && git log 2>&1"),
+            format!("cd {p} && make >&2"),
             format!("git -C {p} remote remove origin"),
             format!("git clone /tmp/src {p}-two"),
             format!("cat {p}/README.md"),
