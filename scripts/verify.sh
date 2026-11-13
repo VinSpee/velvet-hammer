@@ -27,7 +27,7 @@ cargo test --manifest-path "$root/Cargo.toml"
 # The firstmate scenes run git on a scratch upstream under target/, so they need no network.
 for scene in chat replied empty peek signed-out signing-in signed-in expired cli-missing claude-error noted approval approval-long approved \
   firstmate-missing firstmate-installing firstmate-up-to-date firstmate-update-available \
-  firstmate-modified firstmate-blocked firstmate-session firstmate-panels firstmate-answering; do
+  firstmate-modified firstmate-blocked firstmate-session firstmate-panels firstmate-answering firstmate-crew; do
   headless --scene "$scene" --snap "$out/$scene.png"
   headless --scene "$scene" --tree "$out/$scene.json"
 done
@@ -164,6 +164,17 @@ check firstmate-panels.json no  '"key": "answering"'
 check firstmate-answering.json yes '"key": "answering"'
 check firstmate-answering.json yes '"key": "answer-cancel"'
 check firstmate-answering.json yes '"text": "Answering below"'
+# The agents list from firstmate's tasks in flight, and a peek at one crewmate's terminal.
+check firstmate-panels.json yes '"key": "crew-lab-verify"'
+check firstmate-panels.json yes '"text": "working · rendering chat, empty and peek scenes"'
+check firstmate-panels.json yes '"key": "crew-lab-layout"'
+check firstmate-panels.json no  '"key": "crew-peek"'
+check firstmate-crew.json yes '"key": "crew-peek"'
+check firstmate-crew.json yes '"text": "Peeking at Render every state headlessly"'
+check firstmate-crew.json yes '"key": "crew-pane"'
+check firstmate-crew.json yes 'rendering peek.png'
+check firstmate-crew.json yes '"key": "peek-close"'
+check firstmate-crew.json no  '"key": "chat-input"'
 # The scripted run.
 check walk-sent.json yes '"text": "Ship it when CI is green."'
 check walk-sent.json yes 'Got it:'

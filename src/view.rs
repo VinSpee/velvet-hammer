@@ -15,7 +15,8 @@ pub fn view(s: &App, cx: &mut Cx<App>) -> El {
         Showing::Peek(id) => s.ws.agent(id),
         _ => None,
     };
-    let main = match (s.showing, peeked, &s.status) {
+    let main = match (&s.showing, peeked, &s.status) {
+        (Showing::Crew(id), ..) => crew_peek(s, id, t, cx.system_dark()),
         (Showing::Firstmate, ..) => firstmate_page(&s.firstmate, t, cx.system_dark()),
         (_, Some(agent), _) => peek(agent, t),
         // A chief of staff that runs in the managed clone cannot chat until it is installed.
@@ -73,6 +74,35 @@ fn agents(s: &App, t: Theme) -> El {
                 .child(text(a.name.clone()).font(type_::TITLE).color(t.text))
                 .child(
                     text(format!("{} · {}", a.status.label(), a.task))
+                        .font(type_::LABEL)
+                        .color(t.text_secondary)
+                        .wrap(),
+                ),
+        );
+    }
+    // The tasks firstmate has in flight.
+    for crew in &s.captain.crew {
+        let id = crew.id.clone();
+        let selected = s.showing == Showing::Crew(id.clone());
+        list = list.child(
+            col()
+                .key(format!("crew-{id}"))
+                .role("button")
+                .label(format!("Peek at {}", crew.name))
+                .focusable(true)
+                .padding(space::S2)
+                .gap(2.0)
+                .radius(radius::SM)
+                .fill(if selected { t.control_off } else { t.card })
+                .on_press(move |s: &mut App| s.showing = Showing::Crew(id.clone()))
+                .child(
+                    text(crew.name.clone())
+                        .font(type_::TITLE)
+                        .color(t.text)
+                        .wrap(),
+                )
+                .child(
+                    text(format!("{} \u{b7} {}", crew.state, crew.doing))
                         .font(type_::LABEL)
                         .color(t.text_secondary)
                         .wrap(),
@@ -562,6 +592,66 @@ fn warning(key: &str, words: &str, dark: bool) -> El {
         .font(type_::BODY)
         .color(tok::accent(3, dark))
         .wrap()
+}
+
+/// A firstmate crewmate's terminal, as `bin/fm-peek.sh` reads it. Looking only: the captain
+/// steers a crewmate through the chief of staff.
+fn crew_peek(s: &App, id: &str, t: Theme, dark: bool) -> El {
+    let crew = s.captain.crew.iter().find(|c| c.id == id);
+    let (name, doing) = match crew {
+        Some(crew) => (
+            crew.name.as_str(),
+            format!("{} \u{b7} {}", crew.state, crew.doing),
+        ),
+        None => (id, "No longer in flight.".to_string()),
+    };
+    let header = row()
+        .gap(space::S2)
+        .center_y()
+        .child(
+            col()
+                .grow(1.0)
+                .gap(2.0)
+                .child(heading(&format!("Peeking at {name}"), t))
+                .child(note("crew-doing", &doing, t)),
+        )
+        .child(button("peek-close", "Back to chat", t, |s| {
+            s.showing = Showing::Chat
+        }));
+    let pane = match s.peek.as_ref().and_then(|p| p.pane.as_ref()) {
+        None => note("crew-peek-reading", "Reading its terminal\u{2026}", t),
+        Some(Err(problem)) => warning("crew-peek-problem", problem, dark),
+        Some(Ok(lines)) => col()
+            .key("crew-pane")
+            .grow(1.0)
+            .min_h(0.0)
+            .padding(space::S3)
+            .radius(radius::MD)
+            .fill(t.card)
+            .scroll(ScrollSpec { stick_bottom: true })
+            .child(
+                text(lines.clone())
+                    .font(type_::LABEL.mono())
+                    .color(t.text)
+                    .wrap_anywhere()
+                    .selectable(true),
+            ),
+    };
+    col()
+        .key("crew-peek")
+        .grow(1.0)
+        .h_full()
+        .min_h(0.0)
+        .padding(space::S6)
+        .gap(space::S3)
+        .child(header)
+        .child(pane)
+        .child(note(
+            "crew-peek-help",
+            "The last 40 lines of this crewmate's terminal, read by firstmate's bin/fm-peek.sh. \
+             To steer it, tell your chief of staff.",
+            t,
+        ))
 }
 
 fn peek(agent: &Agent, t: Theme) -> El {

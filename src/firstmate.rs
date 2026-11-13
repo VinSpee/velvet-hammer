@@ -476,6 +476,15 @@ pub mod lab {
             std::fs::create_dir_all(&lab.upstream).expect("scratch directory");
             git_ok(&lab.upstream, &["init", "--quiet", "-b", "main"]).expect("git init");
             lab.script(
+                "bin/fm-peek.sh",
+                "#!/bin/sh\n\
+                 # Stands in for firstmate's peek: prints the pane a test put in the home.\n\
+                 echo 'WATCHER DOWN - a supervision banner' >&2\n\
+                 cat \"$FM_HOME/data/pane-$1.txt\" 2>/dev/null && exit 0\n\
+                 echo \"error: no endpoint for $1\" >&2\n\
+                 exit 1\n",
+            );
+            lab.script(
                 "bin/fm-bearings-snapshot.sh",
                 "#!/bin/sh\n\
                  # Stands in for firstmate's bearings snapshot: prints what a test put in the home.\n\
@@ -508,6 +517,14 @@ pub mod lab {
                 std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
                     .expect("make the script executable");
             }
+        }
+
+        /// What crewmate `task`'s terminal shows from now on, as the lab's `bin/fm-peek.sh`
+        /// reads it.
+        pub fn pane(&self, task: &str, text: &str) {
+            let data = self.data.join("home/data");
+            std::fs::create_dir_all(&data).expect("mkdir");
+            std::fs::write(data.join(format!("pane-{task}.txt")), text).expect("write pane");
         }
 
         /// What firstmate's bearings snapshot reports for this lab's home from now on.

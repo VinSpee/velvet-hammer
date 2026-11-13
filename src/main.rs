@@ -32,6 +32,9 @@ pub struct App {
     pub captain: Bearings,
     /// Why firstmate's records could not be read the last time, in firstmate's words.
     pub captain_problem: Option<String>,
+    /// The crewmate whose terminal is being read, while `showing` is [`Showing::Crew`].
+    pub peek: Option<bearings::Peek>,
+    wake: Option<Waker>,
     /// The captain hold the next message answers, by its key.
     pub answering: Option<String>,
     pub draft: TextEdit,
@@ -41,12 +44,14 @@ pub struct App {
 }
 
 /// What the middle column shows.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Showing {
     /// The chief-of-staff chat, or the sign-in while it cannot run.
     Chat,
     /// A subagent's transcript.
     Peek(Id),
+    /// A firstmate crewmate's terminal, by its task id.
+    Crew(String),
     /// The managed firstmate clone: its state, and installing and updating it.
     Firstmate,
 }
@@ -64,6 +69,8 @@ impl App {
             watcher,
             captain: Bearings::default(),
             captain_problem: None,
+            peek: None,
+            wake: None,
             answering: None,
             draft: TextEdit::default(),
             showing: Showing::Chat,
@@ -77,6 +84,7 @@ impl App {
     pub fn drain(&mut self) -> bool {
         let events = self.chief.events();
         let mut changed = self.firstmate.poll() | !events.is_empty();
+        changed |= self.follow_peek();
         if let Some(snapshot) = self.watcher.as_mut().and_then(|w| w.poll()) {
             match snapshot {
                 Ok(captain) => {
@@ -123,6 +131,24 @@ impl App {
         self.ws.apply(&action);
         self.chief.act(&self.ws, &action);
         self.drain();
+    }
+
+    /// Starts, switches or stops the read of a crewmate's terminal to match what the middle
+    /// column shows, and takes in what it read; true when the pane changed.
+    fn follow_peek(&mut self) -> bool {
+        let wanted = match (&self.showing, self.chief.workplace()) {
+            (Showing::Crew(id), Some(clone)) => Some((id, clone)),
+            _ => None,
+        };
+        match wanted {
+            None => self.peek = None,
+            Some((id, _)) if self.peek.as_ref().is_some_and(|p| &p.id == id) => {}
+            Some((id, clone)) => {
+                let home = self.firstmate.home_dir();
+                self.peek = Some(bearings::Peek::start(id, clone, &home, self.wake.clone()));
+            }
+        }
+        self.peek.as_mut().is_some_and(|p| p.poll())
     }
 
     /// Whether the chat can run: Claude Code is signed in, and a chief of staff that runs in
@@ -319,6 +345,7 @@ fn setup(s: &mut App, wake: Waker) {
     if let Some(watcher) = &mut s.watcher {
         watcher.connect(wake.clone());
     }
+    s.wake = Some(wake.clone());
     s.chief.connect(wake);
 }
 
@@ -425,6 +452,18 @@ fn main() {
                 lab.bearings(bearings::SNAPSHOT);
                 *s = fake_in_firstmate(&lab, true);
                 s.settle(|s| !s.captain.is_empty());
+            }),
+            ("firstmate-crew", |s| {
+                let lab = Lab::new();
+                lab.bearings(bearings::SNAPSHOT);
+                lab.pane(
+                    "lab-verify",
+                    "$ scripts/verify.sh\nrendering chat.png\nrendering peek.png",
+                );
+                *s = fake_in_firstmate(&lab, true);
+                s.settle(|s| !s.captain.crew.is_empty());
+                s.showing = Showing::Crew("lab-verify".into());
+                s.settle(|s| s.peek.as_ref().is_some_and(|p| p.pane.is_some()));
             }),
             ("firstmate-answering", |s| {
                 let lab = Lab::new();
@@ -700,6 +739,67 @@ mod tests {
             captain.holds[0].question,
             "Default window size: Pick 1100x720 or 1280x800."
         );
+    }
+
+    #[test]
+    fn the_agents_list_shows_firstmates_tasks_in_flight() {
+        let lab = Lab::new();
+        let mut rt = runtime_with(fake_in_firstmate(&lab, true));
+        wait(&mut rt, |s| s.captain_problem.is_none());
+        assert!(rt.find("crew-lab-verify").is_none());
+        lab.bearings(bearings::SNAPSHOT);
+        wait(&mut rt, |s| s.captain.crew.len() == 2);
+        assert!(rt.find("crew-lab-verify").is_some());
+        assert!(rt.find("crew-lab-layout").is_some());
+    }
+
+    #[test]
+    fn peeking_at_a_crewmate_reads_its_terminal_until_closed() {
+        let lab = Lab::new();
+        lab.bearings(bearings::SNAPSHOT);
+        lab.pane("lab-verify", "rendering chat.png\n\n\n");
+        let mut rt = runtime_with(fake_in_firstmate(&lab, true));
+        wait(&mut rt, |s| !s.captain.crew.is_empty());
+        tap(&mut rt, "crew-lab-verify");
+        assert_eq!(rt.state.showing, Showing::Crew("lab-verify".into()));
+        wait(&mut rt, |s| {
+            s.peek.as_ref().is_some_and(|p| p.pane.is_some())
+        });
+        let pane = |rt: &Runtime<App>| rt.state.peek.as_ref().unwrap().pane.clone().unwrap();
+        assert_eq!(pane(&rt), Ok("rendering chat.png".into()));
+        assert!(rt.find("crew-pane").is_some());
+        assert!(rt.find("chat").is_none());
+        // The terminal moves on, and the peek follows.
+        lab.pane("lab-verify", "rendering chat.png\nrendering peek.png\n");
+        wait(&mut rt, |s| {
+            s.peek.as_ref().unwrap().pane
+                == Some(Ok("rendering chat.png\nrendering peek.png".into()))
+        });
+        tap(&mut rt, "peek-close");
+        assert!(
+            rt.state.peek.is_none(),
+            "the read stops when the peek closes"
+        );
+        assert!(rt.find("chat").is_some());
+    }
+
+    #[test]
+    fn a_crewmate_firstmate_cannot_read_says_why() {
+        let lab = Lab::new();
+        lab.bearings(bearings::SNAPSHOT);
+        let mut rt = runtime_with(fake_in_firstmate(&lab, true));
+        wait(&mut rt, |s| !s.captain.crew.is_empty());
+        tap(&mut rt, "crew-lab-layout");
+        wait(&mut rt, |s| {
+            s.peek.as_ref().is_some_and(|p| p.pane.is_some())
+        });
+        // Firstmate's reason, not its supervision banner.
+        assert_eq!(
+            rt.state.peek.as_ref().unwrap().pane,
+            Some(Err("error: no endpoint for lab-layout".into()))
+        );
+        assert!(rt.find("crew-peek-problem").is_some());
+        assert!(rt.find("crew-pane").is_none());
     }
 
     #[test]

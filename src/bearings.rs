@@ -3,7 +3,11 @@
 //! instead of parsing its record files. The app runs that script from the managed clone against
 //! the app's firstmate home, on a background thread, whenever the home's records change. It
 //! reads the two things firstmate marks as the captain's: tasks held for the captain, and pull
-//! requests whose checks are green and which wait for a merge approval. Nothing is written.
+//! requests whose checks are green and which wait for a merge approval. It also reads the tasks
+//! in flight, which are the crewmates the chief of staff manages. Nothing is written.
+//!
+//! A [`Peek`] shows one crewmate's terminal, read with firstmate's `bin/fm-peek.sh`. It is
+//! read-only too: steering a crewmate is the chief of staff's job.
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -26,6 +30,20 @@ const RETRY: Duration = Duration::from_secs(30);
 pub struct Bearings {
     pub holds: Vec<Hold>,
     pub merges: Vec<Merge>,
+    pub crew: Vec<Crew>,
+}
+
+/// A task in flight: a crewmate (or a secondmate's child) the chief of staff manages.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Crew {
+    /// The task id, which `bin/fm-peek.sh` takes.
+    pub id: String,
+    /// The task's title, or its id when it has none.
+    pub name: String,
+    /// Firstmate's word for where it stands, such as `working`, `parked` or `blocked`.
+    pub state: String,
+    /// One line on what it is doing now.
+    pub doing: String,
 }
 
 /// A task held for the captain: firstmate's one record of a captain call.
@@ -75,6 +93,15 @@ impl Bearings {
                     task: word(row, "task"),
                     url: word(row, "url"),
                     reason: word(row, "reason"),
+                })
+                .collect(),
+            crew: rows(&doc["in_flight"])
+                .iter()
+                .map(|row| Crew {
+                    id: word(row, "id"),
+                    name: word(row, "name"),
+                    state: word(row, "state"),
+                    doing: word(row, "doing"),
                 })
                 .collect(),
         })
@@ -154,6 +181,91 @@ impl Drop for Watcher {
     }
 }
 
+/// How many lines of a crewmate's terminal a peek shows; `bin/fm-peek.sh`'s own default.
+const PEEK_LINES: &str = "40";
+
+/// One crewmate's terminal, kept current with `bin/fm-peek.sh` until dropped.
+pub struct Peek {
+    pub id: String,
+    /// The terminal's last lines, or why firstmate could not read them. `None` until the
+    /// first read finishes.
+    pub pane: Option<Result<String, String>>,
+    rx: Receiver<Result<String, String>>,
+    stop: Arc<AtomicBool>,
+}
+
+impl Peek {
+    /// Reads crewmate `id`'s terminal every [`POLL`], calling `wake` when what it shows changes.
+    pub fn start(id: &str, clone: &Path, home: &Path, wake: Option<Waker>) -> Peek {
+        let (tx, rx) = channel();
+        let stop = Arc::new(AtomicBool::new(false));
+        let (task, clone, home) = (id.to_string(), clone.to_path_buf(), home.to_path_buf());
+        let stopped = stop.clone();
+        thread::spawn(move || {
+            let mut shown = None;
+            while !stopped.load(Ordering::Relaxed) {
+                let pane = peek(&task, &clone, &home);
+                if shown.as_ref() != Some(&pane) {
+                    shown = Some(pane.clone());
+                    if tx.send(pane).is_err() {
+                        return;
+                    }
+                    if let Some(wake) = &wake {
+                        wake();
+                    }
+                }
+                thread::sleep(POLL);
+            }
+        });
+        Peek {
+            id: id.to_string(),
+            pane: None,
+            rx,
+            stop,
+        }
+    }
+
+    /// Takes in the newest read; true when one arrived.
+    pub fn poll(&mut self) -> bool {
+        match self.rx.try_iter().last() {
+            Some(pane) => {
+                self.pane = Some(pane);
+                true
+            }
+            None => false,
+        }
+    }
+}
+
+impl Drop for Peek {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+    }
+}
+
+fn peek(task: &str, clone: &Path, home: &Path) -> Result<String, String> {
+    let output = Command::new(clone.join("bin/fm-peek.sh"))
+        .args([task, PEEK_LINES])
+        .current_dir(clone)
+        .env("FM_HOME", home)
+        .stdin(Stdio::null())
+        .output()
+        .map_err(|e| format!("Could not run firstmate's peek: {e}"))?;
+    if output.status.success() {
+        return Ok(String::from_utf8_lossy(&output.stdout)
+            .trim_end()
+            .to_string());
+    }
+    // Firstmate prints its supervision banner first; the reason the read failed is last.
+    let said = String::from_utf8_lossy(&output.stderr);
+    Err(
+        match said.lines().rev().find(|line| !line.trim().is_empty()) {
+            Some(reason) => reason.trim().to_string(),
+            None => format!("Firstmate's peek failed ({}).", output.status),
+        },
+    )
+}
+
 /// When anything in the home's `state/` or `data/` last changed. Firstmate appends to status
 /// logs and rewrites its backlog there, so a newer time means the snapshot may differ.
 fn stamp(home: &Path) -> SystemTime {
@@ -194,7 +306,8 @@ fn snapshot(script: &PathBuf, clone: &Path, home: &Path) -> Result<Bearings, Str
 /// What `bin/fm-bearings-snapshot.sh --json` printed for a lab home with two captain holds
 /// (firstmate 427056c4). The two `contributions.captain` rows were added by hand in the shape
 /// firstmate's `bin/fm-contributions.jq` writes: one merge approval, and one row that carries a
-/// hold. Tests and headless scenes use it.
+/// hold. The two `in_flight` rows are also added by hand, in the shape the same script printed
+/// for a lab task. Tests and headless scenes use it.
 pub const SNAPSHOT: &str = include_str!("../scripts/fixtures/bearings.json");
 
 #[cfg(test)]
@@ -221,6 +334,16 @@ mod tests {
                 },
             ]
         );
+        assert_eq!(
+            bearings.crew[0],
+            Crew {
+                id: "lab-verify".into(),
+                name: "Render every state headlessly".into(),
+                state: "working".into(),
+                doing: "rendering chat, empty and peek scenes".into(),
+            }
+        );
+        assert_eq!(bearings.crew.len(), 2);
         // The row that carries a hold is not listed twice.
         assert_eq!(
             bearings.merges,

@@ -5,9 +5,10 @@ scripts that the chief of staff runs on. It ships as a git repository, not as a 
 Velvet Hammer keeps its own git clone of it. This page explains where the clone lives, how it is
 installed and updated, how to change it, and how to reset it.
 
-Velvet Hammer installs and updates the clone, runs the chief of staff inside it, and fills the
-**Needs your input** panel from firstmate's records. Feeding the agents list from firstmate is
-not built yet.
+Velvet Hammer installs and updates the clone, runs the chief of staff inside it, fills the
+**Needs your input** panel and the agents list from firstmate's records, and lets you peek at a
+crewmate's terminal. [Where the integration stands](#where-the-integration-stands) lists what
+works end to end and what is not verified.
 
 ## Where it lives
 
@@ -205,6 +206,26 @@ firstmate change.
 If the script fails, for example because `jq` or `tasks-axi` is missing or the home is in away
 mode, the panel shows firstmate's own error above the last items it read.
 
+## The agents list and peek
+
+The agents column lists firstmate's tasks in flight, from `in_flight[]` in the same snapshot
+that fills the panel: each row shows the task's title, firstmate's word for its state (such as
+`working`, `parked` or `blocked`) and one line on what it is doing. The list changes when
+firstmate's records change. You never have to open a row.
+
+Selecting a row opens a peek in place of the chat. While it is open, the app runs firstmate's
+`bin/fm-peek.sh <task-id> 40` every two seconds and shows the last 40 lines of that crewmate's
+terminal as plain text. The read stops when you choose **Back to chat**. If firstmate cannot
+read the terminal, the peek shows firstmate's own reason.
+
+Peek is for looking only. The app sends nothing to a crewmate: firstmate's rule is that the
+captain talks to the first mate, and the first mate steers the crew. To change what a crewmate
+is doing, tell your chief of staff.
+
+`bin/fm-peek.sh` runs firstmate's supervision guard before it reads, and the guard may write a
+warning marker in the home's `state/` directory when no watcher is running. That is the only
+thing a peek can write.
+
 ## Reset it
 
 Velvet Hammer has no reset button, because a reset discards your changes. To start again from
@@ -220,16 +241,42 @@ you do not need anything in it.
 The operational home is separate. Moving `~/.velvet-hammer/home` away in the same way gives the
 chief of staff an empty backlog and no task records, and loses nothing in the clone.
 
-## What is not verified
+## Where the integration stands
 
-- Answering a hold end to end with the real `claude`: the message reaches the chat, but whether
-  firstmate then records it was not run. Reading a real hold through the real snapshot script
-  was (`cargo test real_firstmate_reports_a_captain_hold -- --ignored`).
-- A merge approval row from a real pull request. The fixture's two `contributions.captain` rows
-  are written by hand in the shape `bin/fm-contributions.jq` produces.
+**Works end to end**, measured with the real firstmate (`427056c4`) and the real `claude`
+(2.1.311), always in scratch clones and scratch homes:
+
+- Installing the clone from GitHub, and updating it while keeping local edits. A conflicting
+  update stops and names the files.
+- Starting the chief of staff as firstmate: the session-start digest reaches the model and the
+  session takes the home's lock.
+- Reading a task held for the captain through firstmate's snapshot script into **Needs your
+  input**.
+- Reading a crewmate's terminal through `bin/fm-peek.sh` from a real tmux pane. This one was run
+  by hand against the scripts, not through the app's code.
+
+**Works against stand-ins only** (the fake `claude` and stand-in scripts in a scratch upstream):
+the answer flow, merge approvals, the agents list and the peek view.
+
+**Not verified:**
+
+- Answering a hold end to end with the real `claude`: the answer reaches the chat, but whether
+  firstmate then records it was not run.
+- A merge approval row from a real pull request. The fixture's rows are written by hand in the
+  shape firstmate's script produces.
 - A real crewmate in flight under the app: the watcher arming at turn end, a status change
-  waking the session, and the supervision host.
-- Firstmate's features after an update that conflicts with a running session.
-- Installing and chatting through the app's real window. The install from GitHub and one real
-  firstmate turn were run through the app's code headlessly
-  (`cargo test real_claude_starts_as_firstmate -- --ignored`).
+  waking the session, the supervision host, and the agents list and peek fed by it.
+- Whether Claude Code stops firstmate's hook processes when the app ends a session.
+- The app's real window. Everything above ran headless.
+
+**Open decision:** the app asks you to approve every tool use, and a firstmate chief of staff
+runs many scripts. Whether its tools should run without asking is not decided.
+
+**Proposed firstmate changes** (none is made by this app):
+
+1. A structured marker on a captain hold that says whether the captain must answer or act, so
+   **For you to do** can be filled from firstmate's records.
+2. The close mode of each hold (close the task, or release held work) in the bearings snapshot,
+   so the app can feed the keyed-answer intake directly and still tell the chief of staff.
+3. A way to start supervision when a session opens, so that a crewmate's status change is
+   noticed before the captain's first message after reopening the app.
