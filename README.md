@@ -44,7 +44,6 @@ The window has three columns:
   projects yet, a card above the conversation explains them and offers **Add a project**; while
   you add one, a row above the message field offers **Choose a folder…**, **Yes**, **No** and
   **Done adding**.
-  plan". When Claude Code is not ready, a sign-in screen takes the conversation's place.
   The chief of staff's messages are Markdown, shown formatted: bold, italic, strikethrough,
   inline code and code blocks, headings, lists, block quotes and links. A line break shows as
   written, HTML shows as text, and a reply still arriving never shows a half-written marker. A link
