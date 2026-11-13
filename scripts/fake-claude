@@ -15,7 +15,8 @@
 # In a chat session it calls back into the app the way the real `claude` does, with curl: a
 # message "note: TEXT" calls the `app_note` tool of the MCP server in --mcp-config, and a message
 # "run: COMMAND" asks the PreToolUse hook in --settings whether Bash may run COMMAND, then says
-# what the hook decided. "write: PATH CONTENT" asks the same about the Write tool, "big:" asks
+# what the hook decided. "write: PATH CONTENT" asks the same about the Write tool, "read: PATH"
+# about the Read tool, "big:" asks
 # about a Bash command far larger than the app will show, and "abandon: COMMAND" asks about
 # COMMAND but hangs up after a second, as Claude Code does when it stops waiting.
 #
@@ -124,10 +125,11 @@ auth)
         text="the app_note tool did not answer"
       fi
       ;;
-    run:* | abandon:* | big:* | write:*)
+    run:* | abandon:* | big:* | write:* | read:*)
       case $text in
       run:*) tool=Bash what=${text#run: } patience=600 input="{\"command\":\"${text#run: }\"}" ;;
       abandon:*) tool=Bash what=${text#abandon: } patience=1 input="{\"command\":\"${text#abandon: }\"}" ;;
+      read:*) tool=Read what=${text#read: } patience=600 input="{\"file_path\":\"${text#read: }\"}" ;;
       big:*) tool=Bash what=big patience=600 input="{\"command\":\"$(head -c 70000 /dev/zero | tr '\0' x)\"}" ;;
       write:*)
         rest=${text#write: }

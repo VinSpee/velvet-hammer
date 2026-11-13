@@ -3,6 +3,7 @@
 //! `cargo run -- --snap chat.png` renders it headless (see the README for every scene).
 
 mod agent;
+mod approval;
 mod bearings;
 mod bridge;
 mod claude;
@@ -10,11 +11,13 @@ mod firstmate;
 mod model;
 mod view;
 
+use std::path::Path;
 use std::time::{Duration, Instant};
 
 use rune::{AppSpec, TextEdit, Tx, Waker};
 
 use agent::{ChiefOfStaff, Event, Stub};
+use approval::{Activity, Mode, Store};
 use bearings::Bearings;
 use claude::Claude;
 use firstmate::{Checkout, Distro, Firstmate, Work, lab::Lab};
@@ -26,6 +29,12 @@ pub struct App {
     pub chief: Box<dyn ChiefOfStaff>,
     pub status: Status,
     pub firstmate: Firstmate,
+    /// The captain's tool-approval settings, which the chief of staff's hook decides with.
+    pub approvals: Store,
+    /// The settings page's rule editor and example.
+    pub form: approval::Form,
+    /// Every tool use and what was decided.
+    pub activity: Activity,
     /// Keeps `captain` current from firstmate's records, when the chief of staff is firstmate.
     watcher: Option<bearings::Watcher>,
     /// What firstmate's records say waits on the captain.
@@ -54,18 +63,28 @@ pub enum Showing {
     Crew(String),
     /// The managed firstmate clone: its state, and installing and updating it.
     Firstmate,
+    /// The tool-approval settings.
+    Approvals,
+    /// The activity log of tool uses.
+    Activity,
 }
 
 impl App {
-    pub fn new(mut chief: Box<dyn ChiefOfStaff>, firstmate: Firstmate) -> Self {
+    /// The app on `chief`, keeping its tool-approval settings and activity log in `data`.
+    pub fn new(mut chief: Box<dyn ChiefOfStaff>, firstmate: Firstmate, data: &Path) -> Self {
         let watcher = chief
             .workplace()
             .map(|clone| bearings::Watcher::start(clone, &firstmate.home_dir()));
+        let approvals = Store::open(data);
+        chief.approve_with(approvals.policy());
         let mut app = App {
             ws: chief.open(),
             chief,
             status: Status::Checking,
             firstmate,
+            approvals,
+            form: approval::Form::default(),
+            activity: Activity::open(data),
             watcher,
             captain: Bearings::default(),
             captain_problem: None,
@@ -122,6 +141,7 @@ impl App {
                 }
                 Event::Item(item) => self.ws.items.push(item),
                 Event::Withdrawn(id) => self.ws.items.retain(|i| i.id != id),
+                Event::Activity(entry) => self.activity.record(entry),
             }
         }
         changed
@@ -225,11 +245,15 @@ fn init() -> App {
     let mut firstmate = Firstmate::open(&firstmate::data_dir(), firstmate::UPSTREAM);
     firstmate.start();
     let claude = Claude::new("claude").in_firstmate(firstmate.clone_dir(), firstmate.home_dir());
-    App::new(Box::new(claude), firstmate)
+    App::new(Box::new(claude), firstmate, &firstmate::data_dir())
 }
 
 fn stub() -> App {
-    App::new(Box::new(Stub::default()), installed_firstmate())
+    App::new(
+        Box::new(Stub::default()),
+        installed_firstmate(),
+        &scratch("unused"),
+    )
 }
 
 /// A firstmate clone that is installed and up to date, for scenes and tests about the rest of
@@ -249,7 +273,7 @@ fn installed_firstmate() -> Firstmate {
 
 /// The stub app showing the firstmate page for `firstmate`.
 fn on_firstmate(firstmate: Firstmate) -> App {
-    let mut app = App::new(Box::new(Stub::default()), firstmate);
+    let mut app = App::new(Box::new(Stub::default()), firstmate, &scratch("unused"));
     app.showing = Showing::Firstmate;
     app
 }
@@ -279,6 +303,14 @@ fn fake(state: &str, extra_env: &[(&str, &str)]) -> App {
     on_fake(FAKE_CLAUDE, &scratch(state), extra_env)
 }
 
+/// The fake `claude`, signed in and settled, with the tool-approval mode set to `mode`.
+fn fake_in(mode: Mode) -> App {
+    let mut app = fake("signed-in", &[]);
+    app.approvals.change(|s| s.mode = mode);
+    app.settle(settled);
+    app
+}
+
 fn fake_program(program: &str, state: &str, extra_env: &[(&str, &str)]) -> App {
     on_fake(program, &scratch(state), extra_env)
 }
@@ -306,7 +338,7 @@ fn on_fake(program: &str, home: &std::path::Path, extra_env: &[(&str, &str)]) ->
     for (k, v) in extra_env {
         claude = claude.env(k, *v);
     }
-    App::new(Box::new(claude), installed_firstmate())
+    App::new(Box::new(claude), installed_firstmate(), home)
 }
 
 /// An app on the fake `claude`, signed in and running as firstmate in `lab`'s managed clone,
@@ -319,7 +351,7 @@ fn fake_in_firstmate(lab: &Lab, install: bool) -> App {
     if install {
         firstmate.install();
     }
-    let mut app = App::new(Box::new(claude), firstmate);
+    let mut app = App::new(Box::new(claude), firstmate, &lab.data);
     app.settle(|s| settled(s) && idle(s));
     app
 }
@@ -405,14 +437,14 @@ fn main() {
                 s.settle(replied);
             }),
             ("approval", |s| {
-                *s = fake("signed-in", &[]);
+                *s = fake_in(Mode::Ask);
                 s.settle(settled);
                 s.draft.text = "run: git push".into();
                 s.send();
                 s.settle(|s| s.ws.needs_input().next().is_some());
             }),
             ("approved", |s| {
-                *s = fake("signed-in", &[]);
+                *s = fake_in(Mode::Ask);
                 s.settle(settled);
                 s.draft.text = "run: git push".into();
                 s.send();
@@ -425,11 +457,51 @@ fn main() {
                 s.settle(replied);
             }),
             ("approval-long", |s| {
-                *s = fake("signed-in", &[]);
+                *s = fake_in(Mode::Ask);
                 s.settle(settled);
                 s.draft.text = format!("run: {}", long_command());
                 s.send();
                 s.settle(|s| s.ws.needs_input().next().is_some());
+            }),
+            // Tool approval: the settings page, an ask rule in Run without asking, the activity
+            // log the fake's tool uses filled, and a settings file the app could not read.
+            ("approval-settings", |s| {
+                *s = stub();
+                s.approvals.change(|x| x.rules = sample_rules());
+                s.showing = Showing::Approvals;
+            }),
+            ("approval-by-rule", |s| {
+                *s = fake_in(Mode::Run);
+                s.approvals.change(|x| x.rules = sample_rules());
+                s.draft.text = "run: git push origin main".into();
+                s.send();
+                s.settle(|s| s.ws.needs_input().next().is_some());
+            }),
+            ("approval-activity", |s| {
+                *s = fake_in(Mode::Run);
+                s.approvals.change(|x| x.rules = sample_rules());
+                say(s, "run: cargo test");
+                say(s, "run: git push --force");
+                s.draft.text = "run: git push origin main".into();
+                s.send();
+                s.settle(|s| s.ws.needs_input().next().is_some());
+                let item = s.ws.needs_input().next().map(|i| i.id).unwrap();
+                s.act(Action::Answer {
+                    item,
+                    choice: "Allow".into(),
+                });
+                s.settle(replied);
+                s.showing = Showing::Activity;
+            }),
+            ("approval-corrupt", |s| {
+                let dir = scratch("unused");
+                std::fs::write(
+                    dir.join(approval::SETTINGS_FILE),
+                    "{\"version\": 1, \"mode\"",
+                )
+                .unwrap();
+                *s = App::new(Box::new(Stub::default()), installed_firstmate(), &dir);
+                s.showing = Showing::Approvals;
             }),
             ("claude-error", |s| {
                 *s = fake("signed-in", &[]);
@@ -505,6 +577,29 @@ fn main() {
         poll: Some(poll),
         ..AppSpec::new("Velvet Hammer", (1100.0, 720.0), init, view::view)
     });
+}
+
+/// Rules for the tool-approval scenes: ask before any push, never force one, and allow edits
+/// under `src`.
+fn sample_rules() -> Vec<approval::Rule> {
+    use approval::{Effect, Rule};
+    let rule = |effect, tool: &str, pattern: Option<&str>| Rule {
+        effect,
+        tool: tool.into(),
+        pattern: pattern.map(str::to_string),
+    };
+    vec![
+        rule(Effect::Ask, "Bash", Some("git push")),
+        rule(Effect::Deny, "Bash", Some("git push --force")),
+        rule(Effect::Allow, "Edit", Some("/Users/captain/project/src/*")),
+    ]
+}
+
+/// Sends `text` and waits for the reply, for scenes.
+fn say(s: &mut App, text: &str) {
+    s.draft.text = text.into();
+    s.send();
+    s.settle(replied);
 }
 
 /// A command whose dangerous part sits far past where a short preview would have cut it off.
@@ -848,7 +943,7 @@ mod tests {
             .env("ANTHROPIC_MODEL", "haiku")
             .in_firstmate(firstmate.clone_dir(), firstmate.home_dir());
         firstmate.install();
-        let mut rt = runtime_with(App::new(Box::new(claude), firstmate));
+        let mut rt = runtime_with(App::new(Box::new(claude), firstmate, &data));
         wait_for(&mut rt, Duration::from_secs(120), |s| settled(s) && idle(s));
         assert!(rt.state.chat_ready(), "{:?}", rt.state.firstmate.problem());
         rt.state.draft.text = "Use no tools. Quote the line of your session-start context that \
@@ -1143,7 +1238,7 @@ mod tests {
 
     /// Sends "run: git push", which makes the fake ask the hook, and answers the question.
     fn answer_tool_use(choice: usize) -> Runtime<App> {
-        let mut rt = runtime_with(fake("signed-in", &[]));
+        let mut rt = runtime_with(fake_in(Mode::Ask));
         wait(&mut rt, settled);
         rt.state.draft.text = "run: git push".into();
         tap(&mut rt, "send");
@@ -1171,7 +1266,7 @@ mod tests {
 
     /// Sends `message`, which makes the fake ask the hook, and returns the question shown.
     fn ask_about(message: &str) -> (Runtime<App>, Item) {
-        let mut rt = runtime_with(fake("signed-in", &[]));
+        let mut rt = runtime_with(fake_in(Mode::Ask));
         wait(&mut rt, settled);
         rt.state.draft.text = message.into();
         tap(&mut rt, "send");
@@ -1197,6 +1292,7 @@ mod tests {
         let home = scratch("signed-in");
         let mut rt = runtime_with(on_fake(FAKE_CLAUDE, &home, &[]));
         wait(&mut rt, settled);
+        rt.state.approvals.change(|s| s.mode = Mode::Ask);
         rt.state.draft.text = "run: git push".into();
         tap(&mut rt, "send");
         wait(&mut rt, |s| s.ws.needs_input().next().is_some());
@@ -1258,7 +1354,7 @@ mod tests {
 
     #[test]
     fn an_input_too_large_to_show_is_denied_without_asking() {
-        let mut rt = runtime_with(fake("signed-in", &[]));
+        let mut rt = runtime_with(fake_in(Mode::Ask));
         wait(&mut rt, settled);
         rt.state.draft.text = "big:".into();
         tap(&mut rt, "send");
@@ -1293,6 +1389,241 @@ mod tests {
         );
     }
 
+    // Tool approval, on the fake `claude` and its real calls to the hook.
+
+    /// Sends `message` and waits for the fake's reply, answering nothing.
+    fn send_and_wait(rt: &mut Runtime<App>, message: &str) -> String {
+        let chat = rt.state.ws.chat.len();
+        rt.state.draft.text = message.into();
+        tap(rt, "send");
+        wait(rt, |s| replied(s) && s.ws.chat.len() > chat);
+        rt.state.ws.chat.last().unwrap().text.clone()
+    }
+
+    fn last_entry(rt: &Runtime<App>) -> approval::Entry {
+        rt.state
+            .activity
+            .entries()
+            .last()
+            .expect("a log entry")
+            .clone()
+    }
+
+    #[test]
+    fn a_fresh_install_runs_tools_without_asking_and_logs_them() {
+        let mut rt = runtime_with(fake("signed-in", &[]));
+        wait(&mut rt, settled);
+        assert_eq!(rt.state.approvals.settings().mode, Mode::Run);
+        let reply = send_and_wait(&mut rt, "run: git push");
+        assert_eq!(reply, "You said: Bash was allowed to run git push");
+        assert!(rt.state.ws.needs_input().next().is_none());
+        let entry = last_entry(&rt);
+        assert_eq!(
+            (entry.tool.as_str(), entry.subject.as_str(), entry.allowed),
+            ("Bash", "git push", true)
+        );
+        assert_eq!(entry.how, "allowed by the mode Run without asking");
+    }
+
+    #[test]
+    fn auto_allow_read_only_runs_a_read_and_asks_about_a_command() {
+        let mut rt = runtime_with(fake_in(Mode::ReadOnly));
+        wait(&mut rt, settled);
+        let reply = send_and_wait(&mut rt, "read: /tmp/notes.txt");
+        assert_eq!(reply, "You said: Read was allowed to run /tmp/notes.txt");
+        rt.state.draft.text = "run: ls".into();
+        tap(&mut rt, "send");
+        wait(&mut rt, |s| s.ws.needs_input().next().is_some());
+        let item = rt.state.ws.needs_input().next().unwrap().clone();
+        assert_eq!(
+            (item.title.as_str(), item.detail.as_str()),
+            ("Allow Bash?", "command: ls")
+        );
+        tap(&mut rt, &format!("answer-{}-1", item.id));
+        wait(&mut rt, replied);
+        assert_eq!(
+            last_entry(&rt).how,
+            "asked by the mode Auto-allow read-only tools; you denied it"
+        );
+    }
+
+    #[test]
+    fn ask_every_time_asks_even_about_a_read() {
+        let (mut rt, item) = {
+            let mut rt = runtime_with(fake_in(Mode::Ask));
+            wait(&mut rt, settled);
+            rt.state.draft.text = "read: /tmp/notes.txt".into();
+            tap(&mut rt, "send");
+            wait(&mut rt, |s| s.ws.needs_input().next().is_some());
+            let item = rt.state.ws.needs_input().next().unwrap().clone();
+            (rt, item)
+        };
+        assert_eq!(item.title, "Allow Read?");
+        tap(&mut rt, &format!("answer-{}-0", item.id));
+        wait(&mut rt, replied);
+        assert_eq!(
+            last_entry(&rt).how,
+            "asked by the mode Ask every time; you allowed it"
+        );
+    }
+
+    #[test]
+    fn a_deny_rule_wins_over_an_allow_rule() {
+        let mut rt = runtime_with(fake_in(Mode::Ask));
+        wait(&mut rt, settled);
+        rt.state.approvals.change(|s| s.rules = sample_rules());
+        rt.state.approvals.change(|s| {
+            s.rules.insert(
+                0,
+                approval::Rule {
+                    effect: approval::Effect::Allow,
+                    tool: "Bash".into(),
+                    pattern: Some("git".into()),
+                },
+            )
+        });
+        let reply = send_and_wait(&mut rt, "run: git push --force origin");
+        assert_eq!(reply, "You said: Bash was denied: git push --force origin");
+        assert!(
+            rt.state.ws.needs_input().next().is_none(),
+            "nothing was asked"
+        );
+        assert_eq!(
+            last_entry(&rt).how,
+            "denied by rule 3 (Deny Bash matching git push --force)"
+        );
+        let reply = send_and_wait(&mut rt, "run: git status");
+        assert_eq!(reply, "You said: Bash was allowed to run git status");
+    }
+
+    #[test]
+    fn an_ask_rule_shows_the_whole_input_while_running_without_asking() {
+        let mut rt = runtime_with(fake_in(Mode::Run));
+        wait(&mut rt, settled);
+        rt.state.approvals.change(|s| {
+            s.rules.push(approval::Rule {
+                effect: approval::Effect::Ask,
+                tool: "Bash".into(),
+                pattern: Some("echo".into()),
+            })
+        });
+        let command = long_command();
+        rt.state.draft.text = format!("run: {command}");
+        tap(&mut rt, "send");
+        wait(&mut rt, |s| s.ws.needs_input().next().is_some());
+        let item = rt.state.ws.needs_input().next().unwrap().clone();
+        assert_eq!(item.detail, format!("command: {command}"));
+        assert!(item.detail.ends_with("; rm -rf ~"));
+        tap(&mut rt, &format!("answer-{}-1", item.id));
+        wait(&mut rt, replied);
+        let entry = last_entry(&rt);
+        assert!(!entry.allowed);
+        assert_eq!(
+            entry.how,
+            "asked by rule 1 (Ask Bash matching echo); you denied it"
+        );
+        // The rest still runs without asking.
+        let reply = send_and_wait(&mut rt, "run: ls");
+        assert_eq!(reply, "You said: Bash was allowed to run ls");
+    }
+
+    #[test]
+    fn the_settings_page_changes_the_running_session_and_survives_a_restart() {
+        let home = scratch("signed-in");
+        let mut rt = runtime_with(on_fake(FAKE_CLAUDE, &home, &[]));
+        wait(&mut rt, settled);
+        tap(&mut rt, "approvals");
+        assert_eq!(rt.state.showing, Showing::Approvals);
+        assert!(rt.find("mode-run-without-asking").is_some());
+        assert!(rt.find("rules-empty").is_some());
+        tap(&mut rt, "mode-ask-every-time");
+        assert_eq!(rt.state.approvals.settings().mode, Mode::Ask);
+        tap(&mut rt, "rule-effect-deny");
+        rt.state.form.tool.text = "Bash".into();
+        rt.state.form.pattern.text = "git push".into();
+        tap(&mut rt, "rule-save");
+        assert!(rt.find("rule-0").is_some());
+        assert_eq!(
+            rt.state.approvals.settings().rules[0].describe(),
+            "Deny Bash matching git push"
+        );
+        // The example follows the settings.
+        assert_eq!(
+            rt.state.form.example(rt.state.approvals.settings()),
+            "Denied, by rule 1 (Deny Bash matching git push)."
+        );
+        assert!(rt.find("example-result").is_some());
+        tap(&mut rt, "approvals-close");
+        let reply = send_and_wait(&mut rt, "run: git push");
+        assert_eq!(reply, "You said: Bash was denied: git push");
+        let saved = rt.state.approvals.settings().clone();
+        let log = rt.state.activity.entries().to_vec();
+        drop(rt);
+
+        let rt = runtime_with(on_fake(FAKE_CLAUDE, &home, &[]));
+        assert_eq!(rt.state.approvals.settings(), &saved);
+        assert_eq!(rt.state.activity.entries(), log.as_slice());
+    }
+
+    #[test]
+    fn reset_asks_first_then_restores_the_recommended_default() {
+        let mut rt = runtime_with(fake_in(Mode::Ask));
+        rt.state.approvals.change(|s| s.rules = sample_rules());
+        tap(&mut rt, "approvals");
+        assert!(rt.find("rule-2").is_some());
+        tap(&mut rt, "rule-2-up");
+        assert_eq!(rt.state.approvals.settings().rules[1].tool, "Edit");
+        tap(&mut rt, "rule-0-delete");
+        assert_eq!(rt.state.approvals.settings().rules.len(), 2);
+        tap(&mut rt, "approvals-reset");
+        assert_eq!(rt.state.approvals.settings().mode, Mode::Ask, "not yet");
+        tap(&mut rt, "approvals-reset-cancel");
+        assert_eq!(rt.state.approvals.settings().rules.len(), 2);
+        tap(&mut rt, "approvals-reset");
+        tap(&mut rt, "approvals-reset-confirm");
+        assert_eq!(
+            rt.state.approvals.settings(),
+            &approval::Settings::default()
+        );
+        assert!(rt.find("rules-empty").is_some());
+    }
+
+    #[test]
+    fn a_corrupt_settings_file_asks_every_time_and_says_so() {
+        let home = scratch("signed-in");
+        std::fs::write(home.join(approval::SETTINGS_FILE), "{\"version\": 1,").unwrap();
+        let mut rt = runtime_with(on_fake(FAKE_CLAUDE, &home, &[]));
+        wait(&mut rt, settled);
+        assert_eq!(rt.state.approvals.settings().mode, Mode::Ask);
+        tap(&mut rt, "approvals");
+        assert!(rt.find("approvals-problem").is_some());
+        tap(&mut rt, "approvals-close");
+        rt.state.draft.text = "run: ls".into();
+        tap(&mut rt, "send");
+        wait(&mut rt, |s| s.ws.needs_input().next().is_some());
+        let item = rt.state.ws.needs_input().next().unwrap().id;
+        tap(&mut rt, &format!("answer-{item}-1"));
+        wait(&mut rt, replied);
+    }
+
+    #[test]
+    fn the_activity_page_lists_tool_uses_newest_first() {
+        let mut rt = runtime_with(fake_in(Mode::Run));
+        wait(&mut rt, settled);
+        tap(&mut rt, "approvals");
+        tap(&mut rt, "approvals-activity");
+        assert!(rt.find("activity-empty").is_some());
+        tap(&mut rt, "activity-close");
+        send_and_wait(&mut rt, "run: cargo test");
+        send_and_wait(&mut rt, "write: /tmp/notes.txt hello");
+        tap(&mut rt, "approvals");
+        tap(&mut rt, "approvals-activity");
+        assert!(rt.find("activity-0").is_some());
+        assert!(rt.find("activity-1").is_some());
+        assert!(rt.find("activity-empty").is_none());
+        assert_eq!(rt.state.activity.entries()[1].tool, "Write");
+    }
+
     /// One tiny message on the captain's real Claude Code and the cheapest model, to check that
     /// the installed `claude` accepts the bridge's flags and calls the tool and the hook. It uses
     /// the subscription, so it only runs on request: `cargo test real_claude -- --ignored`.
@@ -1300,7 +1631,12 @@ mod tests {
     #[ignore = "uses the real Claude account"]
     fn real_claude_calls_the_tool_through_the_hook() {
         let claude = Claude::new("claude").env("ANTHROPIC_MODEL", "haiku");
-        let mut rt = runtime_with(App::new(Box::new(claude), installed_firstmate()));
+        let mut rt = runtime_with(App::new(
+            Box::new(claude),
+            installed_firstmate(),
+            &scratch("unused"),
+        ));
+        rt.state.approvals.change(|s| s.mode = Mode::Ask);
         wait(&mut rt, settled);
         assert!(matches!(rt.state.status, Status::Ready(_)), "not signed in");
         rt.state.draft.text = "Call the app_note tool with the text \"bridge check\", then reply \
@@ -1310,11 +1646,12 @@ mod tests {
         let deadline = Instant::now() + Duration::from_secs(120);
         while !replied(&rt.state) {
             assert!(Instant::now() < deadline, "no reply");
-            // Loading the deferred MCP tool is the only other tool use this needs.
+            // Loading the deferred MCP tool and calling it are the only tool uses this needs.
             let question = rt.state.ws.needs_input().next().cloned();
             if let Some(item) = question {
                 eprintln!("hook asked: {} {}", item.title, item.detail);
-                let choice = if item.title == "Allow ToolSearch?" {
+                let wanted = ["Allow ToolSearch?", "Allow mcp__velvet-hammer__app_note?"];
+                let choice = if wanted.contains(&item.title.as_str()) {
                     0
                 } else {
                     1

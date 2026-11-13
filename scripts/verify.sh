@@ -26,6 +26,7 @@ cargo test --manifest-path "$root/Cargo.toml"
 # run the app on scripts/fake-claude, so they need no Claude account.
 # The firstmate scenes run git on a scratch upstream under target/, so they need no network.
 for scene in chat replied empty peek signed-out signing-in signed-in expired cli-missing claude-error noted approval approval-long approved \
+  approval-settings approval-by-rule approval-activity approval-corrupt \
   firstmate-missing firstmate-installing firstmate-up-to-date firstmate-update-available \
   firstmate-modified firstmate-blocked firstmate-session firstmate-panels firstmate-answering firstmate-crew; do
   headless --scene "$scene" --snap "$out/$scene.png"
@@ -116,6 +117,35 @@ check approval-long.json yes '; rm -rf ~'
 check approval-long.json yes '"key": "answer-1-0"'
 check approved.json yes 'Bash was allowed to run git push'
 check approved.json yes '"key": "needs-input-empty"'
+# Tool approval: the settings page with the recommended mode, three rules and an example; an ask
+# rule bringing up the full-input question while running without asking; the activity log of
+# the fake's real tool uses; and a settings file the app could not read.
+check chat.json yes '"key": "approvals"'
+check chat.json yes '"text": "Run without asking"'
+check approval-settings.json yes '"key": "approvals-page"'
+check approval-settings.json yes '"text": "● Run without asking (Recommended)"'
+check approval-settings.json yes 'will edit files, run commands and use tools without stopping for you, and every tool use is still logged'
+check approval-settings.json yes '"key": "mode-ask-every-time"'
+check approval-settings.json yes '"key": "mode-auto-allow-read-only"'
+check approval-settings.json yes '"text": "2. Deny Bash matching git push --force"'
+check approval-settings.json yes '"key": "rule-2-up"'
+check approval-settings.json no  '"key": "rule-0-up"'
+check approval-settings.json yes '"key": "rule-save"'
+check approval-settings.json yes '"key": "approvals-reset"'
+check approval-settings.json yes '"text": "Waits for you in Needs your input, by rule 1 (Ask Bash matching git push)."'
+check approval-settings.json yes 'never pushes, publishes or merges anything itself'
+check approval-settings.json no  '"key": "approvals-problem"'
+check approval-by-rule.json yes '"text": "Allow Bash?"'
+check approval-by-rule.json yes '"text": "command: git push origin main"'
+check approval-activity.json yes '"key": "activity-page"'
+check approval-activity.json yes 'UTC · allowed by the mode Run without asking'
+check approval-activity.json yes 'denied by rule 2 (Deny Bash matching git push --force)'
+check approval-activity.json yes 'asked by rule 1 (Ask Bash matching git push); you allowed it'
+check approval-activity.json yes '"text": "Denied · Bash"'
+check approval-activity.json no  '"key": "activity-empty"'
+check approval-corrupt.json yes '"key": "approvals-problem"'
+check approval-corrupt.json yes 'so every tool use asks you'
+check approval-corrupt.json yes '"text": "● Ask every time"'
 # The managed firstmate clone: a card under the agents, and its page in each state.
 check chat.json yes '"key": "firstmate"'
 check chat.json yes '"text": "up to date"'

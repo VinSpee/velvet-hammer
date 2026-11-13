@@ -140,9 +140,12 @@ Limits of the headless session:
   retries (`config/supervision-handoff-ack`), warm-cache compaction (`config/warm-compact`) and
   the away daemon's injection. They need a tmux or herdr pane, and the session has none. Leave
   them off. Away mode on a home with the supervision host does not use a pane.
-- **Every tool use asks you first.** The app's own hook (see [Extending](extending.md)) puts each
-  tool use in **Needs your input**, and firstmate runs many scripts. Whether a firstmate chief
-  of staff should run its tools without asking is an open decision.
+- **Tool uses run without asking by default.** Firstmate runs many scripts, so the app's hook
+  (see [Extending](extending.md)) uses the tool-approval mode **Run without asking** unless you
+  choose otherwise on the **Tool approval** page, and logs every tool use. Firstmate's own
+  `PreToolUse` command guards are separate hooks, and this setting does not change them. Choosing **Ask every time** puts each of firstmate's
+  script runs in **Needs your input**; see the README's
+  [Tool approval](../README.md#tool-approval) section for the modes and rules.
 - **Firstmate's companion tools are yours to install.** The digest lists any that are missing
   (`tasks-axi`, `treehouse`, `no-mistakes`, `gh`, `tmux` and others), and the chief of staff will
   tell you.
@@ -269,8 +272,11 @@ the answer flow, merge approvals, the agents list and the peek view.
 - Whether Claude Code stops firstmate's hook processes when the app ends a session.
 - The app's real window. Everything above ran headless.
 
-**Open decision:** the app asks you to approve every tool use, and a firstmate chief of staff
-runs many scripts. Whether its tools should run without asking is not decided.
+**Decided: configurable, recommended run without asking.** The chief of staff's tool uses are
+governed by a persistent, customizable tool-approval setting. A fresh install runs tools without
+asking and logs every one; **Auto-allow read-only tools**, **Ask every time** and custom allow,
+ask and deny rules are on the **Tool approval** page. Whether this changes how firstmate
+approves its own crew was not in scope and is unchanged.
 
 **Proposed firstmate changes** (none is made by this app):
 
