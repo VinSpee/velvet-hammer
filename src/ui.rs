@@ -1290,12 +1290,13 @@ impl Live {
         state
     }
 
-    /// The text field for `path`, starting from its value in the state.
-    pub fn edit(&mut self, spec: &Spec, path: &str) -> &mut TextEdit {
+    /// The text field for `path`, starting from its value in the state, or from `shown` when the
+    /// state has none.
+    pub fn edit(&mut self, spec: &Spec, path: &str, shown: &str) -> &mut TextEdit {
         if !self.edits.contains_key(path) {
             let text = get(&self.state(spec), path)
                 .map(display)
-                .unwrap_or_default();
+                .unwrap_or_else(|| shown.to_string());
             let mut edit = TextEdit::default();
             edit.text = text;
             self.edits.insert(path.to_string(), edit);
@@ -1533,7 +1534,7 @@ mod tests {
         let input: Value = serde_json::from_str(&fixture("ui-todos.json")).unwrap();
         let (spec, _) = parse(&input).unwrap();
         let mut live = Live::default();
-        live.edit(&spec, "/draft").text = "Ship".into();
+        live.edit(&spec, "/draft", "").text = "Ship".into();
         let add = Trigger {
             bindings: spec.elements["add"].on["press"].clone(),
             scope: Scope::default(),

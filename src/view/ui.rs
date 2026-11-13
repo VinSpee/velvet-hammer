@@ -303,7 +303,7 @@ impl Draw<'_> {
                         edit.text = value.clone();
                         edit
                     });
-                let id = self.id.to_string();
+                let (id, seed) = (self.id.to_string(), value.clone());
                 let mut input = text_input(&shown, type_::BODY)
                     .key(key.clone())
                     .label(label.clone())
@@ -311,7 +311,7 @@ impl Draw<'_> {
                     .grow(1.0)
                     .color(t.text)
                     .placeholder(placeholder.clone(), t.text_secondary)
-                    .on_edit(move |s: &mut App| s.view_edit(&id, &path));
+                    .on_edit(move |s: &mut App| s.view_edit(&id, &path, &seed));
                 if let Some(submit) = submit.clone() {
                     let (id, did) = (
                         self.id.to_string(),

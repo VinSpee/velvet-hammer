@@ -309,6 +309,7 @@ impl App {
                 .chat
                 .iter()
                 .filter_map(|m| m.tool.as_ref())
+                .filter(|t| tools::handler(t) != Handler::Ui)
                 .flat_map(tools::named_files)
                 .any(|p| p.as_os_str() == src.as_str());
             let image = if !named {
@@ -372,9 +373,12 @@ impl App {
     }
 
     /// The text field a view binds to `path`.
-    pub fn view_edit(&mut self, id: &str, path: &str) -> &mut TextEdit {
+    pub fn view_edit(&mut self, id: &str, path: &str, shown: &str) -> &mut TextEdit {
         let spec = self.view_spec(id).unwrap_or_default();
-        self.ui.entry(id.to_string()).or_default().edit(&spec, path)
+        self.ui
+            .entry(id.to_string())
+            .or_default()
+            .edit(&spec, path, shown)
     }
 
     /// Starts decoding the image, or makes the player, that `handler` shows. Only files a tool
