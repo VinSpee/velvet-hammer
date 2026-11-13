@@ -11,13 +11,16 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, channel};
 use std::sync::{Arc, OnceLock};
 use std::thread;
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 
 use rune::Waker;
 use serde_json::Value;
 
 /// How often the watcher looks at the home's records for a change.
 const POLL: Duration = Duration::from_secs(2);
+
+/// How long after a failed snapshot to run it again when nothing in the home has changed.
+const RETRY: Duration = Duration::from_secs(30);
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Bearings {
@@ -93,6 +96,10 @@ impl Watcher {
     /// Watches `home`'s records with the scripts of the firstmate clone at `clone`. It waits
     /// quietly while the clone is not installed.
     pub fn start(clone: &Path, home: &Path) -> Watcher {
+        Watcher::start_with(clone, home, POLL, RETRY)
+    }
+
+    fn start_with(clone: &Path, home: &Path, poll: Duration, retry: Duration) -> Watcher {
         let (tx, rx) = channel();
         let wake: Arc<OnceLock<Waker>> = Arc::new(OnceLock::new());
         let stop = Arc::new(AtomicBool::new(false));
@@ -100,19 +107,28 @@ impl Watcher {
         let (waker, stopped) = (wake.clone(), stop.clone());
         thread::spawn(move || {
             let mut seen = None;
+            let mut failed_at: Option<Instant> = None;
+            let mut last_problem: Option<String> = None;
             while !stopped.load(Ordering::Relaxed) {
                 let script = clone.join("bin/fm-bearings-snapshot.sh");
                 let stamp = script.exists().then(|| stamp(&home));
-                if stamp.is_some() && stamp != seen {
+                let retry_due = failed_at.is_some_and(|at| at.elapsed() >= retry);
+                if stamp.is_some() && (stamp != seen || retry_due) {
                     seen = stamp;
-                    if tx.send(snapshot(&script, &clone, &home)).is_err() {
-                        return;
-                    }
-                    if let Some(wake) = waker.get() {
-                        wake();
+                    let result = snapshot(&script, &clone, &home);
+                    failed_at = result.is_err().then(Instant::now);
+                    let repeat = matches!(&result, Err(p) if last_problem.as_ref() == Some(p));
+                    last_problem = result.as_ref().err().cloned();
+                    if !repeat {
+                        if tx.send(result).is_err() {
+                            return;
+                        }
+                        if let Some(wake) = waker.get() {
+                            wake();
+                        }
                     }
                 }
-                thread::sleep(POLL);
+                thread::sleep(poll);
             }
         });
         Watcher { rx, wake, stop }
@@ -221,6 +237,47 @@ mod tests {
         let problem = Bearings::parse(br#"{"schema":"fm-bearings.v2"}"#).unwrap_err();
         assert!(problem.contains("fm-bearings.v2"), "{problem}");
         assert!(Bearings::parse(b"not json").is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_failed_snapshot_is_retried_without_any_change_in_the_home() {
+        use std::os::unix::fs::PermissionsExt;
+        let lab = std::env::temp_dir().join(format!("vh-bearings-retry-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&lab);
+        let (clone, home) = (lab.join("clone"), lab.join("home"));
+        std::fs::create_dir_all(clone.join("bin")).unwrap();
+        crate::firstmate::prepare_home(&home).unwrap();
+        std::fs::write(lab.join("good.json"), SNAPSHOT).unwrap();
+        let script = clone.join("bin/fm-bearings-snapshot.sh");
+        std::fs::write(
+            &script,
+            format!(
+                "#!/bin/sh\nif [ ! -e '{0}/ran' ]; then touch '{0}/ran'; echo 'jq is missing' >&2; \
+                 exit 1; fi\ncat '{0}/good.json'\n",
+                lab.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let watcher = Watcher::start_with(
+            &clone,
+            &home,
+            Duration::from_millis(20),
+            Duration::from_millis(100),
+        );
+        let mut got = Vec::new();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while got.len() < 2 && Instant::now() < deadline {
+            got.extend(watcher.rx.try_iter());
+            thread::sleep(Duration::from_millis(20));
+        }
+        drop(watcher);
+        let _ = std::fs::remove_dir_all(&lab);
+        assert_eq!(got.len(), 2, "{got:?}");
+        assert_eq!(got[0], Err("jq is missing".to_string()));
+        assert_eq!(got[1], Bearings::parse(SNAPSHOT.as_bytes()));
     }
 
     #[test]
