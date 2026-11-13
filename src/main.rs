@@ -4,6 +4,7 @@
 
 mod agent;
 mod claude;
+mod firstmate;
 mod model;
 mod view;
 
@@ -13,6 +14,7 @@ use rune::{AppSpec, TextEdit, Tx, Waker};
 
 use agent::{ChiefOfStaff, Event, Stub};
 use claude::Claude;
+use firstmate::{Checkout, Distro, Firstmate, Work, lab::Lab};
 use model::{Action, Author, Id, Message, Status, Workspace};
 
 /// All app state: the workspace the agent layer fills, plus what only the UI needs.
@@ -20,21 +22,33 @@ pub struct App {
     pub ws: Workspace,
     pub chief: Box<dyn ChiefOfStaff>,
     pub status: Status,
+    pub firstmate: Firstmate,
     pub draft: TextEdit,
-    /// The subagent whose transcript replaces the chat, if the captain is peeking.
-    pub peek: Option<Id>,
+    pub showing: Showing,
     /// The chat message the chief of staff is still writing.
     pub replying: Option<usize>,
 }
 
+/// What the middle column shows.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Showing {
+    /// The chief-of-staff chat, or the sign-in while it cannot run.
+    Chat,
+    /// A subagent's transcript.
+    Peek(Id),
+    /// The managed firstmate clone: its state, and installing and updating it.
+    Firstmate,
+}
+
 impl App {
-    pub fn new(mut chief: Box<dyn ChiefOfStaff>) -> Self {
+    pub fn new(mut chief: Box<dyn ChiefOfStaff>, firstmate: Firstmate) -> Self {
         let mut app = App {
             ws: chief.open(),
             chief,
             status: Status::Checking,
+            firstmate,
             draft: TextEdit::default(),
-            peek: None,
+            showing: Showing::Chat,
             replying: None,
         };
         app.drain();
@@ -44,7 +58,7 @@ impl App {
     /// Applies what the agent layer reported; true when anything changed.
     pub fn drain(&mut self) -> bool {
         let events = self.chief.events();
-        let changed = !events.is_empty();
+        let changed = self.firstmate.poll() | !events.is_empty();
         for event in events {
             match event {
                 Event::Status(status) => self.status = status,
@@ -124,11 +138,52 @@ impl App {
 }
 
 fn init() -> App {
-    App::new(Box::new(Claude::new("claude")))
+    let mut firstmate = Firstmate::open(&firstmate::data_dir(), firstmate::UPSTREAM);
+    firstmate.start();
+    App::new(Box::new(Claude::new("claude")), firstmate)
 }
 
 fn stub() -> App {
-    App::new(Box::new(Stub::default()))
+    App::new(Box::new(Stub::default()), installed_firstmate())
+}
+
+/// A firstmate clone that is installed and up to date, for scenes and tests about the rest of
+/// the app. It runs no git.
+fn installed_firstmate() -> Firstmate {
+    Firstmate::showing(
+        "/Users/captain/.velvet-hammer/firstmate".into(),
+        firstmate::UPSTREAM,
+        Distro::Installed(Checkout {
+            head: "bb3b2d6".into(),
+            upstream: Some("origin/main".into()),
+            ..Checkout::default()
+        }),
+        None,
+    )
+}
+
+/// The stub app showing the firstmate page for `firstmate`.
+fn on_firstmate(firstmate: Firstmate) -> App {
+    let mut app = App::new(Box::new(Stub::default()), firstmate);
+    app.showing = Showing::Firstmate;
+    app
+}
+
+/// The firstmate page for a managed clone of a scratch upstream (see [`Lab`]): installed, then
+/// changed on either side by `then`, then checked against upstream.
+fn firstmate_lab(then: impl FnOnce(&Lab)) -> (App, Lab) {
+    let lab = Lab::new();
+    let mut app = on_firstmate(lab.firstmate());
+    app.firstmate.install();
+    app.settle(idle);
+    then(&lab);
+    app.firstmate.check();
+    app.settle(idle);
+    (app, lab)
+}
+
+fn idle(s: &App) -> bool {
+    s.firstmate.work().is_none()
 }
 
 /// The fake `claude` in `scripts/`, which speaks the real one's protocol without an account.
@@ -166,7 +221,7 @@ fn on_fake(program: &str, home: &std::path::Path, extra_env: &[(&str, &str)]) ->
     for (k, v) in extra_env {
         claude = claude.env(k, *v);
     }
-    App::new(Box::new(claude))
+    App::new(Box::new(claude), installed_firstmate())
 }
 
 fn settled(s: &App) -> bool {
@@ -186,6 +241,7 @@ fn poll(s: &mut App, _: f64, _: &mut Tx) -> bool {
 }
 
 fn setup(s: &mut App, wake: Waker) {
+    s.firstmate.connect(wake.clone());
     s.chief.connect(wake);
 }
 
@@ -204,7 +260,7 @@ fn main() {
             }),
             ("peek", |s| {
                 *s = stub();
-                s.peek = s.ws.agents.first().map(|a| a.id)
+                s.showing = Showing::Peek(s.ws.agents[0].id)
             }),
             // The rest drive the fake `claude` for real.
             ("signed-out", |s| {
@@ -241,6 +297,33 @@ fn main() {
                 s.draft.text = "Please fail this one.".into();
                 s.send();
                 s.settle(replied);
+            }),
+            // The managed firstmate clone. All but the first two run git on a scratch upstream.
+            ("firstmate-missing", |s| {
+                *s = on_firstmate(Lab::new().firstmate());
+            }),
+            ("firstmate-installing", |s| {
+                let lab = Lab::new();
+                *s = on_firstmate(Firstmate::showing(
+                    lab.clone_dir(),
+                    &lab.url(),
+                    Distro::Missing,
+                    Some(Work::Installing),
+                ));
+            }),
+            ("firstmate-up-to-date", |s| *s = firstmate_lab(|_| {}).0),
+            ("firstmate-update-available", |s| {
+                *s = firstmate_lab(|lab| lab.release("bin-fm.sh", "echo two\n")).0;
+            }),
+            ("firstmate-modified", |s| {
+                *s = firstmate_lab(|lab| lab.edit("AGENTS.md", "You are my first mate.\n")).0;
+            }),
+            ("firstmate-blocked", |s| {
+                *s = firstmate_lab(|lab| {
+                    lab.edit("AGENTS.md", "You are my first mate.\n");
+                    lab.release("AGENTS.md", "You are the bosun.\n");
+                })
+                .0;
             }),
         ],
         min_size: Some((900.0, 560.0)),
@@ -327,12 +410,84 @@ mod tests {
     fn peeking_at_an_agent_replaces_the_chat_until_closed() {
         let mut rt = runtime();
         tap(&mut rt, "agent-2");
-        assert_eq!(rt.state.peek, Some(2));
+        assert_eq!(rt.state.showing, Showing::Peek(2));
         assert!(rt.find("peek").is_some());
         assert!(rt.find("chat").is_none());
         tap(&mut rt, "peek-close");
-        assert_eq!(rt.state.peek, None);
+        assert_eq!(rt.state.showing, Showing::Chat);
         assert!(rt.find("chat").is_some());
+    }
+
+    // The managed firstmate clone, on a scratch upstream (see `firstmate::lab`).
+
+    fn standing(rt: &Runtime<App>) -> firstmate::Standing {
+        match rt.state.firstmate.distro() {
+            Distro::Installed(checkout) => checkout.standing(),
+            Distro::Missing => panic!("firstmate is not installed"),
+        }
+    }
+
+    #[test]
+    fn the_firstmate_card_opens_its_page_until_closed() {
+        let mut rt = runtime();
+        assert!(rt.find("firstmate-page").is_none());
+        tap(&mut rt, "firstmate");
+        assert_eq!(rt.state.showing, Showing::Firstmate);
+        assert!(rt.find("firstmate-page").is_some());
+        assert!(rt.find("firstmate-check").is_some());
+        assert!(rt.find("firstmate-install").is_none());
+        assert!(rt.find("chat").is_none());
+        tap(&mut rt, "firstmate-close");
+        assert!(rt.find("chat").is_some());
+    }
+
+    #[test]
+    fn installing_firstmate_from_its_page_clones_it() {
+        let lab = Lab::new();
+        let mut rt = runtime_with(on_firstmate(lab.firstmate()));
+        assert!(rt.find("firstmate-check").is_none());
+        tap(&mut rt, "firstmate-install");
+        assert_eq!(rt.state.firstmate.work(), Some(Work::Installing));
+        assert!(rt.find("firstmate-progress").is_some());
+        assert!(rt.find("firstmate-install").is_none());
+        wait(&mut rt, idle);
+        assert_eq!(standing(&rt), firstmate::Standing::UpToDate);
+        assert!(lab.clone_dir().join("AGENTS.md").exists());
+        assert!(rt.find("firstmate-check").is_some());
+        assert!(rt.find("firstmate-update").is_none());
+    }
+
+    #[test]
+    fn updating_firstmate_from_its_page_keeps_an_edit() {
+        let (app, lab) = firstmate_lab(|lab| lab.edit("AGENTS.md", "You are my first mate.\n"));
+        let mut rt = runtime_with(app);
+        assert!(rt.find("firstmate-edited").is_some());
+        assert!(rt.find("firstmate-update").is_none());
+        lab.release("bin-fm.sh", "echo two\n");
+        tap(&mut rt, "firstmate-check");
+        wait(&mut rt, idle);
+        tap(&mut rt, "firstmate-update");
+        wait(&mut rt, idle);
+        assert_eq!(rt.state.firstmate.problem(), None);
+        assert_eq!(standing(&rt), firstmate::Standing::Modified);
+        assert!(lab.clone_dir().join("bin-fm.sh").exists());
+        assert_eq!(
+            std::fs::read_to_string(lab.clone_dir().join("AGENTS.md")).unwrap(),
+            "You are my first mate.\n"
+        );
+    }
+
+    #[test]
+    fn a_blocked_update_names_the_files_and_offers_no_update() {
+        let (app, _lab) = firstmate_lab(|lab| {
+            lab.edit("AGENTS.md", "You are my first mate.\n");
+            lab.release("AGENTS.md", "You are the bosun.\n");
+        });
+        let rt = runtime_with(app);
+        assert_eq!(standing(&rt), firstmate::Standing::Blocked);
+        assert!(rt.find("firstmate-conflicts").is_some());
+        assert!(rt.find("firstmate-update").is_none());
+        assert!(rt.find("firstmate-check").is_some());
     }
 
     // The rest run the app on `scripts/fake-claude`, a stand-in for Claude Code's `claude`.
