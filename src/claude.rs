@@ -52,9 +52,15 @@ pub struct Claude {
     next_id: u64,
     next_item: Id,
     /// Tool uses waiting on the captain, by the item that asks about them.
-    approvals: HashMap<Id, Sender<bool>>,
+    approvals: HashMap<Id, Approval>,
     /// Notes `app_note` added, by item, so marking one done can say which.
     notes: HashMap<Id, String>,
+}
+
+/// A tool use waiting on the captain.
+struct Approval {
+    ticket: u64,
+    answer: Sender<bool>,
 }
 
 impl Claude {
@@ -177,8 +183,20 @@ impl Claude {
 
     /// Something the session asked of the app through the bridge.
     fn call(&mut self, call: Call) {
+        if let Call::Expired(ticket) = call {
+            if let Some(id) = self
+                .approvals
+                .iter()
+                .find_map(|(id, a)| (a.ticket == ticket).then_some(*id))
+            {
+                self.approvals.remove(&id);
+                self.out.push(Event::Withdrawn(id));
+            }
+            return;
+        }
         let id = self.item_id();
         let item = match call {
+            Call::Expired(_) => return,
             Call::Note(text) => {
                 self.notes.insert(id, text.clone());
                 Item {
@@ -190,18 +208,19 @@ impl Claude {
                 }
             }
             Call::Approve {
+                ticket,
                 tool,
                 input,
                 answer,
             } => {
-                self.approvals.insert(id, answer);
+                self.approvals.insert(id, Approval { ticket, answer });
                 Item {
                     id,
                     kind: ItemKind::NeedsInput {
                         options: vec![ALLOW.into(), DENY.into()],
                     },
                     title: format!("Allow {tool}?"),
-                    detail: summary(&input),
+                    detail: input,
                     agent: None,
                 }
             }
@@ -303,9 +322,13 @@ impl ChiefOfStaff for Claude {
     fn act(&mut self, _ws: &Workspace, action: &Action) {
         // A tool-use answer goes back to the hook that asked, not into the chat.
         if let Action::Answer { item, choice } = action
-            && let Some(answer) = self.approvals.remove(item)
+            && let Some(approval) = self.approvals.remove(item)
         {
-            let _ = answer.send(choice == ALLOW);
+            if approval.answer.send(choice == ALLOW).is_err() {
+                self.out.push(Event::Problem(
+                    "That question had already expired, so your answer was not used.".into(),
+                ));
+            }
             return;
         }
         let text = match action {
@@ -693,20 +716,6 @@ impl Session {
 impl Drop for Session {
     fn drop(&mut self) {
         let _ = self.child.kill();
-    }
-}
-
-/// What a tool use would do, for the question's detail line: a command or path when it has one,
-/// otherwise its whole input.
-fn summary(input: &Value) -> String {
-    const LIMIT: usize = 300;
-    let text = ["command", "file_path", "url", "pattern"]
-        .iter()
-        .find_map(|key| input[key].as_str().map(str::to_string))
-        .unwrap_or_else(|| input.to_string());
-    match text.char_indices().nth(LIMIT) {
-        Some((end, _)) => format!("{}\u{2026}", &text[..end]),
-        None => text,
     }
 }
 

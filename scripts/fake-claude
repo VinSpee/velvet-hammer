@@ -15,7 +15,9 @@
 # In a chat session it calls back into the app the way the real `claude` does, with curl: a
 # message "note: TEXT" calls the `app_note` tool of the MCP server in --mcp-config, and a message
 # "run: COMMAND" asks the PreToolUse hook in --settings whether Bash may run COMMAND, then says
-# what the hook decided.
+# what the hook decided. "write: PATH CONTENT" asks the same about the Write tool, "big:" asks
+# about a Bash command far larger than the app will show, and "abandon: COMMAND" asks about
+# COMMAND but hangs up after a second, as Claude Code does when it stops waiting.
 set -eu
 home=${FAKE_CLAUDE_HOME:?FAKE_CLAUDE_HOME must name a scratch directory}
 state=$(cat "$home/state" 2>/dev/null || echo signed-out)
@@ -94,7 +96,7 @@ auth)
   done
   # POSTs JSON to the app: post URL AUTH BODY. Prints the response body.
   post() {
-    curl -sf --max-time 600 -H 'Content-Type: application/json' -H "Authorization: $2" \
+    curl -sf --max-time "${4:-600}" -H 'Content-Type: application/json' -H "Authorization: $2" \
       --data "$3" "$1"
   }
   # stream-json in and out: one user record per line, one turn per record.
@@ -111,15 +113,24 @@ auth)
         text="the app_note tool did not answer"
       fi
       ;;
-    run:*)
-      command=${text#run: }
-      if decision=$(post "$hook_url" "$hook_auth" "{\"hook_event_name\":\"PreToolUse\",\"tool_name\":\"Bash\",\"tool_input\":{\"command\":\"$command\"},\"tool_use_id\":\"toolu_fake\"}"); then
+    run:* | abandon:* | big:* | write:*)
+      case $text in
+      run:*) tool=Bash what=${text#run: } patience=600 input="{\"command\":\"${text#run: }\"}" ;;
+      abandon:*) tool=Bash what=${text#abandon: } patience=1 input="{\"command\":\"${text#abandon: }\"}" ;;
+      big:*) tool=Bash what=big patience=600 input="{\"command\":\"$(head -c 70000 /dev/zero | tr '\0' x)\"}" ;;
+      write:*)
+        rest=${text#write: }
+        tool=Write what=${rest%% *} patience=600 input="{\"file_path\":\"${rest%% *}\",\"content\":\"${rest#* }\"}"
+        ;;
+      esac
+      if decision=$(post "$hook_url" "$hook_auth" "{\"hook_event_name\":\"PreToolUse\",\"tool_name\":\"$tool\",\"tool_input\":$input,\"tool_use_id\":\"toolu_fake\"}" "$patience"); then
         case $decision in
-        *'"permissionDecision":"allow"'*) text="Bash was allowed to run $command" ;;
-        *) text="Bash was denied: $command" ;;
+        *'"permissionDecision":"allow"'*) text="$tool was allowed to run $what" ;;
+        *'too large to review'*) text="$tool was denied: too large to review" ;;
+        *) text="$tool was denied: $what" ;;
         esac
       else
-        text="the hook did not answer, so Bash was blocked"
+        text="the hook did not answer, so $tool was blocked"
       fi
       ;;
     esac

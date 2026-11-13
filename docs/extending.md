@@ -16,11 +16,15 @@ that one `claude -p` process with two flags. Nothing is written to the user's Cl
   It has one tool, `app_note`, which adds a note to the **For you to do** panel. Marking the note
   done tells the chief of staff which note it was.
 - **A hook.** `--settings` adds an HTTP `PreToolUse` hook for every tool. The app's own tools are
-  allowed at once. Any other tool use appears in **Needs your input** as "Allow *tool*?" with the
-  command, path or input, and **Allow** or **Deny** goes back to Claude Code as the hook's
-  decision. If nobody answers within 590 seconds, the app denies the tool use. The hook sets
-  `onFailure: "block"`, so if the app cannot answer at all, Claude Code blocks the tool use. When
-  the session ends, its unanswered questions leave the panel and are denied.
+  allowed at once. Any other tool use appears in **Needs your input** as "Allow *tool*?" with all
+  of its input in a scrollable block you can select from: the whole command, or for a file edit or
+  write the path and the full content. Nothing is shortened. An input larger than 64 KB is denied
+  with "Input too large to review here", because approving a partial view would approve what you
+  never saw. **Allow** or **Deny** goes back to Claude Code as the hook's decision. If nobody
+  answers within 590 seconds, or Claude Code hangs up on the hook first, the app denies the tool
+  use and the question leaves the panel, so a later click cannot look like an approval. The hook
+  sets `onFailure: "block"`, so if the app cannot answer at all, Claude Code blocks the tool use.
+  When the session ends, its unanswered questions leave the panel and are denied.
 - **Access.** Each server makes a random 256-bit token. Both flags carry it in an
   `Authorization` header, and the server refuses requests without it and requests from web pages
   (any request with an `Origin` header).

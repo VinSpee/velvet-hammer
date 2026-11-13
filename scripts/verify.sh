@@ -24,7 +24,7 @@ cargo test --manifest-path "$root/Cargo.toml"
 
 # PNGs of each scene (`$app --list-scenes`), and the element tree of each. The sign-in scenes
 # run the app on scripts/fake-claude, so they need no Claude account.
-for scene in chat replied empty peek signed-out signing-in signed-in expired cli-missing claude-error noted approval approved; do
+for scene in chat replied empty peek signed-out signing-in signed-in expired cli-missing claude-error noted approval approval-long approved; do
   headless --scene "$scene" --snap "$out/$scene.png"
   headless --scene "$scene" --tree "$out/$scene.json"
 done
@@ -104,10 +104,13 @@ check noted.json yes '"text": "Noted by your chief of staff."'
 check noted.json yes '"key": "task-1"'
 check noted.json yes 'I noted it for you: Renew the velvet-hammer.dev domain'
 check approval.json yes '"text": "Allow Bash?"'
-check approval.json yes '"text": "git push"'
+check approval.json yes '"text": "command: git push"'
 check approval.json yes '"key": "answer-1-0"'
 check approval.json yes '"key": "answer-1-1"'
 check approval.json no  '"key": "needs-input-empty"'
+check approval-long.json yes '"key": "input-1-detail"'
+check approval-long.json yes '; rm -rf ~'
+check approval-long.json yes '"key": "answer-1-0"'
 check approved.json yes 'Bash was allowed to run git push'
 check approved.json yes '"key": "needs-input-empty"'
 # The scripted run.

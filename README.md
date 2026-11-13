@@ -159,6 +159,7 @@ It writes these files to `OUT_DIR`:
 | `claude-error.png`, `claude-error.json` | A message failed, with Claude Code's error in the chat |
 | `noted.png`, `noted.json` | Claude Code called the `app_note` tool: a note in For you to do |
 | `approval.png`, `approval.json` | The PreToolUse hook is waiting for you to allow or deny a Bash command |
+| `approval-long.png`, `approval-long.json` | The same question for a very long command, shown whole in a scrollable block |
 | `approved.png`, `approved.json` | After you allowed it, with the reply |
 | `walk-sent.json` | `scripts/walkthrough.json` after typing and sending a message |
 | `walk-end.png`, `walk-end.json` | The same script after answering an item, finishing the task and opening a peek |

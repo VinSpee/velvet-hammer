@@ -13,10 +13,10 @@
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{Sender, channel};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, channel};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 
@@ -30,18 +30,28 @@ const HOOK_TIMEOUT_SECS: u64 = 600;
 const APPROVAL_WAIT: Duration = Duration::from_secs(HOOK_TIMEOUT_SECS - 10);
 /// The largest request body the server reads.
 const MAX_BODY: usize = 1 << 20;
+/// The most of a tool's input the captain is shown. A larger input is denied, never approved
+/// from a partial view.
+const MAX_REVIEW: usize = 64 * 1024;
+/// How often a waiting hook checks that Claude Code is still waiting for it.
+const POLL: Duration = Duration::from_millis(250);
+static NEXT_TICKET: AtomicU64 = AtomicU64::new(1);
 
 /// Something `claude` asked of the app.
 pub enum Call {
     /// `app_note` was called with this text.
     Note(String),
-    /// `claude` wants to use `tool` with `input`. Send true to allow it, false to deny it;
-    /// dropping `answer` denies it.
+    /// `claude` wants to use `tool`; `input` is all of what it would do, as text. Send true to
+    /// allow it, false to deny it; dropping `answer` denies it.
     Approve {
+        ticket: u64,
         tool: String,
-        input: Value,
+        input: String,
         answer: Sender<bool>,
     },
+    /// The question with this ticket can no longer be answered: the wait ran out or Claude Code
+    /// stopped waiting. Whatever answer comes later is not used.
+    Expired(u64),
 }
 
 pub struct Bridge {
@@ -168,7 +178,9 @@ fn serve(stream: TcpStream, expected: &str, on_call: &dyn Fn(Call)) -> io::Resul
         reader.read_exact(&mut body)?;
         match (path.as_str(), serde_json::from_slice::<Value>(&body)) {
             ("/mcp", Ok(request)) => mcp(&request, on_call).map_or(Reply::Accepted, Reply::Json),
-            ("/hooks/pre-tool-use", Ok(input)) => Reply::Json(pre_tool_use(&input, on_call)),
+            ("/hooks/pre-tool-use", Ok(input)) => {
+                Reply::Json(pre_tool_use(&input, &stream, on_call))
+            }
             ("/mcp" | "/hooks/pre-tool-use", Err(_)) => Reply::Status(400, "Bad Request"),
             _ => Reply::Status(404, "Not Found"),
         }
@@ -235,23 +247,78 @@ fn mcp(request: &Value, on_call: &dyn Fn(Call)) -> Option<Value> {
     })
 }
 
+/// All of a tool's input as text, one `name: value` per field with string values as they are, so
+/// a command or file content is shown whole.
+fn review_text(input: &Value) -> String {
+    let Some(fields) = input.as_object() else {
+        return input.to_string();
+    };
+    let lines: Vec<String> = fields
+        .iter()
+        .map(|(name, value)| match value.as_str() {
+            Some(text) => format!("{name}: {text}"),
+            None => format!("{name}: {value}"),
+        })
+        .collect();
+    lines.join("\n")
+}
+
+/// Whether Claude Code has hung up on this request, which it does when it stops waiting.
+fn hung_up(stream: &TcpStream) -> bool {
+    if stream.set_nonblocking(true).is_err() {
+        return false;
+    }
+    let gone = matches!(stream.peek(&mut [0u8; 1]), Ok(0));
+    let _ = stream.set_nonblocking(false);
+    gone
+}
+
+/// Waits for the captain's answer to `ticket`; None when the wait ended without one.
+fn wait_for(
+    stream: &TcpStream,
+    ticket: u64,
+    decision: &Receiver<bool>,
+    on_call: &dyn Fn(Call),
+) -> Option<bool> {
+    let deadline = Instant::now() + APPROVAL_WAIT;
+    loop {
+        match decision.recv_timeout(POLL) {
+            Ok(allow) => return Some(allow),
+            Err(RecvTimeoutError::Disconnected) => return None,
+            Err(RecvTimeoutError::Timeout) => {}
+        }
+        if Instant::now() >= deadline || hung_up(stream) {
+            on_call(Call::Expired(ticket));
+            return None;
+        }
+    }
+}
+
 /// Decides one PreToolUse hook: the app's own tools are allowed, anything else waits for the
-/// captain.
-fn pre_tool_use(input: &Value, on_call: &dyn Fn(Call)) -> Value {
+/// captain, who is shown all of the input or, when it is too large to show, nothing is allowed.
+fn pre_tool_use(input: &Value, stream: &TcpStream, on_call: &dyn Fn(Call)) -> Value {
     let tool = input["tool_name"].as_str().unwrap_or_default();
+    let review = review_text(&input["tool_input"]);
     let (allow, reason) = if tool.starts_with(&format!("mcp__{SERVER}__")) {
         (true, "Velvet Hammer's own tool.")
+    } else if review.len() > MAX_REVIEW {
+        (
+            false,
+            "Input too large to review here, so Velvet Hammer denied it.",
+        )
     } else {
         let (answer, decision) = channel();
+        let ticket = NEXT_TICKET.fetch_add(1, Ordering::Relaxed);
         on_call(Call::Approve {
+            ticket,
             tool: tool.to_string(),
-            input: input["tool_input"].clone(),
+            input: review,
             answer,
         });
-        match decision.recv_timeout(APPROVAL_WAIT) {
-            Ok(true) => (true, "The captain allowed this in Velvet Hammer."),
-            Ok(false) => (false, "The captain denied this in Velvet Hammer."),
-            Err(_) => (false, "Nobody allowed this in Velvet Hammer."),
+        match wait_for(stream, ticket, &decision, on_call) {
+            Some(true) => (true, "The captain allowed this in Velvet Hammer."),
+            Some(false) => (false, "The captain denied this in Velvet Hammer."),
+            None => (false, "Nobody allowed this in Velvet Hammer."),
         }
     };
     json!({"hookSpecificOutput": {
@@ -265,7 +332,6 @@ fn pre_tool_use(input: &Value, on_call: &dyn Fn(Call)) -> Value {
 mod tests {
     use super::*;
     use std::sync::Mutex;
-    use std::sync::mpsc::Receiver;
 
     /// A bridge whose calls arrive on the returned receiver.
     fn bridge() -> (Bridge, Receiver<Call>) {
@@ -366,13 +432,14 @@ mod tests {
                 tool,
                 input,
                 answer,
+                ..
             }) = calls.recv_timeout(Duration::from_secs(5))
             else {
                 panic!("expected an approval");
             };
             assert_eq!(
-                (tool.as_str(), &input["command"]),
-                ("Bash", &json!("git push"))
+                (tool.as_str(), input.as_str()),
+                ("Bash", "command: git push")
             );
             // `None`: the app dropped the question, as when the session ends.
             match allow {
@@ -382,5 +449,65 @@ mod tests {
             let out = hook.join().unwrap();
             assert_eq!(out["hookSpecificOutput"]["permissionDecision"], want);
         }
+    }
+
+    #[test]
+    fn the_captain_is_shown_the_whole_input_and_too_large_an_input_is_denied() {
+        let (bridge, calls) = bridge();
+        let auth = bearer(&bridge);
+        let bridge = Arc::new(bridge);
+        let command = format!("echo {} ; rm -rf ~", "a".repeat(500));
+        let hook = thread::spawn({
+            let (bridge, auth) = (bridge.clone(), auth.clone());
+            move || {
+                let input = json!({"tool_name": "Write", "tool_input":
+                    {"file_path": "/tmp/x", "content": "one\ntwo", "command": command}});
+                post(&bridge, "/hooks/pre-tool-use", Some(&auth), input).1
+            }
+        });
+        let Ok(Call::Approve { input, answer, .. }) = calls.recv_timeout(Duration::from_secs(5))
+        else {
+            panic!("expected an approval");
+        };
+        for part in ["file_path: /tmp/x", "content: one\ntwo", "; rm -rf ~"] {
+            assert!(input.contains(part), "{part} missing from {input}");
+        }
+        answer.send(true).unwrap();
+        hook.join().unwrap();
+
+        let big = json!({"tool_name": "Bash", "tool_input": {"command": "x".repeat(MAX_REVIEW)}});
+        let (_, out) = post(&bridge, "/hooks/pre-tool-use", Some(&auth), big);
+        assert_eq!(out["hookSpecificOutput"]["permissionDecision"], "deny");
+        assert!(
+            out["hookSpecificOutput"]["permissionDecisionReason"]
+                .as_str()
+                .unwrap()
+                .contains("too large to review")
+        );
+        assert!(calls.try_recv().is_err());
+    }
+
+    #[test]
+    fn a_hook_claude_code_hung_up_on_expires_its_question() {
+        let (bridge, calls) = bridge();
+        let auth = bearer(&bridge);
+        let mut stream = TcpStream::connect(bridge.addr).unwrap();
+        let body = json!({"tool_name": "Bash", "tool_input": {"command": "ls"}}).to_string();
+        write!(
+            stream,
+            "POST /hooks/pre-tool-use HTTP/1.1\r\nAuthorization: {auth}\r\nContent-Length: {}\r\n\r\n{body}",
+            body.len()
+        )
+        .unwrap();
+        let Ok(Call::Approve { ticket, answer, .. }) = calls.recv_timeout(Duration::from_secs(5))
+        else {
+            panic!("expected an approval");
+        };
+        drop(stream);
+        assert!(matches!(
+            calls.recv_timeout(Duration::from_secs(5)),
+            Ok(Call::Expired(t)) if t == ticket
+        ));
+        drop(answer);
     }
 }
