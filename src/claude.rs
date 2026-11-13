@@ -25,6 +25,7 @@ use crate::agent::{ChiefOfStaff, Event};
 use crate::approval::{Policy, Settings};
 use crate::bridge::{Bridge, Call};
 use crate::model::{Action, Id, Item, ItemKind, Plan, Status, Workspace};
+use crate::tools;
 
 /// How long `claude auth status` may take before the app reports it as not answering.
 const CHECK_TIMEOUT: Duration = Duration::from_secs(20);
@@ -50,6 +51,8 @@ pub struct Claude {
     session: Option<Session>,
     /// The reply in progress, built from the session's text deltas.
     reply: String,
+    /// The turn has shown some of its text, so its `result` record's text is not new.
+    replied: bool,
     /// Events for the next [`ChiefOfStaff::events`].
     out: Vec<Event>,
     next_id: u64,
@@ -97,6 +100,7 @@ impl Claude {
             login: None,
             session: None,
             reply: String::new(),
+            replied: false,
             out: Vec::new(),
             next_id: 0,
             next_item: 0,
@@ -195,6 +199,7 @@ impl Claude {
             Msg::SessionEnded(id, stderr) if self.session_is(id) => {
                 self.end_session();
                 self.finish_reply();
+                self.replied = false;
                 let detail = stderr.trim();
                 self.out.push(Event::Problem(if detail.is_empty() {
                     "Claude Code stopped unexpectedly.".to_string()
@@ -267,14 +272,17 @@ impl Claude {
         self.session.as_ref().is_some_and(|s| s.id == id)
     }
 
-    /// One stream-json record from the chat session.
+    /// One stream-json record from the chat session. A subagent's own records (those with a
+    /// `parent_tool_use_id`) are its work, not the chief of staff's tool uses, and are left out.
     fn record(&mut self, record: &Value) {
+        let subagent = !record["parent_tool_use_id"].is_null();
         match record["type"].as_str() {
             Some("stream_event") => {
                 let event = &record["event"];
                 match event["type"].as_str() {
                     Some("message_start") if !self.reply.is_empty() => self.reply.push_str("\n\n"),
                     Some("content_block_delta") if event["delta"]["type"] == "text_delta" => {
+                        self.replied = true;
                         self.reply
                             .push_str(event["delta"]["text"].as_str().unwrap_or_default());
                         self.out.push(Event::Reply {
@@ -287,6 +295,19 @@ impl Claude {
             }
             Some("assistant") if record["error"] == "authentication_failed" => {
                 self.rejected = true;
+            }
+            // A tool use ends the text before it, so the chat shows them in the order they
+            // happened; the text after it starts a new message.
+            Some("assistant") if !subagent => {
+                for tool in tools::uses(&record["message"]["content"]) {
+                    self.finish_reply();
+                    self.out.push(Event::Tool(tool));
+                }
+            }
+            Some("user") if !subagent => {
+                for (id, result) in tools::results(&record["message"]["content"]) {
+                    self.out.push(Event::ToolResult { id, result });
+                }
             }
             Some("result") => {
                 let failed = record["is_error"] == true || record["subtype"] != "success";
@@ -307,11 +328,12 @@ impl Claude {
                             )
                         })));
                 } else {
-                    if self.reply.trim().is_empty() {
+                    if !self.replied {
                         self.reply = result_text(record).unwrap_or_default();
                     }
                     self.finish_reply();
                 }
+                self.replied = false;
             }
             _ => {}
         }
@@ -826,6 +848,71 @@ mod tests {
         assert_eq!(plain_text(line), "https://claude.ai/oauth/authorize?a=1");
         let link = "\u{1b}]8;;https://x.test\u{7}Open\u{1b}]8;;\u{1b}\\ now";
         assert_eq!(plain_text(link), "Open now");
+    }
+
+    #[test]
+    fn tool_uses_split_the_reply_and_a_subagents_are_left_out() {
+        let mut claude = Claude::new("unused");
+        let delta = |text: &str| {
+            json!({"type": "stream_event", "event": {"type": "content_block_delta",
+                "delta": {"type": "text_delta", "text": text}}})
+        };
+        let tool_use = |parent: Value| {
+            json!({"type": "assistant", "parent_tool_use_id": parent, "message": {"content": [
+                {"type": "tool_use", "id": "t1", "name": "Read", "input": {"file_path": "/a.png"}}]}})
+        };
+        let tool_result = |parent: Value| {
+            json!({"type": "user", "parent_tool_use_id": parent, "message": {"content": [
+                {"type": "tool_result", "tool_use_id": "t1", "content": "ok"}]}})
+        };
+        for record in [
+            delta("Before."),
+            tool_use(json!("toolu_parent")),
+            tool_result(json!("toolu_parent")),
+            tool_use(Value::Null),
+            tool_result(Value::Null),
+            json!({"type": "stream_event", "event": {"type": "message_start"}}),
+            delta("After."),
+            json!({"type": "result", "subtype": "success", "result": "After."}),
+        ] {
+            claude.record(&record);
+        }
+        let events = std::mem::take(&mut claude.out);
+        let finished: Vec<&str> = events
+            .iter()
+            .filter_map(|e| match e {
+                Event::Reply { text, done: true } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(finished, ["Before.", "After."]);
+        let tools: Vec<&Event> = events
+            .iter()
+            .filter(|e| matches!(e, Event::Tool(_) | Event::ToolResult { .. }))
+            .collect();
+        assert!(
+            matches!(tools.as_slice(), [Event::Tool(t), Event::ToolResult { id, .. }]
+            if t.name == "Read" && id == "t1")
+        );
+        // The tool use comes between the two replies.
+        let at = |want: fn(&Event) -> bool| events.iter().position(want).unwrap();
+        assert!(
+            at(|e| matches!(e, Event::Reply { done: true, .. }))
+                < at(|e| matches!(e, Event::Tool(_)))
+        );
+    }
+
+    #[test]
+    fn a_turn_that_only_used_tools_still_shows_its_result_text() {
+        let mut claude = Claude::new("unused");
+        claude.record(&json!({"type": "assistant", "message": {"content": [
+            {"type": "tool_use", "id": "t1", "name": "Bash", "input": {"command": "ls"}}]}}));
+        claude.record(&json!({"type": "result", "subtype": "success", "result": "Listed."}));
+        assert!(claude.out.iter().any(|e| *e
+            == Event::Reply {
+                text: "Listed.".into(),
+                done: true
+            }));
     }
 
     #[test]

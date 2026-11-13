@@ -5,12 +5,16 @@
 use crate::{App, Showing};
 use rune::tok::{self, Theme, radius, space, type_};
 use rune::{Cx, El, ScrollSpec, TextEdit, col, el, row, text, text_input};
+use rune_kit::{Kit, Markdown};
 
 use crate::approval::{self, Effect, Mode};
 
 use crate::firstmate::{Checkout, Distro, Firstmate, Standing, Work};
 use crate::model::{Action, Agent, Author, Item, ItemKind, Message, Plan, Status};
 use crate::projects::Project;
+
+mod tool;
+use tool::{picture_page, tool_use};
 
 pub fn view(s: &App, cx: &mut Cx<App>) -> El {
     let t = tok::theme(cx.system_dark());
@@ -23,7 +27,8 @@ pub fn view(s: &App, cx: &mut Cx<App>) -> El {
         (Showing::Firstmate, ..) => firstmate_page(&s.firstmate, t, cx.system_dark()),
         (Showing::Approvals, ..) => approvals_page(s, t, cx.system_dark()),
         (Showing::Activity, ..) => activity_page(s, t, cx.system_dark()),
-        (_, Some(agent), _) => peek(agent, t),
+        (Showing::Picture(id), ..) => picture_page(s, id, t, cx.system_dark()),
+        (_, Some(agent), _) => peek(s, agent, t, cx.system_dark()),
         // A chief of staff that runs in the managed clone cannot chat until it is installed.
         (_, None, Status::Ready(_)) if !s.chat_ready() => {
             firstmate_page(&s.firstmate, t, cx.system_dark())
@@ -892,7 +897,7 @@ fn chat(s: &App, plan: &Plan, t: Theme, dark: bool) -> El {
         .gap(space::S3)
         .child(header)
         .children((s.has_no_projects() && !s.adding).then(|| no_projects(t)))
-        .child(transcript("messages", &s.ws.chat, t))
+        .child(transcript(s, "messages", &s.ws.chat, s.replying, t, dark))
         .children(s.answering.as_ref().map(|key| {
             row()
                 .key("answering")
@@ -1237,7 +1242,7 @@ fn crew_peek(s: &App, id: &str, t: Theme, dark: bool) -> El {
         ))
 }
 
-fn peek(agent: &Agent, t: Theme) -> El {
+fn peek(s: &App, agent: &Agent, t: Theme, dark: bool) -> El {
     let header = row()
         .gap(space::S2)
         .center_y()
@@ -1263,17 +1268,44 @@ fn peek(agent: &Agent, t: Theme) -> El {
         .padding(space::S6)
         .gap(space::S3)
         .child(header)
-        .child(transcript("peek-messages", &agent.transcript, t))
+        .child(transcript(
+            s,
+            "peek-messages",
+            &agent.transcript,
+            None,
+            t,
+            dark,
+        ))
 }
 
-fn transcript(key: &str, messages: &[Message], t: Theme) -> El {
+/// A conversation. The chief of staff's messages are Markdown, drawn formatted; `replying` is
+/// the one still arriving, whose unfinished tail draws as what it is about to become. Everyone
+/// else's words show as written, and a tool use shows through its handler.
+fn transcript(
+    s: &App,
+    key: &str,
+    messages: &[Message],
+    replying: Option<usize>,
+    t: Theme,
+    dark: bool,
+) -> El {
     let mut list = col().gap(space::S2);
     for (i, m) in messages.iter().enumerate() {
+        if let Some(tool) = &m.tool {
+            list = list.child(tool_use(s, i, tool, t, dark));
+            continue;
+        }
         let who = match m.author {
             Author::Captain => "You",
             Author::ChiefOfStaff => "Chief of staff",
             Author::Subagent => "Subagent",
             Author::Problem => "Claude Code reported a problem",
+            Author::Tool => "Tool",
+        };
+        let words = if m.author == Author::ChiefOfStaff {
+            markdown(&m.text, replying == Some(i), dark).key(format!("msg-{i}-text"))
+        } else {
+            text(m.text.clone()).font(type_::BODY).color(t.text).wrap()
         };
         list = list.child(
             col()
@@ -1287,7 +1319,7 @@ fn transcript(key: &str, messages: &[Message], t: Theme) -> El {
                     t.card
                 })
                 .child(text(who).font(type_::SECTION).color(t.text_secondary))
-                .child(text(m.text.clone()).font(type_::BODY).color(t.text).wrap()),
+                .child(words),
         );
     }
     col()
@@ -1296,6 +1328,19 @@ fn transcript(key: &str, messages: &[Message], t: Theme) -> El {
         .min_h(0.0)
         .scroll(ScrollSpec { stick_bottom: true })
         .child(list)
+}
+
+/// Markdown from the chief of staff, formatted (see [`crate::markdown`]). Nothing in it runs:
+/// HTML shows as text. Links open in the default browser only when pressed, and only `http`,
+/// `https` and `mailto` links open at all ([`rune::Tx::open_url`] refuses the rest).
+fn markdown(source: &str, streaming: bool, dark: bool) -> El {
+    Markdown::new(crate::markdown::prepare(source))
+        .streaming(streaming)
+        .selectable(true)
+        .on_link_tx(|_: &mut App, url: &str, tx: &mut rune::Tx| {
+            let _ = tx.open_url(url);
+        })
+        .build(&Kit::neutral(dark))
 }
 
 fn needs_input(s: &App, t: Theme, dark: bool) -> El {

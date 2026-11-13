@@ -8,15 +8,19 @@ mod bearings;
 mod bridge;
 mod claude;
 mod firstmate;
+mod markdown;
 mod model;
 mod projects;
+mod tools;
 mod view;
 
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, channel};
+use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
-use rune::{AppSpec, TextEdit, Tx, Waker};
+use rune::{AppSpec, Image, ImageCache, Player, TextEdit, Tx, Waker};
 
 use agent::{ChiefOfStaff, Event, Stub};
 use approval::{Activity, Mode, Store};
@@ -25,6 +29,7 @@ use claude::Claude;
 use firstmate::{Checkout, Distro, Firstmate, Work, lab::Lab};
 use model::{Action, Author, Id, Message, Status, Workspace};
 use projects::Project;
+use tools::{Handler, Picture};
 
 /// All app state: the workspace the agent layer fills, plus what only the UI needs.
 pub struct App {
@@ -67,6 +72,25 @@ pub struct App {
     pub showing: Showing,
     /// The chat message the chief of staff is still writing.
     pub replying: Option<usize>,
+    /// How each finished tool use is drawn, by its id, with the image or video it shows.
+    pub media: HashMap<String, Media>,
+    /// The tool uses whose results the captain unfolded, by id.
+    pub unfolded: HashSet<String>,
+    /// Decodes the chat's images off the UI thread.
+    images: ImageCache,
+    /// The window's waker, once [`setup`] connects it.
+    window_wake: Arc<OnceLock<Waker>>,
+    /// Wakes the window when an image decodes or a video loads, once there is a window.
+    media_wake: Waker,
+}
+
+/// What a finished tool use shows, chosen by [`tools::handler`] when its result arrives.
+pub struct Media {
+    pub handler: Handler,
+    /// The decoding image of an image handler, or why there is none.
+    pub image: Option<Result<Image, String>>,
+    /// The player of a video handler.
+    pub video: Option<Player>,
 }
 
 /// What the middle column shows.
@@ -84,6 +108,8 @@ pub enum Showing {
     Approvals,
     /// The activity log of tool uses.
     Activity,
+    /// One image from the chat, enlarged, by its tool use's id.
+    Picture(String),
 }
 
 impl App {
@@ -97,6 +123,15 @@ impl App {
             .map(|_| projects::Watcher::start(&firstmate.home_dir()));
         let approvals = Store::open(data);
         chief.approve_with(approvals.policy());
+        let window_wake: Arc<OnceLock<Waker>> = Arc::new(OnceLock::new());
+        let media_wake: Waker = Arc::new({
+            let slot = window_wake.clone();
+            move || {
+                if let Some(wake) = slot.get() {
+                    wake()
+                }
+            }
+        });
         let mut app = App {
             ws: chief.open(),
             chief,
@@ -120,6 +155,11 @@ impl App {
             draft: TextEdit::default(),
             showing: Showing::Chat,
             replying: None,
+            media: HashMap::new(),
+            unfolded: HashSet::new(),
+            images: ImageCache::new(media_wake.clone()),
+            window_wake,
+            media_wake,
         };
         app.drain();
         app
@@ -161,30 +201,106 @@ impl App {
             changed = true;
         }
         for event in events {
-            match event {
-                Event::Status(status) => self.status = status,
-                Event::Reply { text, done } => {
-                    match self.replying {
-                        Some(i) => self.ws.chat[i].text = text,
-                        None => {
-                            self.ws.chat.push(Message::new(Author::ChiefOfStaff, text));
-                            self.replying = Some(self.ws.chat.len() - 1);
-                        }
-                    }
-                    if done {
-                        self.replying = None;
-                    }
-                }
-                Event::Problem(text) => {
-                    self.replying = None;
-                    self.ws.chat.push(Message::new(Author::Problem, text));
-                }
-                Event::Item(item) => self.ws.items.push(item),
-                Event::Withdrawn(id) => self.ws.items.retain(|i| i.id != id),
-                Event::Activity(entry) => self.activity.record(entry),
-            }
+            self.take(event);
         }
         changed
+    }
+
+    /// Applies one thing the agent layer reported.
+    pub fn take(&mut self, event: Event) {
+        match event {
+            Event::Status(status) => self.status = status,
+            Event::Reply { text, done } => {
+                match self.replying {
+                    Some(i) => self.ws.chat[i].text = text,
+                    None => {
+                        self.ws.chat.push(Message::new(Author::ChiefOfStaff, text));
+                        self.replying = Some(self.ws.chat.len() - 1);
+                    }
+                }
+                if done {
+                    self.replying = None;
+                }
+            }
+            Event::Problem(text) => {
+                self.replying = None;
+                self.ws.chat.push(Message::new(Author::Problem, text));
+            }
+            Event::Item(item) => self.ws.items.push(item),
+            Event::Withdrawn(id) => self.ws.items.retain(|i| i.id != id),
+            Event::Activity(entry) => self.activity.record(entry),
+            Event::Tool(tool) => {
+                if self.tool(&tool.id).is_none() {
+                    self.ws.chat.push(Message::tool(tool));
+                }
+            }
+            Event::ToolResult { id, result } => {
+                let Some(tool) = self
+                    .ws
+                    .chat
+                    .iter_mut()
+                    .find_map(|m| m.tool.as_mut().filter(|t| t.id == id))
+                else {
+                    return;
+                };
+                tool.result = Some(result);
+                let handler = tools::handler(tool);
+                let media = self.media_for(&handler);
+                self.media.insert(id, media);
+            }
+        }
+    }
+
+    /// The tool use in the chat with this id.
+    pub fn tool(&self, id: &str) -> Option<&tools::ToolUse> {
+        self.ws
+            .chat
+            .iter()
+            .find_map(|m| m.tool.as_ref().filter(|t| t.id == id))
+    }
+
+    /// Starts decoding the image, or makes the player, that `handler` shows. Only files a tool
+    /// use named reach here, and an image file larger than [`tools::MAX_MEDIA_BYTES`] is not
+    /// read.
+    fn media_for(&self, handler: &Handler) -> Media {
+        let image = match handler {
+            Handler::Image(Picture::Block { data, .. }) => {
+                Some(data.clone().map(|bytes| self.images.load(bytes)))
+            }
+            Handler::Image(Picture::File(path)) => Some(match std::fs::metadata(path) {
+                Ok(m) if m.len() > tools::MAX_MEDIA_BYTES => Err(format!(
+                    "The image is larger than {} MB, so it is not shown.",
+                    tools::MAX_MEDIA_BYTES / (1024 * 1024)
+                )),
+                Ok(_) => Ok(self.images.file(path, 0.0, 1.0)),
+                Err(e) => Err(format!("The image could not be read: {e}.")),
+            }),
+            _ => None,
+        };
+        let video = match handler {
+            Handler::Video(path) => {
+                let player = Player::file(path);
+                player.set_waker(self.media_wake.clone());
+                Some(player)
+            }
+            _ => None,
+        };
+        Media {
+            handler: handler.clone(),
+            image,
+            video,
+        }
+    }
+
+    /// Opens a video file a tool use named in the system's default player. Nothing opens on
+    /// its own; only the captain's press calls this.
+    pub fn open_file(&self, path: &Path) {
+        let opener = if cfg!(target_os = "macos") {
+            "open"
+        } else {
+            "xdg-open"
+        };
+        let _ = std::process::Command::new(opener).arg(path).spawn();
     }
 
     pub fn act(&mut self, action: Action) {
@@ -485,6 +601,7 @@ fn setup(s: &mut App, wake: Waker) {
         watcher.connect(wake.clone());
     }
     s.wake = Some(wake.clone());
+    let _ = s.window_wake.set(wake.clone());
     s.chief.connect(wake);
 }
 
@@ -702,6 +819,39 @@ fn main() {
                 })
                 .0;
             }),
+            // The chief of staff's Markdown, formatted: the captain's screenshot of raw
+            // asterisks, every construct, and a reply still arriving with its bold unclosed.
+            ("formatted", |s| {
+                *s = stub();
+                s.ws.chat
+                    .push(Message::new(Author::ChiefOfStaff, SCREENSHOT_REPLY));
+            }),
+            ("formatted-all", |s| {
+                *s = stub();
+                s.ws.items.clear();
+                s.ws.chat = vec![Message::new(Author::ChiefOfStaff, EVERY_CONSTRUCT)];
+            }),
+            ("formatted-streaming", |s| {
+                *s = stub();
+                s.take(agent::Event::Reply {
+                    text: "The fleet is **empty: nothing".into(),
+                    done: false,
+                });
+            }),
+            // Tool uses from the fake `claude`: an image Read returned, one that cannot be
+            // decoded, a video file, a command's output unfolded, and an image enlarged.
+            ("tool-image", |s| *s = shown(&fixture("chart.png"))),
+            ("tool-image-broken", |s| *s = shown(&fixture("broken.png"))),
+            ("tool-video", |s| *s = shown(&fixture("clip.mp4"))),
+            ("tool-generic", |s| {
+                *s = fake_in(Mode::Run);
+                say(s, "shell: ls");
+                s.unfolded.insert("toolu_fake_Bash".into());
+            }),
+            ("tool-picture", |s| {
+                *s = shown(&fixture("chart.png"));
+                s.showing = Showing::Picture("toolu_fake_Read".into());
+            }),
         ],
         min_size: Some((900.0, 560.0)),
         setup: Some(setup),
@@ -724,6 +874,70 @@ fn sample_rules() -> Vec<approval::Rule> {
         rule(Effect::Deny, "Bash", Some("git push --force")),
         rule(Effect::Allow, "Edit", Some("/Users/captain/project/src/*")),
     ]
+}
+
+/// The reply in the captain's screenshot, which showed its asterisks before replies were
+/// formatted.
+const SCREENSHOT_REPLY: &str = "Captain, the fleet is empty: nothing is running, queued, or \
+recently landed.
+
+**Captain's Call**
+No decision is recorded, captain. Contribution coverage is unverified (0 of 0 checked, and one \
+contribution record couldn't be read), so I can't say it's clear.
+
+**Recently Landed**
+No recent completions are in the current baseline.
+
+**Underway**
+Nothing is underway.
+
+**Charted Next**
+Nothing is queued.
+
+Since the fleet is empty, I can change shared firstmate material directly if you want that. I \
+can also look into the unreadable contribution record.";
+
+/// Every Markdown construct the chat formats, and raw HTML, which shows as text.
+const EVERY_CONSTRUCT: &str = "# Heading one
+## Heading two
+### Heading three
+
+Plain, **bold**, *italic*, ~~struck~~, `inline code` and a [link](https://example.com).
+A second line, kept as written.
+
+- First bullet
+- Second bullet
+  - Nested bullet
+
+1. First step
+2. Second step
+
+> A quoted line.
+
+```rust
+fn main() {
+    println!(\"hello\");
+}
+```
+
+<script>alert(1)</script> stays text, as does <b>this</b>.";
+
+/// A file in `scripts/fixtures`. `clip.mp4` is Rune's own test clip
+/// (`crates/rune/tests/fixtures/rgbw.mp4`, MIT licensed).
+fn fixture(name: &str) -> String {
+    format!("{}/scripts/fixtures/{name}", env!("CARGO_MANIFEST_DIR"))
+}
+
+/// The fake `claude` after it used Read on `path`, with any image decoded.
+fn shown(path: &str) -> App {
+    let mut app = fake_in(Mode::Run);
+    say(&mut app, &format!("show: {path}"));
+    for media in app.media.values() {
+        if let Some(Ok(image)) = &media.image {
+            let _ = image.wait();
+        }
+    }
+    app
 }
 
 /// Sends `text` and waits for the reply, for scenes.
@@ -1986,5 +2200,198 @@ mod tests {
             Status::Failed("fake claude: the settings file is corrupt".into())
         );
         assert!(rt.find("status-detail").is_some());
+    }
+
+    /// Every text on screen, without the invisible direction marks and code padding Rune's
+    /// Markdown view adds around words.
+    fn texts(rt: &Runtime<App>) -> Vec<String> {
+        rt.elements()
+            .into_iter()
+            .filter_map(|e| e.text)
+            .map(|t| {
+                t.chars()
+                    .filter(|c| !('\u{2066}'..='\u{2069}').contains(c) && *c != '\u{202f}')
+                    .collect()
+            })
+            .collect()
+    }
+
+    /// The texts inside the element keyed `key`.
+    fn texts_under(rt: &Runtime<App>, key: &str) -> Vec<String> {
+        let all = rt.elements();
+        let root = all.iter().position(|e| e.key.as_deref() == Some(key));
+        let inside = |mut i: usize| loop {
+            if Some(i) == root {
+                return true;
+            }
+            match all[i].parent {
+                Some(p) => i = p,
+                None => return false,
+            }
+        };
+        (0..all.len())
+            .filter(|&i| inside(i))
+            .filter_map(|i| all[i].text.clone())
+            .collect()
+    }
+
+    fn chief_says(text: &str) -> Runtime<App> {
+        let mut app = stub();
+        app.ws
+            .chat
+            .push(Message::new(Author::ChiefOfStaff, text.to_string()));
+        runtime_with(app)
+    }
+
+    #[test]
+    fn the_screenshot_reply_shows_its_headings_bold_not_in_asterisks() {
+        let rt = chief_says(SCREENSHOT_REPLY);
+        let texts = texts(&rt);
+        assert!(!texts.iter().any(|t| t.contains("**")), "{texts:?}");
+        // Each heading keeps its own line above what it introduces.
+        assert!(
+            texts
+                .iter()
+                .any(|t| t.starts_with("Captain's Call\nNo decision is recorded")),
+            "{texts:?}"
+        );
+        assert!(rt.find("msg-2-text").is_some());
+    }
+
+    #[test]
+    fn every_construct_is_formatted_and_html_shows_as_text() {
+        let rt = chief_says(EVERY_CONSTRUCT);
+        let texts = texts(&rt);
+        for shown in [
+            "Heading one",
+            "First bullet",
+            "Nested bullet",
+            "Second step",
+            "A quoted line.",
+            "<script>alert(1)</script> stays text, as does <b>this</b>.",
+        ] {
+            assert!(texts.iter().any(|t| t == shown), "{shown} in {texts:?}");
+        }
+        assert!(texts.iter().any(|t| t.contains("println!(\"hello\")")));
+        assert!(
+            !texts
+                .iter()
+                .any(|t| t.contains("**") || t.contains("~~") || t.contains("# "))
+        );
+    }
+
+    #[test]
+    fn a_reply_still_arriving_never_shows_its_markers() {
+        let whole = "The fleet is **empty**, *quiet* and ~~busy~~ `idle` now.";
+        let mut rt = runtime();
+        let mut end = 0;
+        while end < whole.len() {
+            end += 1;
+            let text = whole[..end].to_string();
+            rt.update(|s, _| s.take(Event::Reply { text, done: false }));
+            rt.frame(1.0 / 60.0);
+            let i = rt.state.replying.expect("still replying");
+            let shown = texts_under(&rt, &format!("msg-{i}-text"));
+            assert!(!shown.is_empty());
+            assert!(
+                !shown
+                    .iter()
+                    .any(|t| t.contains('*') || t.contains("~~") || t.contains('`')),
+                "{:?} showed {shown:?}",
+                &whole[..end]
+            );
+        }
+    }
+
+    #[test]
+    fn a_link_opens_in_the_browser_only_when_pressed_and_only_on_the_web() {
+        let mut rt =
+            chief_says("Read [the docs](https://example.com/docs) or [this](file:///etc/hosts).");
+        for _ in 0..10 {
+            rt.frame(1.0 / 60.0);
+        }
+        assert!(rt.take_url_requests().is_empty(), "nothing opens by itself");
+        tap(&mut rt, "https://example.com/docs");
+        assert_eq!(rt.take_url_requests(), ["https://example.com/docs"]);
+        tap(&mut rt, "file:///etc/hosts");
+        assert!(rt.take_url_requests().is_empty());
+    }
+
+    #[test]
+    fn an_image_a_tool_returned_shows_inline_and_enlarges() {
+        let mut rt = runtime_with(shown(&fixture("chart.png")));
+        assert!(rt.find("tool-2-placeholder").is_none());
+        tap(&mut rt, "tool-2-image");
+        assert_eq!(rt.state.showing, Showing::Picture("toolu_fake_Read".into()));
+        assert!(rt.find("picture").is_some());
+        tap(&mut rt, "picture-close");
+        assert_eq!(rt.state.showing, Showing::Chat);
+    }
+
+    #[test]
+    fn an_image_that_cannot_be_decoded_says_so_with_its_path() {
+        let path = fixture("broken.png");
+        let rt = runtime_with(shown(&path));
+        assert!(rt.find("tool-2-image").is_none());
+        let placeholder = rt
+            .elements()
+            .into_iter()
+            .find(|e| e.key.as_deref() == Some("tool-2-placeholder"))
+            .and_then(|e| e.text)
+            .unwrap();
+        assert!(placeholder.contains(&path) && placeholder.contains("could not be decoded"));
+    }
+
+    #[test]
+    fn an_image_file_too_large_to_read_is_not_read() {
+        let dir = scratch("unused");
+        let big = dir.join("big.png");
+        let file = std::fs::File::create(&big).unwrap();
+        file.set_len(tools::MAX_MEDIA_BYTES + 1).unwrap();
+        let mut app = stub();
+        app.take(Event::Tool(tools::ToolUse {
+            id: "t1".into(),
+            name: "Write".into(),
+            input: serde_json::json!({ "file_path": big }),
+            result: None,
+        }));
+        app.take(Event::ToolResult {
+            id: "t1".into(),
+            result: tools::ToolResult {
+                is_error: false,
+                content: vec![tools::Content::Text("written".into())],
+            },
+        });
+        let image = app.media["t1"].image.as_ref().unwrap();
+        assert!(image.as_ref().unwrap_err().contains("larger than 32 MB"));
+    }
+
+    #[test]
+    fn a_video_file_shows_a_player_and_an_open_action() {
+        let mut rt = runtime_with(shown(&fixture("clip.mp4")));
+        for key in ["tool-2-video", "tool-2-play", "tool-2-open"] {
+            assert!(rt.find(key).is_some(), "no {key}");
+        }
+        tap(&mut rt, "tool-2-play");
+        let player = rt.state.media["toolu_fake_Read"].video.clone().unwrap();
+        if cfg!(any(target_os = "macos", target_os = "windows")) {
+            assert!(player.is_playing());
+        } else {
+            // Rune has no player on this platform; the system's player is one press away.
+            assert!(rt.find("tool-2-problem").is_some());
+        }
+    }
+
+    #[test]
+    fn any_other_tool_shows_compactly_with_its_result_folded() {
+        let mut app = fake_in(Mode::Run);
+        say(&mut app, "shell: ls");
+        let mut rt = runtime_with(app);
+        assert!(texts(&rt).iter().any(|t| t == "Bash"));
+        assert!(rt.find("tool-2-result").is_none());
+        tap(&mut rt, "tool-2-toggle");
+        assert!(texts(&rt).iter().any(|t| t == "one\ntwo\nthree"));
+        tap(&mut rt, "tool-2-toggle");
+        assert!(rt.find("tool-2-result").is_none());
     }
 }

@@ -10,6 +10,7 @@ use crate::approval::{Entry, Policy};
 use crate::model::{
     Action, Agent, AgentStatus, Author, Id, Item, ItemKind, Message, Plan, Status, Workspace,
 };
+use crate::tools::{ToolResult, ToolUse};
 
 /// Something the agent layer reports. The app drains these each frame.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -23,6 +24,13 @@ pub enum Event {
     },
     /// A failure to show in the chat, in the agent layer's own words.
     Problem(String),
+    /// The chief of staff started a tool use; its result follows as [`Event::ToolResult`].
+    Tool(ToolUse),
+    /// What a tool use returned, by its id.
+    ToolResult {
+        id: String,
+        result: ToolResult,
+    },
     /// A new item for one of the captain's panels.
     Item(Item),
     /// The item no longer needs the captain, such as a question whose session ended.
