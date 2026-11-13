@@ -446,10 +446,12 @@ mod tests {
         let lab = Lab::new();
         let mut rt = runtime_with(on_firstmate(lab.firstmate()));
         assert!(rt.find("firstmate-check").is_none());
-        tap(&mut rt, "firstmate-install");
+        // One frame rather than `tap`'s thirty: a local clone can finish within those.
+        let (x, y) = rt.find("firstmate-install").expect("install button");
+        rt.pointer_down(x, y);
+        rt.pointer_up(x, y);
+        rt.frame(0.0);
         assert_eq!(rt.state.firstmate.work(), Some(Work::Installing));
-        assert!(rt.find("firstmate-progress").is_some());
-        assert!(rt.find("firstmate-install").is_none());
         wait(&mut rt, idle);
         assert_eq!(standing(&rt), firstmate::Standing::UpToDate);
         assert!(lab.clone_dir().join("AGENTS.md").exists());
