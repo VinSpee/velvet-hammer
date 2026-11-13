@@ -147,6 +147,9 @@ impl Firstmate {
 
     pub fn connect(&mut self, wake: Waker) {
         let _ = self.wake.set(wake);
+        if let Some(wake) = self.wake.get() {
+            wake();
+        }
     }
 
     pub fn clone_dir(&self) -> &Path {
@@ -565,6 +568,27 @@ mod tests {
             "mine"
         );
         assert_eq!(std::fs::read_dir(&squatter).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn connecting_after_a_run_started_wakes_the_app() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let lab = Lab::new();
+        let mut fm = lab.firstmate();
+        fm.install();
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while !lab.clone_dir().join(".git").exists() {
+            assert!(Instant::now() < deadline, "git never finished");
+            thread::sleep(Duration::from_millis(10));
+        }
+        let woken = Arc::new(AtomicUsize::new(0));
+        let counter = woken.clone();
+        fm.connect(Arc::new(move || {
+            counter.fetch_add(1, Ordering::SeqCst);
+        }));
+        assert!(woken.load(Ordering::SeqCst) >= 1);
+        finish(&mut fm);
+        assert!(matches!(fm.distro(), Distro::Installed(_)));
     }
 
     #[test]

@@ -3,6 +3,7 @@
 //! `cargo run -- --snap chat.png` renders it headless (see the README for every scene).
 
 mod agent;
+mod bridge;
 mod claude;
 mod firstmate;
 mod model;
@@ -78,6 +79,8 @@ impl App {
                     self.replying = None;
                     self.ws.chat.push(Message::new(Author::Problem, text));
                 }
+                Event::Item(item) => self.ws.items.push(item),
+                Event::Withdrawn(id) => self.ws.items.retain(|i| i.id != id),
             }
         }
         changed
@@ -291,6 +294,42 @@ fn main() {
                 *s = fake_program("/nonexistent/claude", "signed-out", &[]);
                 s.settle(settled);
             }),
+            // The fake calls back into the app through the bridge: the app_note tool, and the
+            // PreToolUse hook waiting on the captain, then allowed.
+            ("noted", |s| {
+                *s = fake("signed-in", &[]);
+                s.settle(settled);
+                s.draft.text = "note: Renew the velvet-hammer.dev domain".into();
+                s.send();
+                s.settle(replied);
+            }),
+            ("approval", |s| {
+                *s = fake("signed-in", &[]);
+                s.settle(settled);
+                s.draft.text = "run: git push".into();
+                s.send();
+                s.settle(|s| s.ws.needs_input().next().is_some());
+            }),
+            ("approved", |s| {
+                *s = fake("signed-in", &[]);
+                s.settle(settled);
+                s.draft.text = "run: git push".into();
+                s.send();
+                s.settle(|s| s.ws.needs_input().next().is_some());
+                let item = s.ws.needs_input().next().map(|i| i.id).unwrap();
+                s.act(Action::Answer {
+                    item,
+                    choice: "Allow".into(),
+                });
+                s.settle(replied);
+            }),
+            ("approval-long", |s| {
+                *s = fake("signed-in", &[]);
+                s.settle(settled);
+                s.draft.text = format!("run: {}", long_command());
+                s.send();
+                s.settle(|s| s.ws.needs_input().next().is_some());
+            }),
             ("claude-error", |s| {
                 *s = fake("signed-in", &[]);
                 s.settle(settled);
@@ -333,9 +372,15 @@ fn main() {
     });
 }
 
+/// A command whose dangerous part sits far past where a short preview would have cut it off.
+fn long_command() -> String {
+    format!("echo {}; rm -rf ~", "a harmless-looking prefix ".repeat(20))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model::Item;
     use rune::{Env, Runtime};
 
     fn runtime() -> Runtime<App> {
@@ -663,6 +708,168 @@ mod tests {
             rt.state.ws.chat.last().unwrap().text,
             "You said: api-key: token:"
         );
+    }
+
+    #[test]
+    fn a_note_from_claudes_tool_lands_in_for_you_to_do() {
+        let mut rt = runtime_with(fake("signed-in", &[]));
+        wait(&mut rt, settled);
+        rt.state.draft.text = "note: Renew the domain".into();
+        tap(&mut rt, "send");
+        wait(&mut rt, replied);
+        assert_eq!(
+            rt.state.ws.chat.last().unwrap().text,
+            "You said: I noted it for you: Renew the domain"
+        );
+        let note = rt.state.ws.for_you().next().expect("a note").clone();
+        assert_eq!(note.title, "Renew the domain");
+        assert!(rt.find(&format!("task-{}", note.id)).is_some());
+        // Marking it done tells the chief of staff which note it was.
+        let chat = rt.state.ws.chat.len();
+        tap(&mut rt, &format!("done-{}", note.id));
+        wait(&mut rt, |s| replied(s) && s.ws.chat.len() > chat);
+        assert_eq!(
+            rt.state.ws.chat.last().unwrap().text,
+            "You said: I have done this: Renew the domain"
+        );
+    }
+
+    /// Sends "run: git push", which makes the fake ask the hook, and answers the question.
+    fn answer_tool_use(choice: usize) -> Runtime<App> {
+        let mut rt = runtime_with(fake("signed-in", &[]));
+        wait(&mut rt, settled);
+        rt.state.draft.text = "run: git push".into();
+        tap(&mut rt, "send");
+        wait(&mut rt, |s| s.ws.needs_input().next().is_some());
+        let item = rt.state.ws.needs_input().next().unwrap().clone();
+        assert_eq!(item.title, "Allow Bash?");
+        assert_eq!(item.detail, "command: git push");
+        let chat = rt.state.ws.chat.len();
+        tap(&mut rt, &format!("answer-{}-{choice}", item.id));
+        wait(&mut rt, replied);
+        // The answer went to the hook, not into the chat.
+        assert_eq!(rt.state.ws.chat.len(), chat + 1);
+        assert!(rt.state.ws.needs_input().next().is_none());
+        rt
+    }
+
+    #[test]
+    fn allowing_a_tool_use_answers_claudes_hook() {
+        let rt = answer_tool_use(0);
+        assert_eq!(
+            rt.state.ws.chat.last().unwrap().text,
+            "You said: Bash was allowed to run git push"
+        );
+    }
+
+    /// Sends `message`, which makes the fake ask the hook, and returns the question shown.
+    fn ask_about(message: &str) -> (Runtime<App>, Item) {
+        let mut rt = runtime_with(fake("signed-in", &[]));
+        wait(&mut rt, settled);
+        rt.state.draft.text = message.into();
+        tap(&mut rt, "send");
+        wait(&mut rt, |s| s.ws.needs_input().next().is_some());
+        let item = rt.state.ws.needs_input().next().unwrap().clone();
+        (rt, item)
+    }
+
+    #[test]
+    fn the_question_shows_the_whole_command_not_a_preview() {
+        let command = long_command();
+        assert!(command.len() > 300);
+        let (mut rt, item) = ask_about(&format!("run: {command}"));
+        assert_eq!(item.detail, format!("command: {command}"));
+        assert!(item.detail.ends_with("; rm -rf ~"));
+        assert!(rt.find(&format!("input-{}-detail", item.id)).is_some());
+        tap(&mut rt, &format!("answer-{}-1", item.id));
+        wait(&mut rt, replied);
+    }
+
+    #[test]
+    fn the_question_for_a_write_shows_the_path_and_the_content() {
+        let (mut rt, item) = ask_about("write: /tmp/notes.txt hello there");
+        assert_eq!(item.title, "Allow Write?");
+        assert!(item.detail.contains("file_path: /tmp/notes.txt"));
+        assert!(item.detail.contains("content: hello there"));
+        tap(&mut rt, &format!("answer-{}-0", item.id));
+        wait(&mut rt, replied);
+        assert_eq!(
+            rt.state.ws.chat.last().unwrap().text,
+            "You said: Write was allowed to run /tmp/notes.txt"
+        );
+    }
+
+    #[test]
+    fn an_input_too_large_to_show_is_denied_without_asking() {
+        let mut rt = runtime_with(fake("signed-in", &[]));
+        wait(&mut rt, settled);
+        rt.state.draft.text = "big:".into();
+        tap(&mut rt, "send");
+        wait(&mut rt, replied);
+        assert_eq!(
+            rt.state.ws.chat.last().unwrap().text,
+            "You said: Bash was denied: too large to review"
+        );
+        assert!(rt.state.ws.needs_input().next().is_none());
+    }
+
+    #[test]
+    fn a_question_claude_code_stopped_waiting_on_leaves_the_panel() {
+        let (mut rt, item) = ask_about("abandon: ls");
+        assert_eq!(item.title, "Allow Bash?");
+        wait(&mut rt, |s| s.ws.needs_input().next().is_none());
+        wait(&mut rt, replied);
+        assert_eq!(
+            rt.state.ws.chat.last().unwrap().text,
+            "You said: the hook did not answer, so Bash was blocked"
+        );
+        // Nothing is left to click, and no answer went anywhere.
+        assert!(rt.find(&format!("answer-{}-0", item.id)).is_none());
+    }
+
+    #[test]
+    fn denying_a_tool_use_answers_claudes_hook() {
+        let rt = answer_tool_use(1);
+        assert_eq!(
+            rt.state.ws.chat.last().unwrap().text,
+            "You said: Bash was denied: git push"
+        );
+    }
+
+    /// One tiny message on the captain's real Claude Code and the cheapest model, to check that
+    /// the installed `claude` accepts the bridge's flags and calls the tool and the hook. It uses
+    /// the subscription, so it only runs on request: `cargo test real_claude -- --ignored`.
+    #[test]
+    #[ignore = "uses the real Claude account"]
+    fn real_claude_calls_the_tool_through_the_hook() {
+        let claude = Claude::new("claude").env("ANTHROPIC_MODEL", "haiku");
+        let mut rt = runtime_with(App::new(Box::new(claude), installed_firstmate()));
+        wait(&mut rt, settled);
+        assert!(matches!(rt.state.status, Status::Ready(_)), "not signed in");
+        rt.state.draft.text = "Call the app_note tool with the text \"bridge check\", then reply \
+                               with only the word done."
+            .into();
+        tap(&mut rt, "send");
+        let deadline = Instant::now() + Duration::from_secs(120);
+        while !replied(&rt.state) {
+            assert!(Instant::now() < deadline, "no reply");
+            // Loading the deferred MCP tool is the only other tool use this needs.
+            let question = rt.state.ws.needs_input().next().cloned();
+            if let Some(item) = question {
+                eprintln!("hook asked: {} {}", item.title, item.detail);
+                let choice = if item.title == "Allow ToolSearch?" {
+                    0
+                } else {
+                    1
+                };
+                tap(&mut rt, &format!("answer-{}-{choice}", item.id));
+            }
+            std::thread::sleep(Duration::from_millis(50));
+            rt.frame(1.0 / 60.0);
+        }
+        eprintln!("chat: {:?}", rt.state.ws.chat);
+        let note = rt.state.ws.for_you().next().expect("app_note added a note");
+        assert_eq!(note.title, "bridge check");
     }
 
     #[test]

@@ -10,10 +10,11 @@ Velvet Hammer is early and experimental. The chief of staff runs on your own ins
 and your Claude subscription (see [Claude Code and your subscription](#claude-code-and-your-subscription)).
 The app installs and updates its own clone of
 [firstmate](https://github.com/kunchenguid/firstmate), which the chief of staff will run on (see
-[The managed firstmate clone](docs/firstmate.md)); the chat does not run inside it yet. The two
-panels and the agents list do not have a data source yet, and there is no persistence. A stub with
-sample data stands in for the agent layer in headless scenes and tests. The interface and code
-will change.
+[The managed firstmate clone](docs/firstmate.md)); the chat does not run inside it yet.
+The two panels show only the notes Claude Code adds with the app's `app_note` tool and the tool
+uses waiting for your approval; the agents list has no data source yet, and there is no
+persistence. A stub with sample data stands in for the agent layer in headless scenes and tests. The interface
+and code will change.
 
 The sign-in flow is tested against a fake `claude`; signing in with a real Claude account has not
 been tested yet (see [Trying the real sign-in](#trying-the-real-sign-in)).
@@ -41,6 +42,8 @@ The window has three columns:
   replies, problems). `Stub` simulates it for headless scenes and tests.
 - `src/claude.rs`: `Claude`, the chief of staff on the user's own Claude Code. It runs only the
   `claude` command, as described below.
+- `src/bridge.rs`: the server the chat session's `claude` calls back into: one MCP tool and one
+  PreToolUse hook (see [docs/extending.md](docs/extending.md)).
 - `src/firstmate.rs`: `Firstmate`, the managed firstmate clone. It runs `git` to install the
   clone, compare it with upstream and update it, and never discards a local change. Its `lab`
   module builds scratch git repositories for tests and scenes.
@@ -68,6 +71,12 @@ talks to Anthropic:
   `claude -p --input-format stream-json --output-format stream-json --verbose
   --include-partial-messages --no-session-persistence` process. Each message is written to its
   standard input, and the reply streams into the chat as Claude Code produces it.
+- **Tools and hooks.** The chat session also gets `--mcp-config` and `--settings` flags that point
+  at a server the app runs on `127.0.0.1` for that session only. Its `app_note` tool adds a note
+  to **For you to do**, and its PreToolUse hook asks you in **Needs your input** before Claude
+  Code uses any other tool. Your Claude settings files are not changed. See
+  [docs/extending.md](docs/extending.md), which also covers skills, subagents, the Agent SDK and
+  what Anthropic's terms say.
 - **Subscription only.** If `claude auth status` reports a sign-in method other than `claude.ai`
   (an Anthropic Console sign-in, an API key or anything else), the chat stays locked and the
   sign-in screen asks for a Claude subscription sign-in: run `claude auth login --claudeai`, or
@@ -155,6 +164,10 @@ It writes these files to `OUT_DIR`:
 | `expired.png`, `expired.json` | Anthropic rejected the sign-in for a message |
 | `cli-missing.png`, `cli-missing.json` | No `claude` on `PATH` |
 | `claude-error.png`, `claude-error.json` | A message failed, with Claude Code's error in the chat |
+| `noted.png`, `noted.json` | Claude Code called the `app_note` tool: a note in For you to do |
+| `approval.png`, `approval.json` | The PreToolUse hook is waiting for you to allow or deny a Bash command |
+| `approval-long.png`, `approval-long.json` | The same question for a very long command, shown whole in a scrollable block |
+| `approved.png`, `approved.json` | After you allowed it, with the reply |
 | `firstmate-missing.png`, `firstmate-missing.json` | The Firstmate page with no clone installed |
 | `firstmate-installing.png`, `firstmate-installing.json` | The clone is being installed |
 | `firstmate-up-to-date.png`, `firstmate-up-to-date.json` | The clone matches upstream |

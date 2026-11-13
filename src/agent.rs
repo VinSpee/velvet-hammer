@@ -20,6 +20,10 @@ pub enum Event {
     },
     /// A failure to show in the chat, in the agent layer's own words.
     Problem(String),
+    /// A new item for one of the captain's panels.
+    Item(Item),
+    /// The item no longer needs the captain, such as a question whose session ended.
+    Withdrawn(Id),
 }
 
 pub trait ChiefOfStaff {
