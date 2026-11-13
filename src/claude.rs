@@ -3,8 +3,10 @@
 //! (Claude Code opens the browser and keeps the sign-in), and a long-lived
 //! `claude -p --input-format stream-json --output-format stream-json` session carries the chat.
 //! The app never reads, stores or forwards a credential; it only reads the fields `claude`
-//! prints about the sign-in.
+//! prints about the sign-in. The session calls back into the app through a [`Bridge`]: one tool
+//! and one hook, passed as flags to that session only.
 
+use std::collections::HashMap;
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::path::PathBuf;
 use std::process::{Child, ChildStdin, Command, Output, Stdio};
@@ -19,12 +21,16 @@ use rune::Waker;
 use serde_json::{Value, json};
 
 use crate::agent::{ChiefOfStaff, Event};
-use crate::model::{Action, Plan, Status, Workspace};
+use crate::bridge::{Bridge, Call};
+use crate::model::{Action, Id, Item, ItemKind, Plan, Status, Workspace};
 
 /// How long `claude auth status` may take before the app reports it as not answering.
 const CHECK_TIMEOUT: Duration = Duration::from_secs(20);
 /// How often the app asks `claude auth status` again while a sign-in runs.
 const LOGIN_POLL: Duration = Duration::from_secs(2);
+/// The answers to a tool-use question; the first allows it.
+const ALLOW: &str = "Allow";
+const DENY: &str = "Deny";
 
 pub struct Claude {
     program: PathBuf,
@@ -44,6 +50,11 @@ pub struct Claude {
     /// Events for the next [`ChiefOfStaff::events`].
     out: Vec<Event>,
     next_id: u64,
+    next_item: Id,
+    /// Tool uses waiting on the captain, by the item that asks about them.
+    approvals: HashMap<Id, Sender<bool>>,
+    /// Notes `app_note` added, by item, so marking one done can say which.
+    notes: HashMap<Id, String>,
 }
 
 impl Claude {
@@ -67,6 +78,9 @@ impl Claude {
             reply: String::new(),
             out: Vec::new(),
             next_id: 0,
+            next_item: 0,
+            approvals: HashMap::new(),
+            notes: HashMap::new(),
         }
     }
 
@@ -81,6 +95,19 @@ impl Claude {
         self.next_id
     }
 
+    fn item_id(&mut self) -> Id {
+        self.next_item += 1;
+        self.next_item
+    }
+
+    /// Stops the chat session. Its unanswered tool-use questions leave the panel and are denied.
+    fn end_session(&mut self) {
+        self.session = None;
+        for (id, _) in self.approvals.drain() {
+            self.out.push(Event::Withdrawn(id));
+        }
+    }
+
     fn check(&mut self) {
         if self.checking {
             return;
@@ -93,7 +120,7 @@ impl Claude {
     fn set_status(&mut self, status: Status) {
         if status != self.status {
             if !matches!(status, Status::Ready(_)) {
-                self.session = None;
+                self.end_session();
             }
             self.status = status.clone();
             self.out.push(Event::Status(status));
@@ -131,8 +158,9 @@ impl Claude {
                 self.check();
             }
             Msg::Record(id, record) if self.session_is(id) => self.record(&record),
+            Msg::Call(id, call) if self.session_is(id) => self.call(call),
             Msg::SessionEnded(id, stderr) if self.session_is(id) => {
-                self.session = None;
+                self.end_session();
                 self.finish_reply();
                 let detail = stderr.trim();
                 self.out.push(Event::Problem(if detail.is_empty() {
@@ -145,6 +173,40 @@ impl Claude {
             // From a sign-in or session the app already stopped.
             _ => {}
         }
+    }
+
+    /// Something the session asked of the app through the bridge.
+    fn call(&mut self, call: Call) {
+        let id = self.item_id();
+        let item = match call {
+            Call::Note(text) => {
+                self.notes.insert(id, text.clone());
+                Item {
+                    id,
+                    kind: ItemKind::ForYou,
+                    title: text,
+                    detail: "Noted by your chief of staff.".into(),
+                    agent: None,
+                }
+            }
+            Call::Approve {
+                tool,
+                input,
+                answer,
+            } => {
+                self.approvals.insert(id, answer);
+                Item {
+                    id,
+                    kind: ItemKind::NeedsInput {
+                        options: vec![ALLOW.into(), DENY.into()],
+                    },
+                    title: format!("Allow {tool}?"),
+                    detail: summary(&input),
+                    agent: None,
+                }
+            }
+        };
+        self.out.push(Event::Item(item));
     }
 
     fn login_is(&self, id: u64) -> bool {
@@ -239,13 +301,23 @@ impl ChiefOfStaff for Claude {
     }
 
     fn act(&mut self, _ws: &Workspace, action: &Action) {
+        // A tool-use answer goes back to the hook that asked, not into the chat.
+        if let Action::Answer { item, choice } = action
+            && let Some(answer) = self.approvals.remove(item)
+        {
+            let _ = answer.send(choice == ALLOW);
+            return;
+        }
         let text = match action {
             Action::Say(text) => text.clone(),
             Action::Answer { item, choice } => format!("My answer to item {item}: {choice}"),
-            Action::Done { item } => format!("I have done item {item}."),
+            Action::Done { item } => match self.notes.remove(item) {
+                Some(note) => format!("I have done this: {note}"),
+                None => format!("I have done item {item}."),
+            },
         };
         if let Err(problem) = self.say(&text) {
-            self.session = None;
+            self.end_session();
             self.out.push(Event::Problem(problem));
         }
     }
@@ -296,6 +368,7 @@ enum Msg {
     LoginSignedIn(u64, Status),
     LoginEnded(u64, Option<String>),
     Record(u64, Value),
+    Call(u64, Call),
     SessionEnded(u64, String),
 }
 
@@ -548,11 +621,13 @@ fn first_https_url(line: &str) -> Option<String> {
         .map(str::to_string)
 }
 
-/// The long-lived chat: `claude -p` reading user messages and printing stream-json records.
+/// The long-lived chat: `claude -p` reading user messages and printing stream-json records,
+/// and calling back into the app through its bridge.
 struct Session {
     id: u64,
     child: Child,
     stdin: ChildStdin,
+    _bridge: Bridge,
 }
 
 impl Session {
@@ -562,6 +637,8 @@ impl Session {
         env: &[(String, String)],
         outbox: &Outbox,
     ) -> io::Result<Session> {
+        let calls = outbox.clone();
+        let bridge = Bridge::start(move |call| calls.send(Msg::Call(id, call)))?;
         let mut child = subscription_only(
             Command::new(program)
                 .args([
@@ -573,6 +650,10 @@ impl Session {
                     "--verbose",
                     "--include-partial-messages",
                     "--no-session-persistence",
+                    "--mcp-config",
+                    &bridge.mcp_config(),
+                    "--settings",
+                    &bridge.settings(),
                 ])
                 .envs(env.iter().map(|(k, v)| (k, v))),
         )
@@ -600,13 +681,32 @@ impl Session {
             }
             out.send(Msg::SessionEnded(id, stderr.join().unwrap_or_default()));
         });
-        Ok(Session { id, child, stdin })
+        Ok(Session {
+            id,
+            child,
+            stdin,
+            _bridge: bridge,
+        })
     }
 }
 
 impl Drop for Session {
     fn drop(&mut self) {
         let _ = self.child.kill();
+    }
+}
+
+/// What a tool use would do, for the question's detail line: a command or path when it has one,
+/// otherwise its whole input.
+fn summary(input: &Value) -> String {
+    const LIMIT: usize = 300;
+    let text = ["command", "file_path", "url", "pattern"]
+        .iter()
+        .find_map(|key| input[key].as_str().map(str::to_string))
+        .unwrap_or_else(|| input.to_string());
+    match text.char_indices().nth(LIMIT) {
+        Some((end, _)) => format!("{}\u{2026}", &text[..end]),
+        None => text,
     }
 }
 
