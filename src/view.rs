@@ -1,18 +1,19 @@
-//! The window: agents on the left, the chief-of-staff chat (or a peek at one subagent) in the
-//! middle, and the two panels for the captain on the right. Every element a test or a headless
-//! script reaches has a key.
+//! The window: agents on the left, the chief-of-staff chat (or a peek at one subagent, or the
+//! Claude sign-in while the chat can't run) in the middle, and the two panels for the captain on
+//! the right. Every element a test or a headless script reaches has a key.
 
 use rune::tok::{self, Theme, radius, space, type_};
 use rune::{Cx, El, ScrollSpec, col, el, row, text, text_input};
 
 use crate::App;
-use crate::model::{Action, Agent, Author, Item, ItemKind, Message};
+use crate::model::{Action, Agent, Author, Item, ItemKind, Message, Plan, Status};
 
 pub fn view(s: &App, cx: &mut Cx<App>) -> El {
     let t = tok::theme(cx.system_dark());
-    let main = match s.peek.and_then(|id| s.ws.agent(id)) {
-        Some(agent) => peek(agent, t),
-        None => chat(s, t),
+    let main = match (s.peek.and_then(|id| s.ws.agent(id)), &s.status) {
+        (Some(agent), _) => peek(agent, t),
+        (None, Status::Ready(plan)) => chat(s, plan, t),
+        (None, status) => sign_in(status, t, cx.system_dark()),
     };
     row()
         .w_full()
@@ -71,7 +72,7 @@ fn agents(s: &App, t: Theme) -> El {
     list
 }
 
-fn chat(s: &App, t: Theme) -> El {
+fn chat(s: &App, plan: &Plan, t: Theme) -> El {
     let input = text_input(&s.draft, type_::BODY)
         .key("chat-input")
         .single_line()
@@ -103,9 +104,184 @@ fn chat(s: &App, t: Theme) -> El {
         .min_h(0.0)
         .padding(space::S6)
         .gap(space::S3)
-        .child(heading("Chief of staff", t))
+        .child(
+            col()
+                .gap(2.0)
+                .child(heading("Chief of staff", t))
+                .child(note("health", &health(plan), t)),
+        )
         .child(transcript("messages", &s.ws.chat, t))
         .child(composer)
+}
+
+/// One line on what runs the chief of staff and what pays for it.
+fn health(plan: &Plan) -> String {
+    match plan {
+        Plan::Subscription(kind) => {
+            format!(
+                "Claude Code \u{b7} signed in with your Claude {} plan",
+                capitalized(kind)
+            )
+        }
+        Plan::Other(method) => format!("Claude Code \u{b7} signed in with {method}"),
+        Plan::Simulated => "Simulated chief of staff \u{b7} no Claude Code".into(),
+    }
+}
+
+fn capitalized(word: &str) -> String {
+    let mut chars = word.chars();
+    chars
+        .next()
+        .map(|c| c.to_uppercase().chain(chars).collect())
+        .unwrap_or_default()
+}
+
+/// What the middle column shows while the chat can't run: the sign-in, its progress, or why
+/// Claude Code isn't usable. Claude Code does the signing in; this only starts it and reports.
+fn sign_in(status: &Status, t: Theme, dark: bool) -> El {
+    let mut body = col().key("sign-in").gap(space::S3).max_w(520.0);
+    let mut buttons = row().gap(space::S2);
+    let (title, lede) = match status {
+        Status::Checking => (
+            "Checking Claude Code",
+            "Asking `claude auth status` whether Claude Code is signed in.",
+        ),
+        Status::SignedOut { .. } => (
+            "Sign in with Claude",
+            "Your chief of staff runs on your own Claude Code, so its messages count against your \
+             Claude subscription. Claude Code signs you in and keeps the sign-in; Velvet Hammer \
+             never sees it.",
+        ),
+        Status::SigningIn { .. } => (
+            "Finish signing in in your browser",
+            "Claude Code opened its sign-in page. Approve it there and this window returns to the \
+             chat.",
+        ),
+        Status::Expired => (
+            "Your Claude sign-in has expired",
+            "Claude Code still has a sign-in, but Anthropic did not accept it for your last \
+             message. Sign in again to keep going.",
+        ),
+        Status::CliMissing => (
+            "Claude Code isn't installed",
+            "Velvet Hammer needs the `claude` command on its PATH. Install Claude Code from \
+             https://code.claude.com, then choose Check again.",
+        ),
+        Status::Failed(_) => (
+            "Claude Code isn't working",
+            "Claude Code is installed, but asking it whether it is signed in failed:",
+        ),
+        Status::Ready(_) => unreachable!("the chat shows instead"),
+    };
+    body = body
+        .child(
+            text(title)
+                .key("sign-in-title")
+                .font(type_::TITLE)
+                .color(t.text),
+        )
+        .child(
+            text(lede)
+                .key("sign-in-lede")
+                .font(type_::BODY)
+                .color(t.text_secondary)
+                .wrap(),
+        );
+    match status {
+        Status::SignedOut { problem } => {
+            if let Some(problem) = problem {
+                body = body.child(warning("sign-in-problem", problem, dark));
+            }
+            buttons = buttons
+                .child(button("sign-in-button", "Sign in with Claude", t, |s| {
+                    s.sign_in()
+                }))
+                .child(button("recheck", "Check again", t, |s| s.recheck()));
+            body = body.child(buttons).child(note(
+                "sign-in-help",
+                "This runs `claude auth login`, which opens your browser. You can also run it in \
+                 a terminal yourself, then choose Check again.",
+                t,
+            ));
+        }
+        Status::SigningIn { url } => {
+            body = body.child(note(
+                "sign-in-progress",
+                if url.is_some() {
+                    "Waiting for you to approve the sign-in in your browser\u{2026}"
+                } else {
+                    "Starting Claude Code's sign-in\u{2026}"
+                },
+                t,
+            ));
+            if let Some(url) = url {
+                body = body.child(
+                    text(url.clone())
+                        .key("sign-in-url")
+                        .font(type_::LABEL)
+                        .color(t.text_secondary)
+                        .wrap_anywhere(),
+                );
+                buttons = buttons.child(button("open-sign-in", "Open the sign-in page", t, |s| {
+                    s.open_sign_in_page()
+                }));
+            }
+            body = body.child(buttons.child(button("cancel-sign-in", "Cancel", t, |s| {
+                s.cancel_sign_in()
+            })));
+        }
+        Status::Expired => {
+            body = body.child(
+                buttons
+                    .child(button("sign-in-button", "Sign in again", t, |s| {
+                        s.sign_in()
+                    }))
+                    .child(button("recheck", "Check again", t, |s| s.recheck())),
+            );
+        }
+        Status::Failed(detail) => {
+            body = body
+                .child(warning("status-detail", detail, dark))
+                .child(buttons.child(button("recheck", "Check again", t, |s| s.recheck())));
+        }
+        Status::CliMissing => {
+            body = body.child(buttons.child(button("recheck", "Check again", t, |s| s.recheck())));
+        }
+        Status::Checking | Status::Ready(_) => {}
+    }
+    col()
+        .key("sign-in-screen")
+        .grow(1.0)
+        .h_full()
+        .min_h(0.0)
+        .padding(space::S6)
+        .gap(space::S6)
+        .child(heading("Chief of staff", t))
+        .child(
+            col()
+                .padding(space::S6)
+                .radius(radius::LG)
+                .fill(t.card)
+                .border(1.0, t.card_border)
+                .child(body),
+        )
+}
+
+fn note(key: &str, words: &str, t: Theme) -> El {
+    text(words.to_string())
+        .key(key)
+        .font(type_::LABEL)
+        .color(t.text_secondary)
+        .wrap()
+}
+
+/// A problem in the agent layer's own words.
+fn warning(key: &str, words: &str, dark: bool) -> El {
+    text(words.to_string())
+        .key(key)
+        .font(type_::BODY)
+        .color(tok::accent(3, dark))
+        .wrap()
 }
 
 fn peek(agent: &Agent, t: Theme) -> El {
@@ -142,6 +318,7 @@ fn transcript(key: &str, messages: &[Message], t: Theme) -> El {
             Author::Captain => "You",
             Author::ChiefOfStaff => "Chief of staff",
             Author::Subagent => "Subagent",
+            Author::Problem => "Claude Code reported a problem",
         };
         list = list.child(
             col()

@@ -3,65 +3,249 @@
 //! `cargo run -- --snap chat.png` renders it headless (see the README for every scene).
 
 mod agent;
+mod claude;
 mod model;
 mod view;
 
-use rune::{AppSpec, TextEdit};
+use std::time::{Duration, Instant};
 
-use agent::{ChiefOfStaff, Stub};
-use model::{Action, Id, Workspace};
+use rune::{AppSpec, TextEdit, Tx, Waker};
+
+use agent::{ChiefOfStaff, Event, Stub};
+use claude::Claude;
+use model::{Action, Author, Id, Message, Status, Workspace};
 
 /// All app state: the workspace the agent layer fills, plus what only the UI needs.
 pub struct App {
     pub ws: Workspace,
     pub chief: Box<dyn ChiefOfStaff>,
+    pub status: Status,
     pub draft: TextEdit,
     /// The subagent whose transcript replaces the chat, if the captain is peeking.
     pub peek: Option<Id>,
+    /// The chat message the chief of staff is still writing.
+    pub replying: Option<usize>,
 }
 
 impl App {
     pub fn new(mut chief: Box<dyn ChiefOfStaff>) -> Self {
-        App {
+        let mut app = App {
             ws: chief.open(),
             chief,
+            status: Status::Checking,
             draft: TextEdit::default(),
             peek: None,
+            replying: None,
+        };
+        app.drain();
+        app
+    }
+
+    /// Applies what the agent layer reported; true when anything changed.
+    pub fn drain(&mut self) -> bool {
+        let events = self.chief.events();
+        let changed = !events.is_empty();
+        for event in events {
+            match event {
+                Event::Status(status) => self.status = status,
+                Event::Reply { text, done } => {
+                    match self.replying {
+                        Some(i) => self.ws.chat[i].text = text,
+                        None => {
+                            self.ws.chat.push(Message::new(Author::ChiefOfStaff, text));
+                            self.replying = Some(self.ws.chat.len() - 1);
+                        }
+                    }
+                    if done {
+                        self.replying = None;
+                    }
+                }
+                Event::Problem(text) => {
+                    self.replying = None;
+                    self.ws.chat.push(Message::new(Author::Problem, text));
+                }
+            }
         }
+        changed
     }
 
     pub fn act(&mut self, action: Action) {
         self.ws.apply(&action);
-        let replies = self.chief.respond(&self.ws, &action);
-        self.ws.chat.extend(replies);
+        self.chief.act(&self.ws, &action);
+        self.drain();
     }
 
     pub fn send(&mut self) {
         let text = self.draft.text.trim().to_string();
-        if text.is_empty() {
+        if text.is_empty() || !matches!(self.status, Status::Ready(_)) {
             return;
         }
         self.draft.clear();
         self.act(Action::Say(text));
     }
+
+    pub fn sign_in(&mut self) {
+        self.chief.sign_in();
+        self.drain();
+    }
+
+    pub fn cancel_sign_in(&mut self) {
+        self.chief.cancel_sign_in();
+        self.drain();
+    }
+
+    pub fn recheck(&mut self) {
+        self.chief.recheck();
+        self.drain();
+    }
+
+    /// Opens the sign-in page Claude Code printed in the system browser. Claude Code opens it
+    /// too; this is for when that did not work or the tab was closed.
+    pub fn open_sign_in_page(&self) {
+        if let Status::SigningIn { url: Some(url) } = &self.status {
+            let opener = if cfg!(target_os = "macos") {
+                "open"
+            } else {
+                "xdg-open"
+            };
+            let _ = std::process::Command::new(opener).arg(url).spawn();
+        }
+    }
+
+    /// Drains events until `done` holds, for headless scenes that drive a real process.
+    fn settle(&mut self, done: impl Fn(&App) -> bool) {
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while !done(self) {
+            assert!(Instant::now() < deadline, "the agent layer never settled");
+            std::thread::sleep(Duration::from_millis(20));
+            self.drain();
+        }
+    }
 }
 
 fn init() -> App {
-    App::new(Box::new(Stub))
+    App::new(Box::new(Claude::new("claude")))
+}
+
+fn stub() -> App {
+    App::new(Box::new(Stub::default()))
+}
+
+/// The fake `claude` in `scripts/`, which speaks the real one's protocol without an account.
+const FAKE_CLAUDE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/scripts/fake-claude");
+
+/// An app on the fake `claude`, starting in `state` (see `scripts/fake-claude`).
+fn fake(state: &str, extra_env: &[(&str, &str)]) -> App {
+    on_fake(FAKE_CLAUDE, &scratch(state), extra_env)
+}
+
+fn fake_program(program: &str, state: &str, extra_env: &[(&str, &str)]) -> App {
+    on_fake(program, &scratch(state), extra_env)
+}
+
+/// A fresh scratch directory for the fake `claude`, so runs never share sign-in state. They live
+/// under `target/`, so `cargo clean` removes them.
+fn scratch(state: &str) -> std::path::PathBuf {
+    use std::sync::atomic::{AtomicU32, Ordering};
+    static RUN: AtomicU32 = AtomicU32::new(0);
+    let home = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("target/fake-claude")
+        .join(format!(
+            "{}-{}",
+            std::process::id(),
+            RUN.fetch_add(1, Ordering::Relaxed)
+        ));
+    let _ = std::fs::remove_dir_all(&home);
+    std::fs::create_dir_all(&home).expect("scratch directory");
+    std::fs::write(home.join("state"), state).expect("fake claude state");
+    home
+}
+
+fn on_fake(program: &str, home: &std::path::Path, extra_env: &[(&str, &str)]) -> App {
+    let mut claude = Claude::new(program).env("FAKE_CLAUDE_HOME", home.to_string_lossy());
+    for (k, v) in extra_env {
+        claude = claude.env(k, *v);
+    }
+    App::new(Box::new(claude))
+}
+
+fn settled(s: &App) -> bool {
+    s.status != Status::Checking
+}
+
+fn replied(s: &App) -> bool {
+    s.replying.is_none()
+        && s.ws
+            .chat
+            .last()
+            .is_some_and(|m| m.author != Author::Captain)
+}
+
+fn poll(s: &mut App, _: f64, _: &mut Tx) -> bool {
+    s.drain()
+}
+
+fn setup(s: &mut App, wake: Waker) {
+    s.chief.connect(wake);
 }
 
 fn main() {
     rune::run(AppSpec::<App> {
         scenes: &[
-            ("chat", |_| {}),
+            ("chat", |s| *s = stub()),
             ("replied", |s| {
+                *s = stub();
                 s.draft.text = "Ship it when CI is green.".into();
                 s.send();
             }),
-            ("empty", |s| s.ws.items.clear()),
-            ("peek", |s| s.peek = s.ws.agents.first().map(|a| a.id)),
+            ("empty", |s| {
+                *s = stub();
+                s.ws.items.clear()
+            }),
+            ("peek", |s| {
+                *s = stub();
+                s.peek = s.ws.agents.first().map(|a| a.id)
+            }),
+            // The rest drive the fake `claude` for real.
+            ("signed-out", |s| {
+                *s = fake("signed-out", &[]);
+                s.settle(settled);
+            }),
+            ("signing-in", |s| {
+                *s = fake("signed-out", &[]);
+                s.settle(settled);
+                s.sign_in();
+                s.settle(|s| matches!(s.status, Status::SigningIn { url: Some(_) }));
+            }),
+            ("signed-in", |s| {
+                *s = fake("signed-in", &[]);
+                s.settle(settled);
+                s.draft.text = "What needs me today?".into();
+                s.send();
+                s.settle(replied);
+            }),
+            ("expired", |s| {
+                *s = fake("expired", &[]);
+                s.settle(settled);
+                s.draft.text = "What needs me today?".into();
+                s.send();
+                s.settle(|s| s.status == Status::Expired);
+            }),
+            ("cli-missing", |s| {
+                *s = fake_program("/nonexistent/claude", "signed-out", &[]);
+                s.settle(settled);
+            }),
+            ("claude-error", |s| {
+                *s = fake("signed-in", &[]);
+                s.settle(settled);
+                s.draft.text = "Please fail this one.".into();
+                s.send();
+                s.settle(replied);
+            }),
         ],
         min_size: Some((900.0, 560.0)),
+        setup: Some(setup),
+        poll: Some(poll),
         ..AppSpec::new("Velvet Hammer", (1100.0, 720.0), init, view::view)
     });
 }
@@ -72,11 +256,16 @@ mod tests {
     use rune::{Env, Runtime};
 
     fn runtime() -> Runtime<App> {
+        runtime_with(stub())
+    }
+
+    fn runtime_with(app: App) -> Runtime<App> {
         let env = Env {
             system_dark: true,
             scale: 2.0,
         };
-        let mut rt = Runtime::new(init(), view::view, (1100.0, 720.0), env);
+        let mut rt = Runtime::new(app, view::view, (1100.0, 720.0), env);
+        rt.poll = Some(poll);
         rt.frame(0.0);
         rt
     }
@@ -144,5 +333,165 @@ mod tests {
         tap(&mut rt, "peek-close");
         assert_eq!(rt.state.peek, None);
         assert!(rt.find("chat").is_some());
+    }
+
+    // The rest run the app on `scripts/fake-claude`, a stand-in for Claude Code's `claude`.
+
+    /// Frames until `done` holds, letting the fake's real processes run.
+    fn wait(rt: &mut Runtime<App>, done: impl Fn(&App) -> bool) {
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while !done(&rt.state) {
+            assert!(
+                Instant::now() < deadline,
+                "timed out; status is {:?}",
+                rt.state.status
+            );
+            std::thread::sleep(Duration::from_millis(20));
+            rt.frame(1.0 / 60.0);
+        }
+        rt.frame(1.0 / 60.0);
+    }
+
+    #[test]
+    fn signed_out_shows_the_sign_in_screen_instead_of_the_chat() {
+        let mut rt = runtime_with(fake("signed-out", &[]));
+        wait(&mut rt, settled);
+        assert_eq!(rt.state.status, Status::SignedOut { problem: None });
+        assert!(rt.find("sign-in-button").is_some());
+        assert!(rt.find("chat-input").is_none());
+    }
+
+    #[test]
+    fn signing_in_runs_claude_and_returns_to_the_chat() {
+        let home = scratch("signed-out");
+        let mut rt = runtime_with(on_fake(FAKE_CLAUDE, &home, &[]));
+        wait(&mut rt, settled);
+        tap(&mut rt, "sign-in-button");
+        wait(&mut rt, |s| {
+            matches!(s.status, Status::SigningIn { url: Some(_) })
+        });
+        assert!(rt.find("sign-in-url").is_some());
+        assert!(rt.find("cancel-sign-in").is_some());
+        // The captain approves in the browser.
+        std::fs::write(home.join("browser-done"), "").unwrap();
+        wait(&mut rt, |s| matches!(s.status, Status::Ready(_)));
+        assert_eq!(
+            rt.state.status,
+            Status::Ready(model::Plan::Subscription("max".into()))
+        );
+        assert!(rt.find("chat-input").is_some());
+    }
+
+    #[test]
+    fn a_failed_sign_in_says_why_in_claudes_words() {
+        let mut rt = runtime_with(fake("signed-out", &[("FAKE_CLAUDE_LOGIN", "fail")]));
+        wait(&mut rt, settled);
+        tap(&mut rt, "sign-in-button");
+        wait(&mut rt, |s| {
+            matches!(s.status, Status::SignedOut { problem: Some(_) })
+        });
+        let Status::SignedOut {
+            problem: Some(problem),
+        } = &rt.state.status
+        else {
+            unreachable!()
+        };
+        assert!(
+            problem.contains("the fake sign-in was refused"),
+            "{problem}"
+        );
+        assert!(rt.find("sign-in-problem").is_some());
+    }
+
+    #[test]
+    fn cancelling_a_sign_in_goes_back_to_signed_out() {
+        let mut rt = runtime_with(fake("signed-out", &[]));
+        wait(&mut rt, settled);
+        tap(&mut rt, "sign-in-button");
+        wait(&mut rt, |s| {
+            matches!(s.status, Status::SigningIn { url: Some(_) })
+        });
+        tap(&mut rt, "cancel-sign-in");
+        assert_eq!(rt.state.status, Status::SignedOut { problem: None });
+    }
+
+    #[test]
+    fn a_message_gets_claudes_streamed_reply() {
+        let mut rt = runtime_with(fake("signed-in", &[]));
+        wait(&mut rt, settled);
+        assert!(rt.find("health").is_some());
+        rt.state.draft.text = "hello \"there\"".into();
+        tap(&mut rt, "send");
+        wait(&mut rt, replied);
+        let last = rt.state.ws.chat.last().unwrap();
+        assert_eq!(last.author, model::Author::ChiefOfStaff);
+        assert_eq!(last.text, "You said: hello \"there\"");
+    }
+
+    #[test]
+    fn a_claude_failure_shows_in_the_chat() {
+        let mut rt = runtime_with(fake("signed-in", &[]));
+        wait(&mut rt, settled);
+        rt.state.draft.text = "please fail".into();
+        tap(&mut rt, "send");
+        wait(&mut rt, replied);
+        let last = rt.state.ws.chat.last().unwrap();
+        assert_eq!(last.author, model::Author::Problem);
+        assert!(last.text.contains("could not finish this turn"));
+    }
+
+    #[test]
+    fn a_rejected_sign_in_shows_the_expired_screen() {
+        let mut rt = runtime_with(fake("expired", &[]));
+        wait(&mut rt, settled);
+        assert!(matches!(rt.state.status, Status::Ready(_)));
+        rt.state.draft.text = "hello".into();
+        tap(&mut rt, "send");
+        wait(&mut rt, |s| s.status == Status::Expired);
+        assert!(rt.find("sign-in-button").is_some());
+        assert!(rt.find("chat-input").is_none());
+    }
+
+    #[test]
+    fn signing_in_again_after_expiry_returns_to_the_chat() {
+        let home = scratch("expired");
+        let mut rt = runtime_with(on_fake(FAKE_CLAUDE, &home, &[]));
+        wait(&mut rt, settled);
+        rt.state.draft.text = "hello".into();
+        tap(&mut rt, "send");
+        wait(&mut rt, |s| s.status == Status::Expired);
+        tap(&mut rt, "sign-in-button");
+        wait(&mut rt, |s| {
+            matches!(s.status, Status::SigningIn { url: Some(_) })
+        });
+        std::fs::write(home.join("browser-done"), "").unwrap();
+        wait(&mut rt, |s| matches!(s.status, Status::Ready(_)));
+        rt.state.draft.text = "hello again".into();
+        tap(&mut rt, "send");
+        wait(&mut rt, replied);
+        assert_eq!(
+            rt.state.ws.chat.last().unwrap().text,
+            "You said: hello again"
+        );
+    }
+
+    #[test]
+    fn a_missing_claude_says_so() {
+        let mut rt = runtime_with(fake_program("/nonexistent/claude", "signed-out", &[]));
+        wait(&mut rt, settled);
+        assert_eq!(rt.state.status, Status::CliMissing);
+        assert!(rt.find("recheck").is_some());
+        assert!(rt.find("sign-in-button").is_none());
+    }
+
+    #[test]
+    fn a_broken_claude_shows_its_own_error() {
+        let mut rt = runtime_with(fake("broken", &[]));
+        wait(&mut rt, settled);
+        assert_eq!(
+            rt.state.status,
+            Status::Failed("fake claude: the settings file is corrupt".into())
+        );
+        assert!(rt.find("status-detail").is_some());
     }
 }

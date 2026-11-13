@@ -6,11 +6,14 @@ delegates work to subagents.
 
 ## Status
 
-Velvet Hammer is early and experimental. Today it is a desktop skeleton. A stub stands in for the
-agent layer: it seeds sample data and replies with canned messages. There is no real agent,
-networking or persistence yet, and the interface and code will change.
+Velvet Hammer is early and experimental. The chief of staff runs on your own installed Claude Code
+and your Claude subscription (see [Claude Code and your subscription](#claude-code-and-your-subscription)).
+The two panels and the agents list do not have a data source yet, and there is no persistence. A
+stub with sample data stands in for the agent layer in headless scenes and tests. The interface
+and code will change.
 
-Signing in with a Claude Code subscription is in development and does not work yet.
+The sign-in flow is tested against a fake `claude`; signing in with a real Claude account has not
+been tested yet (see [Trying the real sign-in](#trying-the-real-sign-in)).
 
 ## What works today
 
@@ -18,7 +21,9 @@ The window has three columns:
 
 - **Agents** (left): the subagents the chief of staff manages. Selecting one opens a peek at its
   transcript in place of the chat; **Back to chat** closes it.
-- **Chief of staff** (middle): the conversation, with a message field and a **Send** button.
+- **Chief of staff** (middle): the conversation, with a message field and a **Send** button. A
+  line under the heading says what runs it, such as "Claude Code · signed in with your Claude Max
+  plan". When Claude Code is not ready, a sign-in screen takes the conversation's place.
 - **Needs your input** and **For you to do** (right): questions the agents are waiting on, each
   with answer buttons, and steps only you can take, each with a **Done** button.
 
@@ -27,12 +32,77 @@ The window has three columns:
 - `src/model.rs`: the data model. A `Workspace` holds the chat `Message`s, the `Item`s waiting on
   the captain and the subagent `Agent`s. Everything the captain does is an `Action`
   (`Say`, `Answer`, `Done`), and `Workspace::apply` records it.
-- `src/agent.rs`: the agent-layer boundary. The app talks only to the `ChiefOfStaff` trait;
-  `Stub` implements it today. A Pi-backed chief of staff replaces `Stub` by implementing the
-  same trait.
+- `src/agent.rs`: the agent-layer boundary. The app talks only to the `ChiefOfStaff` trait, which
+  takes the captain's actions and sign-in requests and reports `Event`s (status changes, streamed
+  replies, problems). `Stub` simulates it for headless scenes and tests.
+- `src/claude.rs`: `Claude`, the chief of staff on the user's own Claude Code. It runs only the
+  `claude` command, as described below.
+- `scripts/fake-claude`: a stand-in for `claude` that speaks the same protocol without an account.
+  Tests and the sign-in scenes run the app on it.
 - `src/view.rs`: the Rune view. Every element a test or script reaches has a key.
-- `src/main.rs`: the `App` state (workspace, chief of staff, message draft, peeked agent), the
-  headless scenes, and the tests.
+- `src/main.rs`: the `App` state (workspace, chief of staff, sign-in status, message draft, peeked
+  agent), the headless scenes, and the tests.
+
+## Claude Code and your subscription
+
+Velvet Hammer does not sign in to Anthropic itself and never handles a credential. It starts the
+unmodified `claude` program that you installed, and Claude Code signs in, stores the sign-in and
+talks to Anthropic:
+
+- **Is it signed in?** The app runs `claude auth status --json` when it opens, when you choose
+  **Check again**, and every two seconds while a sign-in runs. It reads only `loggedIn`,
+  `authMethod` and `subscriptionType` from the output.
+- **Signing in.** **Sign in with Claude** runs `claude auth login --claudeai` in a pseudo-terminal
+  (it is an interactive command). Claude Code opens its sign-in page in your browser, and the app
+  shows that page's address with an **Open the sign-in page** button in case the browser did not
+  open. When `claude auth status` reports a sign-in, the app stops the login command and opens the
+  chat. You can also run `claude auth login` in a terminal yourself and choose **Check again**.
+- **Chatting.** The first message starts one long-lived
+  `claude -p --input-format stream-json --output-format stream-json --verbose
+  --include-partial-messages --no-session-persistence` process. Each message is written to its
+  standard input, and the reply streams into the chat as Claude Code produces it.
+- **When something is wrong.** The sign-in screen says which case applies: not signed in, signing
+  in, the sign-in expired (Claude Code reports a sign-in but Anthropic rejected it for a message,
+  which Claude Code reports as `authentication_failed`), `claude` not on `PATH`, or `claude`
+  failing to run (its own error text is shown). A failed message shows Claude Code's own error in
+  the chat.
+
+The app looks for `claude` on its `PATH`. When you start it from a terminal with `cargo run`, that
+is your shell's `PATH`.
+
+**How this fits Anthropic's terms.** Anthropic's Claude Code legal and compliance page
+(https://code.claude.com/docs/en/legal-and-compliance) says that third-party developers may not
+offer Claude.ai login inside their own applications or route requests through Free, Pro, Max or
+Ultra credentials on behalf of their users, and that nothing prevents an end user from signing in
+to the unmodified Claude Code program with their own subscription, including where another product
+hosts Claude Code. Velvet Hammer takes the second route. It is a personal tool that starts your own
+unmodified `claude`; the sign-in happens in Claude Code and your browser, and the app never sees,
+stores or forwards a token. Messages are billed the way Claude Code bills them. This reading of the
+terms has not been confirmed by Anthropic. If Velvet Hammer is ever distributed to other people,
+check the terms again for that case.
+
+### Trying the real sign-in
+
+This has not been run against a real account. To try it on a Mac where Claude Code is installed:
+
+1. Sign Claude Code out so the app starts signed out: run `claude auth logout`. (Skip this to try
+   the signed-in path only; your existing sign-in will be used.)
+2. Run `cargo run` from a terminal whose `PATH` includes `claude` (`which claude` prints it).
+3. Check that the middle column shows **Sign in with Claude**.
+4. Choose **Sign in with Claude**. Check that a browser tab opens on claude.ai and that the app
+   shows **Finish signing in in your browser** with the sign-in address. If no tab opened, choose
+   **Open the sign-in page**.
+5. Sign in with your Claude Pro or Max account in the browser and approve the request.
+6. Within a few seconds the app should show the chat, with "Claude Code · signed in with your
+   Claude Max plan" (or Pro) under the heading. In a terminal, `claude auth status --text` should
+   agree.
+7. Send a short message, such as "Reply with one word." Check that the reply streams in.
+8. Check the usage at https://claude.ai/settings/usage to confirm the message counted against
+   your subscription.
+
+If step 4 shows a problem instead, or the browser page asks you to paste a code into the terminal,
+choose **Cancel**, run `claude auth login` in a terminal, finish there, and choose **Check again**.
+Please report what the app showed.
 
 ## Build and run
 
@@ -66,10 +136,18 @@ It writes these files to `OUT_DIR`:
 | `replied.png`, `replied.json` | After the captain sends a message and the stub replies |
 | `empty.png`, `empty.json` | Both panels empty |
 | `peek.png`, `peek.json` | Peeking at a subagent's transcript |
+| `signed-out.png`, `signed-out.json` | Claude Code is not signed in: the sign-in screen |
+| `signing-in.png`, `signing-in.json` | `claude auth login` is running and printed its sign-in page |
+| `signed-in.png`, `signed-in.json` | Signed in with a subscription, after a message and its streamed reply |
+| `expired.png`, `expired.json` | Anthropic rejected the sign-in for a message |
+| `cli-missing.png`, `cli-missing.json` | No `claude` on `PATH` |
+| `claude-error.png`, `claude-error.json` | A message failed, with Claude Code's error in the chat |
 | `walk-sent.json` | `scripts/walkthrough.json` after typing and sending a message |
 | `walk-end.png`, `walk-end.json` | The same script after answering an item, finishing the task and opening a peek |
 
-The `.json` files are Rune element trees. The script then checks them for the keys and text each
+The first four scenes use the stub. The sign-in scenes run the app on `scripts/fake-claude`, so
+they need no Claude account; each waits for the fake's real processes before rendering. The
+walkthrough runs on the stub's `chat` scene. The `.json` files are Rune element trees. The script then checks them for the keys and text each
 state must or must not have (for example `needs-input`, `input-1`, `for-you-empty`, `peek`) and
 exits non-zero if any check fails.
 
@@ -77,11 +155,11 @@ The individual commands, if you want to run one by hand:
 
 ```sh
 B=target/debug/velvet-hammer
-$B --list-scenes                                   # chat replied empty peek
+$B --list-scenes                                   # chat replied empty peek signed-out ...
 $B --scene empty --snap empty.png                  # render a scene to PNG
 $B --scene chat --tree chat.json                   # dump a scene's element tree
-$B --script scripts/walkthrough.json --at mark:end --snap walk-end.png
-$B --script scripts/walkthrough.json --at mark:sent --tree walk-sent.json
+$B --scene chat --script scripts/walkthrough.json --at mark:end --snap walk-end.png
+$B --scene chat --script scripts/walkthrough.json --at mark:sent --tree walk-sent.json
 cargo test                                         # drives taps through Rune's Runtime
 ```
 

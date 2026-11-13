@@ -5,11 +5,13 @@
 pub type Id = u32;
 
 /// Who wrote a message: the captain, the chief of staff, or a subagent (in a peek transcript).
+/// `Problem` is a failure the agent layer reported, shown in the chat in its own words.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Author {
     Captain,
     ChiefOfStaff,
     Subagent,
+    Problem,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -25,6 +27,37 @@ impl Message {
             text: text.into(),
         }
     }
+}
+
+/// Whether the chief of staff can talk, as the agent layer reports it. Claude Code owns the
+/// sign-in; the app only shows what `claude` says about it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Status {
+    /// Asking Claude Code whether it is signed in.
+    Checking,
+    /// Claude Code has no sign-in. `problem` is why the last sign-in attempt ended, if one did.
+    SignedOut { problem: Option<String> },
+    /// Claude Code's own sign-in is running; `url` is the sign-in page once `claude` prints it.
+    SigningIn { url: Option<String> },
+    /// Claude Code says it is signed in, but Anthropic rejected the sign-in on the last message.
+    Expired,
+    /// No `claude` on the app's PATH.
+    CliMissing,
+    /// `claude` is installed but failed in a way signing in cannot fix; the text is its own.
+    Failed(String),
+    /// Ready to chat.
+    Ready(Plan),
+}
+
+/// What pays for the chief of staff's messages.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Plan {
+    /// A Claude subscription sign-in; the text is the plan Claude Code reports, such as "max".
+    Subscription(String),
+    /// Anything else Claude Code reports, such as an Anthropic Console sign-in or an API key.
+    Other(String),
+    /// The stub: nothing is billed.
+    Simulated,
 }
 
 /// What an item asks of the captain.
