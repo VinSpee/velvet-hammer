@@ -53,6 +53,12 @@ The window has three columns:
   shows inline (press it to see it larger), a video file plays inline with **Play** and
   **Open in your video player**, and any other tool shows its name, its main argument and its
   result folded behind a button. See [Tool calls in the chat](docs/tool-calls.md).
+  The chief of staff can also show you a small interactive view, a json-render spec it passes to
+  the app's `app_ui` tool: cards, tables, badges, progress bars, buttons, text fields and
+  checkboxes, drawn natively and filling in as the spec streams. Ticking, typing and adding
+  stay in the view; a submit comes back to the chief of staff as a message from you, with the
+  values you entered. Nothing in a view runs code, reads files or reaches the network. See
+  [Views in the chat](docs/json-render.md).
 - **Needs your input** and **For you to do** (right): questions the agents are waiting on, each
   with answer buttons, and steps only you can take, each with a **Done** button.
 
@@ -60,13 +66,13 @@ The window has three columns:
 
 - `src/model.rs`: the data model. A `Workspace` holds the chat `Message`s, the `Item`s waiting on
   the captain and the subagent `Agent`s. Everything the captain does is an `Action`
-  (`Say`, `Answer`, `Done`), and `Workspace::apply` records it.
+  (`Say`, `Answer`, `Done`, and `Ui` for a control in a view), and `Workspace::apply` records it.
 - `src/agent.rs`: the agent-layer boundary. The app talks only to the `ChiefOfStaff` trait, which
   takes the captain's actions and sign-in requests and reports `Event`s (status changes, streamed
   replies, problems). `Stub` simulates it for headless scenes and tests.
 - `src/claude.rs`: `Claude`, the chief of staff on the user's own Claude Code. It runs only the
   `claude` command, as described below.
-- `src/bridge.rs`: the server the chat session's `claude` calls back into: one MCP tool and one
+- `src/bridge.rs`: the server the chat session's `claude` calls back into: two MCP tools and one
   PreToolUse hook (see [docs/extending.md](docs/extending.md)).
 - `src/firstmate.rs`: `Firstmate`, the managed firstmate clone. It runs `git` to install the
   clone, compare it with upstream and update it, and never discards a local change. Its `lab`
@@ -83,9 +89,13 @@ The window has three columns:
 - `src/tools.rs`: the chief of staff's tool uses and the registry that picks how each is drawn,
   keyed on the Model Context Protocol's content types and the Agent Client Protocol's tool kinds
   (see [docs/tool-calls.md](docs/tool-calls.md)).
+- `src/ui.rs`: json-render views: the catalog, reading a spec (whole or still streaming) within
+  its limits, its state, the tree to draw and the actions its controls fire (see
+  [docs/json-render.md](docs/json-render.md)).
 - `src/markdown.rs`: prepares the chief of staff's Markdown for Rune's Markdown view, keeping
   line breaks and showing HTML as text.
-- `src/view.rs`: the Rune view, with the tool-use views in `src/view/tool.rs`. Every element a
+- `src/view.rs`: the Rune view, with the tool-use views in `src/view/tool.rs` and the
+  json-render views in `src/view/ui.rs`. Every element a
   test or script reaches has a key.
 - `src/main.rs`: the `App` state (workspace, chief of staff, sign-in status, firstmate clone,
   message draft, what the middle column shows), the headless scenes, and the tests.
@@ -112,7 +122,7 @@ talks to Anthropic:
   starts as firstmate (see [The managed firstmate clone](docs/firstmate.md)).
 - **Tools and hooks.** The chat session also gets `--mcp-config` and `--settings` flags that point
   at a server the app runs on `127.0.0.1` for that session only. Its `app_note` tool adds a note
-  to **For you to do**, and its PreToolUse hook applies your [tool-approval](#tool-approval)
+  to **For you to do**, its `app_ui` tool shows a view in the chat, and its PreToolUse hook applies your [tool-approval](#tool-approval)
   settings to every tool use: it runs it, refuses it, or asks you in **Needs your input**. Your
   Claude settings files are not changed. See
   [docs/extending.md](docs/extending.md), which also covers skills, subagents, the Agent SDK and
@@ -152,7 +162,7 @@ agents column):
 - **Mode.** **Run without asking** (recommended, and what a fresh install uses): the chief of
   staff will edit files, run commands and use tools without stopping for you, and every tool use
   is still logged. **Auto-allow read-only tools**: `Read`, `Glob`, `Grep`, `LS`, `NotebookRead`,
-  `ToolSearch`, `TodoWrite` and the app's own `app_note` run at once, and everything else waits
+  `ToolSearch`, `TodoWrite` and the app's own `app_note` and `app_ui` run at once, and everything else waits
   for you. **Ask every time**: every tool use waits for you.
 - **Rules.** An ordered list of allow, ask and deny rules on top of the mode. A rule names a
   tool (`*` matches any text, so `mcp__github__*` covers a server's tools) and optionally a
@@ -278,10 +288,17 @@ It writes these files to `OUT_DIR`:
 | `tool-video.png`, `tool-video.json` | A video file, with its poster frame, **Play** and **Open in your video player** |
 | `tool-generic.png`, `tool-generic.json` | A Bash command with its output unfolded |
 | `tool-picture.png`, `tool-picture.json` | An image from the chat, enlarged |
+| `view-static.png`, `view-static.json` | A json-render view: a card with badges, a progress bar, a table, an alert and buttons |
+| `view-streaming.png`, `view-streaming.json` | The same view with a little over half of its spec streamed |
+| `view-state.png`, `view-state.json` | A checklist after ticking an item, typing and adding one, and typing again: inputs bound to state and a repeat |
+| `view-action.png`, `view-action.json` | After **Send the list**: what you did in the chat, and the reply to the submit |
+| `view-unknown.png`, `view-unknown.json` | A view naming a component the catalog lacks, shown as a placeholder |
+| `view-too-large.png`, `view-too-large.json` | A view over the element limit, refused with why |
 | `walk-sent.json` | `scripts/walkthrough.json` after typing and sending a message |
 | `walk-end.png`, `walk-end.json` | The same script after answering an item, finishing the task and opening a peek |
 
-The first four scenes, `approval-settings` and the `formatted` scenes use the stub; the `tool`
+The first four scenes, `approval-settings`, the `formatted` scenes and the `view` scenes use
+the stub; the `tool`
 scenes have the fake `claude` use Read and Bash on the files in `scripts/fixtures`. The sign-in scenes run the app on `scripts/fake-claude`, so
 they need no Claude account; each waits for the fake's real processes before rendering. The
 firstmate and projects scenes run `git` on a scratch upstream repository under `target/`, so

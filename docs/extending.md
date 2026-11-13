@@ -13,8 +13,9 @@ Each chat session starts a small HTTP server on `127.0.0.1` (`src/bridge.rs`) an
 that one `claude -p` process with two flags. Nothing is written to the user's Claude settings.
 
 - **A tool.** `--mcp-config` names the app's MCP server, `velvet-hammer`, over streamable HTTP.
-  It has one tool, `app_note`, which adds a note to the **For you to do** panel. Marking the note
-  done tells the chief of staff which note it was.
+  It has two tools. `app_note` adds a note to the **For you to do** panel; marking the note
+  done tells the chief of staff which note it was. `app_ui` shows a json-render view in the chat
+  (see [Views in the chat](json-render.md)).
 - **A hook.** `--settings` adds an HTTP `PreToolUse` hook for every tool, including the app's
   own. It decides each tool use with the tool-approval settings (`src/approval.rs`, described in
   the README's [Tool approval](../README.md#tool-approval) section): a mode, **Run without

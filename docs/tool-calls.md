@@ -83,7 +83,7 @@ Claude Code's tools map onto ACP kinds:
 
 None of Claude Code's tools is a `delete` or `move`.
 
-The registry checks, in order: an `image` or `audio` block in the result; a `resource_link` or
+The registry checks the app's own `app_ui` tool first, then, in order: an `image` or `audio` block in the result; a `resource_link` or
 `resource` with a `file://` URI; an absolute file path in the tool's input (`file_path`, `path`
 or `notebook_path`); then the tool's kind. Video is not a standard content type, so a video is a
 file or resource link whose extension is a video one. A file's kind comes from its extension
@@ -96,6 +96,7 @@ alone; a `mimeType` a result claims for it is ignored.
 | Audio | An `audio` block | The generic view, for now |
 | Diff | A tool of kind `edit` | The generic view, for now |
 | Terminal | A tool of kind `execute` | The generic view, for now |
+| View | The app's own `app_ui` tool, from the moment it starts | The json-render view its input describes, filling in as the input streams (see [Views in the chat](json-render.md)) |
 | Generic | Anything else | The tool's name, its main argument on one line, and its result folded behind a button |
 
 A file is shown only when a tool use named it, it exists and it is a regular file; the app reads
