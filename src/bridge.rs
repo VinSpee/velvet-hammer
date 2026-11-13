@@ -2,8 +2,9 @@
 //! 127.0.0.1 that `claude` calls back into. It serves two things, both passed to that one session
 //! as command-line flags so the captain's own Claude settings are never written:
 //!
-//! - an MCP server (`--mcp-config`) with one tool, `app_note`, which puts a note in the captain's
-//!   For you to do panel;
+//! - an MCP server (`--mcp-config`) with two tools: `app_note`, which puts a note in the
+//!   captain's For you to do panel, and `app_ui`, which shows a json-render view in the chat
+//!   (see [`crate::ui`]);
 //! - a PreToolUse hook (`--settings`), which applies the captain's tool-approval settings (see
 //!   [`crate::approval`]) to each tool use: it allows it, denies it, or asks the captain to allow
 //!   or deny it in the Needs your input panel. Every decision is reported for the activity log.
@@ -22,6 +23,7 @@ use std::time::{Duration, Instant};
 use serde_json::{Value, json};
 
 use crate::approval::{self, Effect, Entry, Policy};
+use crate::ui;
 
 /// The MCP server's name; Claude Code calls its tools `mcp__velvet-hammer__<tool>`.
 pub const SERVER: &str = "velvet-hammer";
@@ -240,6 +242,10 @@ fn mcp(request: &Value, on_call: &dyn Fn(Call)) -> Option<Value> {
                 "properties": {"text": {"type": "string", "description": "The note, in one short sentence."}},
                 "required": ["text"],
             },
+        }, {
+            "name": ui::TOOL,
+            "description": ui::description(),
+            "inputSchema": ui::input_schema(),
         }]})),
         "tools/call" if params["name"] == NOTE_TOOL => {
             let text = params["arguments"]["text"]
@@ -253,6 +259,14 @@ fn mcp(request: &Value, on_call: &dyn Fn(Call)) -> Option<Value> {
                 json!({"content": [{"type": "text", "text": "Added to the captain's For you to do panel."}]})
             })
         }
+        // The chat draws the view from the tool use itself; the call only checks it, so the
+        // model learns what was refused or left out.
+        "tools/call" if params["name"] == ui::TOOL => Ok(match ui::answer(&params["arguments"]) {
+            Ok(text) => json!({"content": [{"type": "text", "text": text}]}),
+            Err(problem) => {
+                json!({"isError": true, "content": [{"type": "text", "text": problem}]})
+            }
+        }),
         "tools/call" => Err((-32602, "Unknown tool")),
         _ => Err((-32601, "Method not found")),
     };
@@ -464,6 +478,45 @@ mod tests {
         );
         assert_eq!(called["result"]["isError"], Value::Null);
         assert!(matches!(calls.try_recv(), Ok(Call::Note(text)) if text == "Renew the domain"));
+    }
+
+    #[test]
+    fn app_ui_lists_the_catalog_and_checks_a_spec() {
+        let (bridge, calls) = bridge();
+        let auth = bearer(&bridge);
+        let (_, list) = post(
+            &bridge,
+            "/mcp",
+            Some(&auth),
+            json!({"jsonrpc": "2.0", "id": 1, "method": "tools/list"}),
+        );
+        let tool = &list["result"]["tools"][1];
+        assert_eq!(tool["name"], "app_ui");
+        assert_eq!(tool["inputSchema"]["required"], json!(["root", "elements"]));
+        let description = tool["description"].as_str().unwrap();
+        assert!(
+            description.contains("- Button: {label: string") && description.contains("- submit")
+        );
+        let call = |arguments: Value| {
+            post(
+                &bridge,
+                "/mcp",
+                Some(&auth),
+                json!({"jsonrpc": "2.0", "id": 2, "method": "tools/call",
+                       "params": {"name": "app_ui", "arguments": arguments}}),
+            )
+            .1["result"]
+                .clone()
+        };
+        let shown = call(json!({"root": "t", "elements": {"t": {"type": "Text",
+            "props": {"text": "Hi", "size": 9}}}}));
+        assert_eq!(shown["isError"], Value::Null);
+        let text = shown["content"][0]["text"].as_str().unwrap();
+        assert!(text.starts_with("The view is shown") && text.contains("no prop \"size\""));
+        let refused = call(json!({"root": "missing", "elements": {}}));
+        assert_eq!(refused["isError"], true);
+        // Checking a spec asks nothing of the app: the chat draws it from the tool use.
+        assert!(calls.try_recv().is_err());
     }
 
     #[test]

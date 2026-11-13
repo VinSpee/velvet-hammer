@@ -26,6 +26,11 @@ pub enum Event {
     Problem(String),
     /// The chief of staff started a tool use; its result follows as [`Event::ToolResult`].
     Tool(ToolUse),
+    /// More of a tool use's input as it streams in, by its id. Only the view tool streams.
+    ToolInput {
+        id: String,
+        input: serde_json::Value,
+    },
     /// What a tool use returned, by its id.
     ToolResult {
         id: String,
@@ -86,6 +91,7 @@ impl ChiefOfStaff for Stub {
                 format!("Thanks. Going with \u{201c}{choice}\u{201d}.")
             }
             Action::Done { .. } => "Thanks, I've let the team know that's done.".to_string(),
+            Action::Ui(ui) => format!("Thanks. I got your submit with {}.", ui.params),
         };
         self.queued.push(Event::Reply { text, done: true });
     }

@@ -14,6 +14,7 @@ use crate::model::{Action, Agent, Author, Item, ItemKind, Message, Plan, Status}
 use crate::projects::Project;
 
 mod tool;
+mod ui;
 use tool::{picture_page, tool_use};
 
 pub fn view(s: &App, cx: &mut Cx<App>) -> El {

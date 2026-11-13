@@ -30,7 +30,8 @@ for scene in chat replied empty peek signed-out signing-in signed-in expired cli
   firstmate-missing firstmate-installing firstmate-up-to-date firstmate-update-available \
   firstmate-modified firstmate-blocked firstmate-session firstmate-panels firstmate-answering firstmate-crew \
   projects-fresh projects-empty projects-adding projects-listed \
-  formatted formatted-all formatted-streaming tool-image tool-image-broken tool-video tool-generic tool-picture; do
+  formatted formatted-all formatted-streaming tool-image tool-image-broken tool-video tool-generic tool-picture \
+  view-static view-streaming view-state view-action view-unknown view-too-large; do
   headless --scene "$scene" --snap "$out/$scene.png"
   headless --scene "$scene" --tree "$out/$scene.json"
 done
@@ -266,6 +267,28 @@ check tool-generic.json yes '"text": "one\ntwo\nthree"'
 check tool-picture.json yes '"key": "picture"'
 check tool-picture.json yes '"key": "picture-close"'
 check tool-picture.json no  '"key": "chat-input"'
+# json-render views: every component, a spec half streamed, state bound to inputs and a repeat,
+# a submit and its reply, an unknown component, and a spec over the limits.
+check view-static.json yes '"text": "Chief of staff'"'"'s view"'
+check view-static.json yes '"key": "tool-1-ui-review"'
+check view-static.json yes '"key": "tool-1-ui-progress"'
+check view-static.json yes '"text": "in review"'
+check view-static.json yes '"key": "tool-1-ui-tag"'
+check view-streaming.json yes '"text": "Chief of staff'"'"'s view · arriving…"'
+check view-streaming.json yes '"key": "tool-1-ui-tasks"'
+check view-streaming.json no  '"key": "tool-1-ui-alert"'
+check view-state.json yes '"key": "tool-1-ui-done.1"'
+check view-state.json yes '"key": "tool-1-ui-check.3"'
+check view-state.json yes '"text": "Update the README"'
+check view-state.json yes '"text": "Announce it"'
+check view-state.json no  '"text": "Pressed'
+check view-action.json yes '"text": "Pressed “Send the list”."'
+check view-action.json yes 'Thanks. I got your submit with'
+check view-action.json yes 'Tag the release'
+check view-unknown.json yes '"text": "Unknown component “BarChart”"'
+check view-unknown.json yes '"text": "Monday was the slowest."'
+check view-too-large.json yes 'more than the limit of 200, so it is not shown.'
+check view-too-large.json no  '"key": "tool-1-ui-main"'
 # The scripted run.
 check walk-sent.json yes '"text": "Ship it when CI is green."'
 check walk-sent.json yes 'Got it:'
