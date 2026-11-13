@@ -1,18 +1,26 @@
-# velvet-hammer
+# Velvet Hammer
 
-Native agentic development environment built with [Rune](https://github.com/anomalyco/rune).
+Velvet Hammer is a native desktop app for working with AI coding agents, built with
+[Rune](https://github.com/anomalyco/rune). The idea is that you talk to one chief of staff, which
+delegates work to subagents.
 
-The captain talks to one chief of staff, which delegates to subagents. The window has three
-columns:
+## Status
+
+Velvet Hammer is early and experimental. Today it is a desktop skeleton. A stub stands in for the
+agent layer: it seeds sample data and replies with canned messages. There is no real agent,
+networking or persistence yet, and the interface and code will change.
+
+Signing in with a Claude Code subscription is in development and does not work yet.
+
+## What works today
+
+The window has three columns:
 
 - **Agents** (left): the subagents the chief of staff manages. Selecting one opens a peek at its
   transcript in place of the chat; **Back to chat** closes it.
 - **Chief of staff** (middle): the conversation, with a message field and a **Send** button.
 - **Needs your input** and **For you to do** (right): questions the agents are waiting on, each
-  with answer buttons, and steps only the captain can take, each with a **Done** button.
-
-This is a skeleton. A stub stands in for the agent layer: it seeds sample data and replies with
-canned messages. There is no real agent, networking or persistence yet.
+  with answer buttons, and steps only you can take, each with a **Done** button.
 
 ## Layout of the code
 
@@ -79,3 +87,7 @@ cargo test                                         # drives taps through Rune's 
 
 Add `--theme light` to render the light theme. A release build (`cargo build --release`) takes
 the same arguments because the `tooling` feature is on.
+
+## License
+
+Velvet Hammer is released under the [MIT License](LICENSE).
