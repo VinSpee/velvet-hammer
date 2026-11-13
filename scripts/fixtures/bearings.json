@@ -42,7 +42,24 @@
       }
     ]
   },
-  "in_flight": [],
+  "in_flight": [
+    {
+      "id": "lab-verify",
+      "kind": "crew",
+      "state": "working",
+      "repo": "velvet-hammer",
+      "name": "Render every state headlessly",
+      "doing": "rendering chat, empty and peek scenes"
+    },
+    {
+      "id": "lab-layout",
+      "kind": "crew",
+      "state": "parked",
+      "repo": "velvet-hammer",
+      "name": "lab-layout",
+      "doing": "waiting on the window size"
+    }
+  ],
   "secondmates": [],
   "secondmate_reconcile": [],
   "decisions_open": [
