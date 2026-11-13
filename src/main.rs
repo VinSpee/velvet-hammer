@@ -922,10 +922,21 @@ fn main() {
 
 <script>alert(1)</script> stays text, as does <b>this</b>.";
 
-/// A file in `scripts/fixtures`. `clip.mp4` is Rune's own test clip
-/// (`crates/rune/tests/fixtures/rgbw.mp4`, MIT licensed).
+/// A copy of a file in `scripts/fixtures` at `/tmp/velvet-hammer/NAME`, so the scenes and their
+/// screenshots show a short path that names no one's home directory. `clip.mp4` is Rune's own
+/// test clip (`crates/rune/tests/fixtures/rgbw.mp4`, MIT licensed).
 fn fixture(name: &str) -> String {
-    format!("{}/scripts/fixtures/{name}", env!("CARGO_MANIFEST_DIR"))
+    let source = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("scripts/fixtures")
+        .join(name);
+    let dir = Path::new("/tmp/velvet-hammer");
+    std::fs::create_dir_all(dir).expect("fixture directory");
+    let path = dir.join(name);
+    // Tests run at once and may copy the same fixture; a rename never shows a half-written file.
+    let partial = dir.join(format!("{name}.{}.part", std::process::id()));
+    std::fs::copy(&source, &partial).expect("fixture copy");
+    std::fs::rename(&partial, &path).expect("fixture rename");
+    path.display().to_string()
 }
 
 /// The fake `claude` after it used Read on `path`, with any image decoded.
