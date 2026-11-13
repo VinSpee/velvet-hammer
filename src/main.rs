@@ -12,6 +12,7 @@ mod markdown;
 mod model;
 mod projects;
 mod tools;
+mod ui;
 mod view;
 
 use std::collections::{HashMap, HashSet};
@@ -76,6 +77,10 @@ pub struct App {
     pub media: HashMap<String, Media>,
     /// The tool uses whose results the captain unfolded, by id.
     pub unfolded: HashSet<String>,
+    /// The state of each view the chief of staff showed, by its tool use's id.
+    pub ui: HashMap<String, ui::Live>,
+    /// The images views show, by the path a view gave, or why one is not shown.
+    pub ui_images: HashMap<String, Result<Image, String>>,
     /// Decodes the chat's images off the UI thread.
     images: ImageCache,
     /// The window's waker, once [`setup`] connects it.
@@ -157,6 +162,8 @@ impl App {
             replying: None,
             media: HashMap::new(),
             unfolded: HashSet::new(),
+            ui: HashMap::new(),
+            ui_images: HashMap::new(),
             images: ImageCache::new(media_wake.clone()),
             window_wake,
             media_wake,
@@ -229,18 +236,23 @@ impl App {
             Event::Item(item) => self.ws.items.push(item),
             Event::Withdrawn(id) => self.ws.items.retain(|i| i.id != id),
             Event::Activity(entry) => self.activity.record(entry),
+            // A view tool use arrives first as it starts streaming, then whole.
             Event::Tool(tool) => {
-                if self.tool(&tool.id).is_none() {
-                    self.ws.chat.push(Message::tool(tool));
+                let id = tool.id.clone();
+                match self.tool_mut(&id) {
+                    Some(shown) => shown.input = tool.input,
+                    None => self.ws.chat.push(Message::tool(tool)),
+                }
+                self.load_view_images(&id);
+            }
+            Event::ToolInput { id, input } => {
+                if let Some(tool) = self.tool_mut(&id) {
+                    tool.input = input;
+                    self.load_view_images(&id);
                 }
             }
             Event::ToolResult { id, result } => {
-                let Some(tool) = self
-                    .ws
-                    .chat
-                    .iter_mut()
-                    .find_map(|m| m.tool.as_mut().filter(|t| t.id == id))
-                else {
+                let Some(tool) = self.tool_mut(&id) else {
                     return;
                 };
                 tool.result = Some(result);
@@ -257,6 +269,116 @@ impl App {
             .chat
             .iter()
             .find_map(|m| m.tool.as_ref().filter(|t| t.id == id))
+    }
+
+    fn tool_mut(&mut self, id: &str) -> Option<&mut tools::ToolUse> {
+        self.ws
+            .chat
+            .iter_mut()
+            .find_map(|m| m.tool.as_mut().filter(|t| t.id == id))
+    }
+
+    /// The spec a view tool use carries, as far as it has arrived, or why it is not shown.
+    pub fn view_spec(&self, id: &str) -> Result<ui::Spec, String> {
+        let tool = self.tool(id).ok_or("The view is no longer in the chat.")?;
+        ui::parse(&tool.input).map(|(spec, _)| spec)
+    }
+
+    /// Starts decoding each image a view shows that a tool use in this session already named.
+    /// Any other path, and every URL, is refused without being read.
+    fn load_view_images(&mut self, id: &str) {
+        let Some(tool) = self.tool(id).filter(|t| tools::handler(t) == Handler::Ui) else {
+            return;
+        };
+        let Ok((spec, _)) = ui::parse(&tool.input) else {
+            return;
+        };
+        let state = self
+            .ui
+            .get(id)
+            .map_or(spec.state.clone(), |l| l.state(&spec));
+        let mut wanted = Vec::new();
+        collect_images(ui::tree(&spec, &state).root.as_ref(), &mut wanted);
+        for src in wanted {
+            // A refusal is decided again, since a later tool use may name the file.
+            if matches!(self.ui_images.get(&src), Some(Ok(_))) {
+                continue;
+            }
+            let named = self
+                .ws
+                .chat
+                .iter()
+                .filter_map(|m| m.tool.as_ref())
+                .filter(|t| tools::handler(t) != Handler::Ui)
+                .flat_map(tools::named_files)
+                .any(|p| p.as_os_str() == src.as_str());
+            let image = if !named {
+                Err("Only images a tool in this session already named are shown.".to_string())
+            } else {
+                match tools::handler_for_file(Path::new(&src)) {
+                    Some(handler @ Handler::Image(_)) => self
+                        .media_for(&handler)
+                        .image
+                        .unwrap_or_else(|| Err("There is no image to show.".into())),
+                    _ => Err("It is not an image file that exists.".to_string()),
+                }
+            };
+            self.ui_images.insert(src, image);
+        }
+    }
+
+    /// Runs the actions a control in a view fires, then sends each `submit` to the chief of
+    /// staff with the values of the view's inputs. `did` says what the captain did.
+    pub fn fire(&mut self, id: &str, trigger: &ui::Trigger, did: String) {
+        let Ok(spec) = self.view_spec(id) else {
+            return;
+        };
+        let live = self.ui.entry(id.to_string()).or_default();
+        let sent = live.fire(&spec, trigger);
+        let state = live.state(&spec);
+        let inputs = ui::values(&state, &ui::tree(&spec, &state).bound);
+        self.load_view_images(id);
+        for params in sent {
+            if !self.chat_ready() {
+                return;
+            }
+            self.act(Action::Ui(ui::UiAction {
+                tool: id.to_string(),
+                did: did.clone(),
+                params,
+                inputs: inputs.clone(),
+            }));
+        }
+    }
+
+    /// Checks or unchecks a view's checkbox, writing its bound path, then fires its actions.
+    pub fn tick(
+        &mut self,
+        id: &str,
+        path: Option<&str>,
+        on: bool,
+        change: Option<&ui::Trigger>,
+        did: String,
+    ) {
+        let Ok(spec) = self.view_spec(id) else {
+            return;
+        };
+        if let Some(path) = path {
+            let live = self.ui.entry(id.to_string()).or_default();
+            live.write(&spec, path, serde_json::Value::Bool(on));
+        }
+        if let Some(change) = change {
+            self.fire(id, change, did);
+        }
+    }
+
+    /// The text field a view binds to `path`.
+    pub fn view_edit(&mut self, id: &str, path: &str, shown: &str) -> &mut TextEdit {
+        let spec = self.view_spec(id).unwrap_or_default();
+        self.ui
+            .entry(id.to_string())
+            .or_default()
+            .edit(&spec, path, shown)
     }
 
     /// Starts decoding the image, or makes the player, that `handler` shows. Only files a tool
@@ -445,6 +567,19 @@ impl App {
             std::thread::sleep(Duration::from_millis(20));
             self.drain();
         }
+    }
+}
+
+/// The image paths a drawn view shows.
+fn collect_images(node: Option<&ui::Node>, out: &mut Vec<String>) {
+    let Some(node) = node else { return };
+    if let ui::What::Image { src, .. } = &node.what
+        && !src.is_empty()
+    {
+        out.push(src.clone());
+    }
+    for child in &node.children {
+        collect_images(Some(child), out);
     }
 }
 
@@ -852,6 +987,32 @@ fn main() {
                 *s = shown(&fixture("chart.png"));
                 s.showing = Showing::Picture("toolu_fake_Read".into());
             }),
+            // Views the chief of staff showed with `app_ui` (json-render specs): every kind of
+            // component, the same view half streamed, state bound to inputs and a repeat after
+            // the captain ticked, typed and added, a submit and the reply to it, a component the
+            // catalog lacks, and a spec over the limits.
+            ("view-static", |s| {
+                *s = viewing(spec("ui-release.json"), true)
+            }),
+            ("view-streaming", |s| {
+                let whole = fixture_text("ui-release.json");
+                *s = viewing(ui::partial(&whole[..whole.len() * 11 / 20]), false);
+            }),
+            ("view-state", |s| {
+                *s = viewing(spec("ui-todos.json"), true);
+                s.tick(VIEW, Some("/todos/1/done"), true, None, String::new());
+                s.view_edit(VIEW, "/draft", "").text = "Update the README".into();
+                press(s, "add");
+                s.view_edit(VIEW, "/draft", "").text = "Announce it".into();
+            }),
+            ("view-action", |s| {
+                *s = viewing(spec("ui-todos.json"), true);
+                press(s, "send");
+            }),
+            ("view-unknown", |s| {
+                *s = viewing(spec("ui-unknown.json"), true)
+            }),
+            ("view-too-large", |s| *s = viewing(too_large(), true)),
         ],
         min_size: Some((900.0, 560.0)),
         setup: Some(setup),
@@ -949,6 +1110,102 @@ fn shown(path: &str) -> App {
         }
     }
     app
+}
+
+/// A file in `scripts/fixtures`, as written.
+fn fixture_text(name: &str) -> String {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("scripts/fixtures")
+        .join(name);
+    std::fs::read_to_string(path).expect("fixture")
+}
+
+/// A json-render spec in `scripts/fixtures`.
+fn spec(name: &str) -> serde_json::Value {
+    serde_json::from_str(&fixture_text(name)).expect("fixture JSON")
+}
+
+/// A spec with more elements than the limit.
+fn too_large() -> serde_json::Value {
+    let mut elements = serde_json::Map::new();
+    let ids: Vec<String> = (0..=ui::MAX_ELEMENTS)
+        .map(|i| format!("line-{i}"))
+        .collect();
+    for id in &ids {
+        elements.insert(
+            id.clone(),
+            serde_json::json!({"type": "Text", "props": {"text": id}, "children": []}),
+        );
+    }
+    elements.insert(
+        "main".into(),
+        serde_json::json!({"type": "Stack", "props": {}, "children": ids}),
+    );
+    serde_json::json!({"root": "main", "elements": elements})
+}
+
+/// The id of the view tool use in the view scenes and tests.
+const VIEW: &str = "toolu_view";
+
+/// The stub app after the captain asked and the chief of staff started showing a view with
+/// `input`, the tool's answer arrived when `done`.
+fn viewing(input: serde_json::Value, done: bool) -> App {
+    let mut app = stub();
+    app.ws.chat = vec![Message::new(
+        Author::Captain,
+        "Where does the release stand?",
+    )];
+    app.take(Event::Tool(tools::ToolUse {
+        id: VIEW.into(),
+        name: ui::tool_name(),
+        input: serde_json::json!({}),
+        result: None,
+    }));
+    app.take(Event::ToolInput {
+        id: VIEW.into(),
+        input: input.clone(),
+    });
+    if done {
+        let (is_error, text) = match ui::answer(&input) {
+            Ok(text) => (false, text),
+            Err(problem) => (true, problem),
+        };
+        app.take(Event::ToolResult {
+            id: VIEW.into(),
+            result: tools::ToolResult {
+                is_error,
+                content: vec![tools::Content::Text(text)],
+            },
+        });
+    }
+    app
+}
+
+/// Presses the control drawn for the element `id` in the scenes' view, as the captain would.
+fn press(s: &mut App, id: &str) {
+    fn find(node: &ui::Node, id: &str) -> Option<(ui::Trigger, String)> {
+        match &node.what {
+            ui::What::Button {
+                label,
+                press: Some(press),
+                ..
+            } if node.key == id => {
+                Some((press.clone(), format!("Pressed \u{201c}{label}\u{201d}")))
+            }
+            _ => node.children.iter().find_map(|c| find(c, id)),
+        }
+    }
+    let spec = s.view_spec(VIEW).expect("a view");
+    let state =
+        s.ui.get(VIEW)
+            .map_or(spec.state.clone(), |l| l.state(&spec));
+    let tree = ui::tree(&spec, &state);
+    let (trigger, did) = tree
+        .root
+        .as_ref()
+        .and_then(|r| find(r, id))
+        .expect("a button");
+    s.fire(VIEW, &trigger, did);
 }
 
 /// Sends `text` and waits for the reply, for scenes.
@@ -2404,5 +2661,208 @@ mod tests {
         assert!(texts(&rt).iter().any(|t| t == "one\ntwo\nthree"));
         tap(&mut rt, "tool-2-toggle");
         assert!(rt.find("tool-2-result").is_none());
+    }
+
+    fn view_runtime(input: serde_json::Value) -> Runtime<App> {
+        let mut rt = runtime_with(viewing(input, true));
+        for _ in 0..5 {
+            rt.frame(1.0 / 60.0);
+        }
+        rt
+    }
+
+    #[test]
+    fn a_static_view_draws_each_component_in_the_chat() {
+        let rt = view_runtime(spec("ui-release.json"));
+        for key in [
+            "tool-1-ui-review",
+            "tool-1-ui-blocker",
+            "tool-1-ui-progress",
+            "tool-1-ui-tasks",
+            "tool-1-ui-alert",
+            "tool-1-ui-tag",
+        ] {
+            assert!(rt.find(key).is_some(), "no {key}");
+        }
+        let texts = texts(&rt);
+        for shown in [
+            "Release 0.4",
+            "Chief of staff's view",
+            "in review",
+            "Tag it anyway",
+        ] {
+            assert!(texts.iter().any(|t| t == shown), "{shown} in {texts:?}");
+        }
+    }
+
+    #[test]
+    fn a_streamed_view_fills_in_as_its_input_arrives() {
+        let whole = fixture_text("ui-release.json");
+        let mut rt = runtime_with(viewing(serde_json::json!({}), false));
+        rt.frame(1.0 / 60.0);
+        assert!(rt.find("tool-1-waiting").is_some());
+        let mut seen = 0;
+        for (end, _) in whole.char_indices().step_by(7) {
+            let input = ui::partial(&whole[..end]);
+            rt.update(|s, _| {
+                s.take(Event::ToolInput {
+                    id: VIEW.into(),
+                    input,
+                })
+            });
+            rt.frame(1.0 / 60.0);
+            let shown = rt
+                .elements()
+                .iter()
+                .filter(|e| {
+                    e.key
+                        .as_deref()
+                        .is_some_and(|k| k.starts_with("tool-1-ui-"))
+                })
+                .count();
+            assert!(shown >= seen.min(1), "the view vanished at {end}");
+            seen = seen.max(shown);
+        }
+        assert!(seen > 0);
+        rt.update(|s, _| {
+            s.take(Event::Tool(tools::ToolUse {
+                id: VIEW.into(),
+                name: ui::tool_name(),
+                input: spec("ui-release.json"),
+                result: None,
+            }))
+        });
+        rt.frame(1.0 / 60.0);
+        assert!(rt.find("tool-1-ui-tag").is_some());
+        assert_eq!(
+            rt.state.ws.chat.len(),
+            2,
+            "the whole input replaced the streamed one"
+        );
+    }
+
+    #[test]
+    fn inputs_and_checkboxes_bind_state_and_a_repeat_follows_it() {
+        let mut rt = view_runtime(spec("ui-todos.json"));
+        assert!(rt.find("tool-1-ui-done.1").is_none());
+        tap(&mut rt, "tool-1-ui-check.1");
+        assert!(
+            rt.find("tool-1-ui-done.1").is_some(),
+            "ticking showed its badge"
+        );
+        rt.update(|s, _| s.view_edit(VIEW, "/draft", "").text = "Update the README".into());
+        rt.frame(1.0 / 60.0);
+        tap(&mut rt, "tool-1-ui-add");
+        assert!(texts(&rt).iter().any(|t| t == "Update the README"));
+        assert!(rt.find("tool-1-ui-check.3").is_some());
+        tap(&mut rt, "tool-1-ui-remove.0");
+        assert!(rt.find("tool-1-ui-check.3").is_none());
+        assert!(!texts(&rt).iter().any(|t| t == "Rebase onto main"));
+        // Nothing went to the chief of staff: these actions stay in the view.
+        assert_eq!(rt.state.ws.chat.len(), 2);
+    }
+
+    #[test]
+    fn a_submit_goes_to_the_chief_of_staff_and_shows_what_the_captain_did() {
+        let mut rt = view_runtime(spec("ui-todos.json"));
+        tap(&mut rt, "tool-1-ui-check.2");
+        rt.update(|s, _| s.view_edit(VIEW, "/draft", "").text = "half typed".into());
+        tap(&mut rt, "tool-1-ui-send");
+        let chat = &rt.state.ws.chat;
+        assert_eq!(chat[2].author, Author::Captain);
+        assert_eq!(chat[2].text, "Pressed \u{201c}Send the list\u{201d}.");
+        assert!(
+            chat[3]
+                .text
+                .starts_with("Thanks. I got your submit with {\"list\":")
+        );
+        assert!(chat[3].text.contains("\"title\":\"Tag the release\""));
+    }
+
+    #[test]
+    fn a_submit_reaches_claude_codes_session_with_the_input_values() {
+        let mut app = fake_in(Mode::Run);
+        app.take(Event::Tool(tools::ToolUse {
+            id: VIEW.into(),
+            name: ui::tool_name(),
+            input: spec("ui-todos.json"),
+            result: None,
+        }));
+        let mut rt = runtime_with(app);
+        let i = rt.state.ws.chat.len() - 1;
+        rt.update(|s, _| s.view_edit(VIEW, "/draft", "").text = "Ship".into());
+        tap(&mut rt, &format!("tool-{i}-ui-send"));
+        wait(&mut rt, replied);
+        let reply = &rt.state.ws.chat.last().unwrap().text;
+        assert!(
+            reply.contains("You said: In the view you showed with app_ui (tool use toolu_view)")
+        );
+        assert!(reply.contains("pressed “Send the list”"), "{reply}");
+        assert!(
+            reply.contains(r#"input values: {"/draft":"Ship","/todos/0/done":true"#),
+            "{reply}"
+        );
+    }
+
+    #[test]
+    fn an_unknown_component_shows_its_type_and_the_rest_still_draws() {
+        let rt = view_runtime(spec("ui-unknown.json"));
+        let texts = texts(&rt);
+        assert!(
+            texts
+                .iter()
+                .any(|t| t == "Unknown component \u{201c}BarChart\u{201d}")
+        );
+        assert!(texts.iter().any(|t| t == "Monday was the slowest."));
+    }
+
+    #[test]
+    fn a_view_over_the_limits_is_refused_with_why() {
+        let rt = view_runtime(too_large());
+        assert!(rt.find("tool-1-ui-main").is_none());
+        let texts = texts(&rt);
+        assert!(
+            texts
+                .iter()
+                .any(|t| t.contains("more than the limit of 200")),
+            "{texts:?}"
+        );
+    }
+
+    #[test]
+    fn a_view_shows_only_images_the_session_already_named() {
+        let chart = fixture("chart.png");
+        let input = |src: &str| {
+            serde_json::json!({"root": "i", "elements": {"i": {"type": "Image",
+                "props": {"src": src, "alt": "Build times"}}}})
+        };
+        let mut app = viewing(input(&chart), true);
+        assert!(
+            app.ui_images[&chart]
+                .as_ref()
+                .unwrap_err()
+                .contains("already named")
+        );
+        // A view cannot name its own file: `path` on the spec is not an approval.
+        let mut selfnamed = input(&chart);
+        selfnamed["path"] = serde_json::json!(chart);
+        let selfnamed = viewing(selfnamed, true);
+        assert!(selfnamed.ui_images[&chart].is_err());
+        let url = viewing(input("https://example.com/x.png"), true);
+        assert!(url.ui_images["https://example.com/x.png"].is_err());
+        // Once a tool use names the file, a view can show it.
+        app.take(Event::Tool(tools::ToolUse {
+            id: "t-read".into(),
+            name: "Read".into(),
+            input: serde_json::json!({"file_path": chart}),
+            result: None,
+        }));
+        app.take(Event::ToolInput {
+            id: VIEW.into(),
+            input: input(&chart),
+        });
+        let image = app.ui_images[&chart].as_ref().unwrap();
+        let _ = image.wait();
+        assert!(image.error().is_none());
     }
 }

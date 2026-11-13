@@ -25,7 +25,8 @@ use crate::agent::{ChiefOfStaff, Event};
 use crate::approval::{Policy, Settings};
 use crate::bridge::{Bridge, Call};
 use crate::model::{Action, Id, Item, ItemKind, Plan, Status, Workspace};
-use crate::tools;
+use crate::tools::{self, ToolUse};
+use crate::ui;
 
 /// How long `claude auth status` may take before the app reports it as not answering.
 const CHECK_TIMEOUT: Duration = Duration::from_secs(20);
@@ -53,6 +54,9 @@ pub struct Claude {
     reply: String,
     /// The turn has shown some of its text, so its `result` record's text is not new.
     replied: bool,
+    /// The view tool use whose input is streaming: its content block index, id and the JSON
+    /// so far.
+    streaming: Option<(u64, String, String)>,
     /// Events for the next [`ChiefOfStaff::events`].
     out: Vec<Event>,
     next_id: u64,
@@ -101,6 +105,7 @@ impl Claude {
             session: None,
             reply: String::new(),
             replied: false,
+            streaming: None,
             out: Vec::new(),
             next_id: 0,
             next_item: 0,
@@ -281,6 +286,41 @@ impl Claude {
                 let event = &record["event"];
                 match event["type"].as_str() {
                     Some("message_start") if !self.reply.is_empty() => self.reply.push_str("\n\n"),
+                    // A view tool use shows as soon as it starts, and fills in as its input
+                    // streams, so the captain sees the view build up.
+                    Some("content_block_start")
+                        if !subagent
+                            && event["content_block"]["type"] == "tool_use"
+                            && event["content_block"]["name"] == ui::tool_name().as_str() =>
+                    {
+                        let block = &event["content_block"];
+                        let id = block["id"].as_str().unwrap_or_default().to_string();
+                        self.finish_reply();
+                        self.out.push(Event::Tool(ToolUse {
+                            id: id.clone(),
+                            name: ui::tool_name(),
+                            input: json!({}),
+                            result: None,
+                        }));
+                        let index = event["index"].as_u64().unwrap_or_default();
+                        self.streaming = Some((index, id, String::new()));
+                    }
+                    Some("content_block_delta") if event["delta"]["type"] == "input_json_delta" => {
+                        let Some((index, id, json)) = &mut self.streaming else {
+                            return;
+                        };
+                        // Past the limit the view is refused anyway, once the input is whole.
+                        if event["index"].as_u64() == Some(*index) && json.len() <= ui::MAX_BYTES {
+                            json.push_str(
+                                event["delta"]["partial_json"].as_str().unwrap_or_default(),
+                            );
+                            self.out.push(Event::ToolInput {
+                                id: id.clone(),
+                                input: ui::partial(json),
+                            });
+                        }
+                    }
+                    Some("content_block_stop") => self.streaming = None,
                     Some("content_block_delta") if event["delta"]["type"] == "text_delta" => {
                         self.replied = true;
                         self.reply
@@ -407,6 +447,7 @@ impl ChiefOfStaff for Claude {
                 Some(note) => format!("I have done this: {note}"),
                 None => format!("I have done item {item}."),
             },
+            Action::Ui(ui) => ui.message(),
         };
         if let Err(problem) = self.say(&text) {
             self.end_session();
@@ -899,6 +940,48 @@ mod tests {
         assert!(
             at(|e| matches!(e, Event::Reply { done: true, .. }))
                 < at(|e| matches!(e, Event::Tool(_)))
+        );
+    }
+
+    #[test]
+    fn a_view_tool_use_shows_at_its_start_and_fills_in_as_its_input_streams() {
+        let mut claude = Claude::new("unused");
+        let name = ui::tool_name();
+        let event = |event: Value| json!({"type": "stream_event", "event": event});
+        let delta = |json: &str| {
+            event(json!({"type": "content_block_delta", "index": 1,
+                "delta": {"type": "input_json_delta", "partial_json": json}}))
+        };
+        for record in [
+            event(json!({"type": "content_block_delta", "index": 0,
+                "delta": {"type": "text_delta", "text": "Here it is."}})),
+            event(json!({"type": "content_block_start", "index": 1,
+                "content_block": {"type": "tool_use", "id": "v1", "name": name, "input": {}}})),
+            delta(r#"{"root": "t", "elem"#),
+            delta(r#"ents": {"t": {"type": "Text", "props": {"text": "Hi"}}}}"#),
+            event(json!({"type": "content_block_stop", "index": 1})),
+            delta("ignored"),
+        ] {
+            claude.record(&record);
+        }
+        let events = std::mem::take(&mut claude.out);
+        // The text before the view ends as it starts.
+        assert!(matches!(&events[1], Event::Reply { text, done: true } if text == "Here it is."));
+        assert!(matches!(&events[2], Event::Tool(t) if t.id == "v1" && t.name == name));
+        let inputs: Vec<&Value> = events
+            .iter()
+            .filter_map(|e| match e {
+                Event::ToolInput { id, input } if id == "v1" => Some(input),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            inputs,
+            [
+                &json!({"root": "t"}),
+                &json!({"root": "t", "elements":
+            {"t": {"type": "Text", "props": {"text": "Hi"}}}})
+            ]
         );
     }
 

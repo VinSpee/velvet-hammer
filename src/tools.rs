@@ -105,6 +105,9 @@ pub enum Handler {
     Diff,
     /// An ACP `terminal`: a command's output.
     Terminal,
+    /// A json-render view the chief of staff showed with the app's own `app_ui` tool (see
+    /// [`crate::ui`]). It draws while its input is still streaming.
+    Ui,
     /// The tool's name, a short summary of its input and its result, folded.
     Generic,
 }
@@ -122,8 +125,12 @@ pub enum Picture {
 }
 
 /// The registry: picks the handler for `tool` by its result's content types, the media type of
-/// a file it named, and its kind, in that order. A tool use still running is generic.
+/// a file it named, and its kind, in that order. The app's view tool is a view from the start;
+/// any other tool use still running is generic.
 pub fn handler(tool: &ToolUse) -> Handler {
+    if tool.name == crate::ui::tool_name() {
+        return Handler::Ui;
+    }
     let Some(result) = &tool.result else {
         return Handler::Generic;
     };
@@ -152,6 +159,25 @@ pub fn handler(tool: &ToolUse) -> Handler {
         Kind::Execute => Handler::Terminal,
         _ => Handler::Generic,
     }
+}
+
+/// The absolute file paths a tool use named: in its input, and as `file://` links in its
+/// result.
+pub fn named_files(tool: &ToolUse) -> Vec<PathBuf> {
+    let linked = tool
+        .result
+        .iter()
+        .flat_map(|r| &r.content)
+        .filter_map(|block| match block {
+            Content::ResourceLink { uri } | Content::Resource { uri, .. } => file_uri(uri),
+            _ => None,
+        });
+    named_path(&tool.input).into_iter().chain(linked).collect()
+}
+
+/// The handler for an image or video file, by the same rules as one a tool use named.
+pub fn handler_for_file(path: &Path) -> Option<Handler> {
+    media_file(path.to_path_buf())
 }
 
 /// The handler for a media file the tool use named, decided by its extension alone (a media type

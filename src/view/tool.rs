@@ -12,10 +12,17 @@ use crate::{App, Showing};
 /// view of their own yet, so they draw as the generic one.
 pub(super) fn tool_use(s: &App, i: usize, tool: &ToolUse, t: Theme, dark: bool) -> El {
     let key = format!("tool-{i}");
+    let is_view = tools::handler(tool) == Handler::Ui;
     let status = match &tool.result {
+        None if is_view => " \u{b7} arriving\u{2026}",
         None => " \u{b7} running\u{2026}",
         Some(r) if r.is_error => " \u{b7} failed",
         Some(_) => "",
+    };
+    let name = if is_view {
+        "Chief of staff's view"
+    } else {
+        tool.name.as_str()
     };
     let card = col()
         .key(key.clone())
@@ -28,20 +35,25 @@ pub(super) fn tool_use(s: &App, i: usize, tool: &ToolUse, t: Theme, dark: bool) 
             row()
                 .gap(space::S2)
                 .child(
-                    text(format!("{}{status}", tool.name))
+                    text(format!("{name}{status}"))
                         .key(format!("{key}-name"))
                         .font(type_::SECTION)
                         .color(t.text_secondary),
                 )
-                .child(
+                .children((!is_view).then(|| {
                     text(tools::summary(tool))
                         .key(format!("{key}-summary"))
                         .font(type_::LABEL.mono())
                         .color(t.text_secondary)
                         .wrap_anywhere()
-                        .grow(1.0),
-                ),
+                        .grow(1.0)
+                })),
         );
+    if is_view {
+        // The tool's result only says whether the model's spec was accepted; a refusal also
+        // shows as the view's own note, so the folded result adds nothing here.
+        return card.child(super::ui::view(s, &key, tool, t, dark));
+    }
     let Some(result) = &tool.result else {
         return card;
     };
@@ -153,7 +165,7 @@ fn image_view(
 
 /// An image as wide as its column allows, no wider than its own pixels and no taller than
 /// `max_h`. Its height follows its shape once it decodes.
-fn picture_el(image: &Image, max_h: f32) -> El {
+pub(super) fn picture_el(image: &Image, max_h: f32) -> El {
     let mut e = el().w_full().max_h(max_h).radius(radius::SM);
     if let Some([w, _]) = image.size() {
         e = e.max_w(w as f32);

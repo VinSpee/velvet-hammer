@@ -3,6 +3,7 @@
 //! and every change the captain makes is an [`Action`] applied to it.
 
 use crate::tools::ToolUse;
+use crate::ui::UiAction;
 
 pub type Id = u32;
 
@@ -133,8 +134,15 @@ pub struct Workspace {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Action {
     Say(String),
-    Answer { item: Id, choice: String },
-    Done { item: Id },
+    Answer {
+        item: Id,
+        choice: String,
+    },
+    Done {
+        item: Id,
+    },
+    /// A control in a view the chief of staff showed (see [`crate::ui`]).
+    Ui(UiAction),
 }
 
 impl Workspace {
@@ -161,6 +169,9 @@ impl Workspace {
     pub fn apply(&mut self, action: &Action) {
         match action {
             Action::Say(text) => self.chat.push(Message::new(Author::Captain, text.clone())),
+            Action::Ui(ui) => self
+                .chat
+                .push(Message::new(Author::Captain, format!("{}.", ui.did))),
             Action::Answer { item, .. } | Action::Done { item } => {
                 self.items.retain(|i| i.id != *item)
             }
