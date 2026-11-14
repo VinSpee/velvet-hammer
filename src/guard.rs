@@ -676,7 +676,8 @@ fn git_hits(
         }),
         "tag" => {
             sub_args.iter().all(|a| a.starts_with('-')) && !flag("-d")
-                || flag("-l") || flag("--list")
+                || flag("-l")
+                || flag("--list")
         }
         "stash" => sub_args.first().is_some_and(|a| a == "list" || a == "show"),
         "worktree" => sub_args.first().is_some_and(|a| a == "list"),
