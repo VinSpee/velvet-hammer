@@ -886,6 +886,9 @@ fn chat(s: &App, plan: &Plan, t: Theme, dark: bool) -> El {
         .grow(1.0)
         .h_full()
         .min_h(0.0)
+        // A command cut to one line in a tool card is as wide as the whole command; the column
+        // keeps its share of the window instead.
+        .min_w(0.0)
         .padding(space::S6)
         .gap(space::S3)
         .child(header)

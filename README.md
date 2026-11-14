@@ -60,8 +60,10 @@ The window has three columns, and every setting is in **Settings** (see
   open. Your own messages and error lines show as written.
   Each tool use the chief of staff makes appears where it happened: an image it read or made
   shows inline (press it to see it larger), a video file plays inline with **Play** and
-  **Open in your video player**, and any other tool shows its name, its main argument and its
-  result folded behind a button. See [Tool calls in the chat](docs/tool-calls.md).
+  **Open in your video player**, and every other tool use is a card with its status, time and a
+  copy button: a command coloured as shell over its output with the output's colours, an edit as
+  a diff, a file's numbered lines, a search's matches and a fetched page's summary, each long
+  result folded to its first lines. See [Tool calls in the chat](docs/tool-calls.md).
   The chief of staff can also show you a small interactive view, a json-render spec it passes to
   the app's `app_ui` tool: cards, tables, badges, progress bars, buttons, text fields and
   checkboxes, drawn natively and filling in as the spec streams. Ticking, typing and adding
@@ -144,6 +146,8 @@ input** and **For you to do**.
 - `src/ui.rs`: json-render views: the catalog, reading a spec (whole or still streaming) within
   its limits, its state, the tree to draw and the actions its controls fire (see
   [docs/json-render.md](docs/json-render.md)).
+- `src/ansi.rs`: a command's output as a terminal shows it: the colours its ANSI escape
+  sequences ask for, over the text without them.
 - `src/find.rs`: find in the conversation: what each message is searched as, the matches and
   stepping through them (see [docs/conversation.md](docs/conversation.md)).
 - `src/history.rs`: the conversation kept across restarts in `history.jsonl`, and the setting
@@ -154,10 +158,10 @@ input** and **For you to do**.
   and the commands they share with the keyboard shortcuts.
 - `src/markdown.rs`: prepares the chief of staff's Markdown for Rune's Markdown view, keeping
   line breaks and showing HTML as text.
-- `src/view.rs`: the Rune view, with the tool-use views in `src/view/tool.rs`, the
-  json-render views in `src/view/ui.rs`, the visual-replies and firstmate-rules pages in
-  `src/view/policy.rs`, and the Settings page and the drawn menu bar in
-  `src/view/settings.rs`. Every element a
+- `src/view.rs`: the Rune view, with the tool-use cards in `src/view/tool.rs` (the folding
+  output block and the diff in `src/view/tool/`), the json-render views in `src/view/ui.rs`, the
+  visual-replies and firstmate-rules pages in `src/view/policy.rs`, and the Settings page and the
+  drawn menu bar in `src/view/settings.rs`. Every element a
   test or script reaches has a key.
 - `src/main.rs`: the `App` state (workspace, chief of staff, sign-in status, firstmate clone,
   message draft, what the middle column shows), the headless scenes, and the tests.
@@ -353,8 +357,13 @@ It writes these files to `OUT_DIR`:
 | `tool-image.png`, `tool-image.json` | An image the Read tool returned, inline |
 | `tool-image-broken.png`, `tool-image-broken.json` | An image that cannot be decoded: its path and why |
 | `tool-video.png`, `tool-video.json` | A video file, with its poster frame, **Play** and **Open in your video player** |
-| `tool-generic.png`, `tool-generic.json` | A Bash command with its output unfolded |
+| `tool-generic.png`, `tool-generic.json` | A Bash command the fake `claude` ran, as a terminal card |
 | `tool-picture.png`, `tool-picture.json` | An image from the chat, enlarged |
+| `tool-bash.png`, `tool-bash.json` | A long test run: the command coloured as shell, its time, and the first lines of output |
+| `tool-bash-open.png`, `tool-bash-open.json` | The same run with the whole command and every line shown |
+| `tool-terminal.png`, `tool-terminal.json` | Output in colour, a failed command with its exit code, no output, a long line and a command still running |
+| `tool-diff.png`, `tool-diff.json` | An Edit, a Write and a MultiEdit as diffs, and an Edit that failed |
+| `tool-files.png`, `tool-files.json` | A Grep, a Glob, a Read as numbered code and a WebFetch |
 | `view-static.png`, `view-static.json` | A json-render view: a card with badges, a progress bar, a table, an alert and buttons |
 | `view-streaming.png`, `view-streaming.json` | The same view with a little over half of its spec streamed |
 | `view-state.png`, `view-state.json` | A checklist after ticking an item, typing and adding one, and typing again: inputs bound to state and a repeat |
@@ -389,7 +398,9 @@ The first four scenes, `approval-settings`, the `formatted` scenes, the `view` s
 `visuals-settings` use the stub; the other `visuals` scenes have the fake `claude` call the prompt
 and stop hooks; the `rules` scenes run the fake `claude` as firstmate in a scratch clone under
 `/tmp/velvet-hammer`; the `tool`
-scenes have the fake `claude` use Read and Bash on the files in `scripts/fixtures`. The sign-in scenes run the app on `scripts/fake-claude`, so
+scenes have the fake `claude` use Read and Bash on the files in `scripts/fixtures`, except the
+`tool-bash`, `tool-bash-open`, `tool-terminal`, `tool-diff` and `tool-files` scenes, which replay the turns in
+`scripts/fixtures/tools-*.json` on the stub. The sign-in scenes run the app on `scripts/fake-claude`, so
 they need no Claude account; each waits for the fake's real processes before rendering. The
 firstmate and projects scenes run `git` on a scratch upstream repository under `target/`, so
 they need no network; the projects scenes write the registry firstmate's procedure would write,

@@ -1,0 +1,55 @@
+{
+  "ask": "Check the branch builds cleanly.",
+  "lead": "Checking the working tree and running clippy.",
+  "tools": [
+    {
+      "id": "toolu_status",
+      "name": "Bash",
+      "input": {
+        "command": "git -c color.status=always status --short",
+        "description": "Show changed files"
+      },
+      "result": " \u001b[32mM\u001b[m src/tools.rs\n \u001b[32mM\u001b[m src/view/tool.rs\n\u001b[31m??\u001b[m src/ansi.rs\n\u001b[31m??\u001b[m scripts/fixtures/tools-bash.json",
+      "took": 0.1
+    },
+    {
+      "id": "toolu_clippy",
+      "name": "Bash",
+      "input": {
+        "command": "cargo clippy --color always --all-targets -- -D warnings",
+        "description": "Lint with clippy"
+      },
+      "result": "Exit code 101\n\u001b[1m\u001b[32m    Checking\u001b[0m velvet-hammer v0.1.0 (/Users/captain/Projects/velvet-hammer)\n\u001b[0m\u001b[1m\u001b[91merror\u001b[0m\u001b[0m\u001b[1m: unused variable: `took`\u001b[0m\n\u001b[0m  \u001b[0m\u001b[0m\u001b[1m\u001b[94m--> \u001b[0m\u001b[0msrc/view/tool.rs:42:9\u001b[0m\n\u001b[0m   \u001b[0m\u001b[0m\u001b[1m\u001b[94m|\u001b[0m\n\u001b[0m\u001b[1m\u001b[94m42\u001b[0m\u001b[0m \u001b[0m\u001b[0m\u001b[1m\u001b[94m|\u001b[0m\u001b[0m \u001b[0m\u001b[0m    let took = tool.took;\u001b[0m\n\u001b[0m   \u001b[0m\u001b[0m\u001b[1m\u001b[94m|\u001b[0m\u001b[0m         \u001b[0m\u001b[0m\u001b[1m\u001b[91m^^^^\u001b[0m\u001b[0m \u001b[0m\u001b[0m\u001b[1m\u001b[91mhelp: if this is intentional, prefix it with an underscore: `_took`\u001b[0m\n\u001b[0m   \u001b[0m\u001b[0m\u001b[1m\u001b[94m|\u001b[0m\n\u001b[0m   \u001b[0m\u001b[0m\u001b[1m\u001b[94m= \u001b[0m\u001b[0m\u001b[1mnote\u001b[0m\u001b[0m: `-D unused-variables` implied by `-D warnings`\u001b[0m\n\n\u001b[1m\u001b[91merror\u001b[0m\u001b[1m:\u001b[0m could not compile `velvet-hammer` (bin \"velvet-hammer\") due to 1 previous error",
+      "is_error": true,
+      "took": 6.2
+    },
+    {
+      "id": "toolu_mkdir",
+      "name": "Bash",
+      "input": {
+        "command": "mkdir -p target/proof"
+      },
+      "result": "",
+      "took": 0.0
+    },
+    {
+      "id": "toolu_long",
+      "name": "Bash",
+      "input": {
+        "command": "for f in src/*.rs; do\n  echo \"== $f\"\n  wc -l \"$f\"\ndone"
+      },
+      "result": "warning: the quick brown fox jumps over the lazy dog; the quick brown fox jumps over the lazy dog; the quick brown fox jumps over the lazy dog; the quick brown fox jumps over the lazy dog; the quick brown fox jumps over the lazy dog; the quick brown fox jumps over the lazy dog; the quick brown fox jumps over the lazy dog; the quick brown fox jumps over the lazy dog; ",
+      "took": 0.4
+    },
+    {
+      "id": "toolu_dev",
+      "name": "Bash",
+      "input": {
+        "command": "cargo run --release",
+        "description": "Start the app",
+        "run_in_background": true
+      }
+    }
+  ],
+  "reply": "Clippy found an unused variable; I am fixing it now."
+}
