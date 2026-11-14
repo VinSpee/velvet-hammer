@@ -32,7 +32,8 @@ for scene in chat replied empty peek signed-out signing-in signed-in expired cli
   projects-fresh projects-empty projects-adding projects-listed \
   formatted formatted-all formatted-streaming tool-image tool-image-broken tool-video tool-generic tool-picture \
   view-static view-streaming view-state view-action view-unknown view-too-large \
-  visuals-settings visuals-enforced visuals-capped rules-settings rules-merge-ask rules-project-ask; do
+  visuals-settings visuals-enforced visuals-capped rules-settings rules-merge-ask rules-project-ask \
+  send-while-working send-while-working-answered messages-settings queue-waiting queue-delivering queue-not-ready; do
   headless --scene "$scene" --snap "$out/$scene.png"
   headless --scene "$scene" --tree "$out/$scene.json"
 done
@@ -294,6 +295,26 @@ check view-too-large.json no  '"key": "tool-1-ui-main"'
 # ignored the feedback, sent back only once.
 check chat.json yes '"key": "visuals"'
 check chat.json yes '"text": "Enforce"'
+# Messages sent while the chief of staff works: sent at once and marked, the setting with Send
+# right away recommended and chosen, the queue with one message being edited, the first queued
+# message going out when the turn ends, and the queue kept while Claude Code is not ready.
+check send-while-working.json yes '"text": "You · sent while your chief of staff was working"'
+check send-while-working.json yes '"key": "working"'
+check send-while-working.json no  '"key": "queue"'
+check send-while-working-answered.json yes 'I also took in'
+check send-while-working-answered.json no  '"key": "working"'
+check messages-settings.json yes '"key": "messages-page"'
+check messages-settings.json yes '"text": "● Send right away (Recommended)"'
+check messages-settings.json yes '"text": "○ Queue new messages until the chief of staff is done"'
+check messages-settings.json yes '"text": "Send right away"'
+check queue-waiting.json yes '"key": "queued-0-edit"'
+check queue-waiting.json yes '"key": "queued-1-save"'
+check queue-waiting.json yes '"key": "queued-2-delete"'
+check queue-waiting.json yes '"text": "Queue until done"'
+check queue-delivering.json yes '"text": "Then open the release PR."'
+check queue-delivering.json no  '"key": "queued-2"'
+check queue-delivering.json yes '"key": "queued-1"'
+check queue-not-ready.json yes '"key": "sign-in-queued"'
 check visuals-settings.json yes '"key": "visuals-page"'
 check visuals-settings.json yes '"text": "● Enforce (Recommended)"'
 check visuals-settings.json yes '"key": "visual-mode-nudge"'

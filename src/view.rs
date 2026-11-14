@@ -14,9 +14,11 @@ use crate::firstmate::{Checkout, Distro, Firstmate, Standing, Work};
 use crate::model::{Action, Agent, Author, Item, ItemKind, Message, Plan, Status};
 use crate::projects::Project;
 
+mod messages;
 mod policy;
 mod tool;
 mod ui;
+use messages::messages_page;
 use policy::{rules_page, visuals_page};
 use tool::{picture_page, tool_use};
 
@@ -33,6 +35,7 @@ pub fn view(s: &App, cx: &mut Cx<App>) -> El {
         (Showing::Activity, ..) => activity_page(s, t, cx.system_dark()),
         (Showing::Visuals, ..) => visuals_page(s, t, cx.system_dark()),
         (Showing::Rules, ..) => rules_page(s, t, cx.system_dark()),
+        (Showing::Messages, ..) => messages_page(s, t, cx.system_dark()),
         (Showing::Picture(id), ..) => picture_page(s, id, t, cx.system_dark()),
         (_, Some(agent), _) => peek(s, agent, t, cx.system_dark()),
         // A chief of staff that runs in the managed clone cannot chat until it is installed.
@@ -40,7 +43,7 @@ pub fn view(s: &App, cx: &mut Cx<App>) -> El {
             firstmate_page(&s.firstmate, t, cx.system_dark())
         }
         (_, None, Status::Ready(plan)) => chat(s, plan, t, cx.system_dark()),
-        (_, None, status) => sign_in(status, t, cx.system_dark()),
+        (_, None, status) => sign_in(status, s.queue.len(), t, cx.system_dark()),
     };
     row()
         .w_full()
@@ -133,6 +136,14 @@ fn agents(s: &App, t: Theme, dark: bool) -> El {
         .filter(|r| s.rules.settings().on(**r))
         .count();
     list.child(el().grow(1.0))
+        .child(nav_card(
+            s,
+            "messages",
+            "Messages",
+            s.delivery.settings().summary().to_string(),
+            &[Showing::Messages],
+            t,
+        ))
         .child(nav_card(
             s,
             "visuals",
@@ -949,7 +960,9 @@ fn chat(s: &App, plan: &Plan, t: Theme, dark: bool) -> El {
                 .child(button("answer-cancel", "Cancel", t, |s| s.answering = None))
         }))
         .children(s.adding.then(|| adding(s, t, dark)))
+        .children(messages::working(s, t))
         .child(composer)
+        .children(messages::queued(s, t))
 }
 
 /// The empty state: the app works on projects, and there are none yet.
@@ -1048,7 +1061,7 @@ fn capitalized(word: &str) -> String {
 
 /// What the middle column shows while the chat can't run: the sign-in, its progress, or why
 /// Claude Code isn't usable. Claude Code does the signing in; this only starts it and reports.
-fn sign_in(status: &Status, t: Theme, dark: bool) -> El {
+fn sign_in(status: &Status, queued: usize, t: Theme, dark: bool) -> El {
     let mut body = col().key("sign-in").gap(space::S3).max_w(520.0);
     let mut buttons = row().gap(space::S2);
     let (title, lede) = match status {
@@ -1179,6 +1192,19 @@ fn sign_in(status: &Status, t: Theme, dark: bool) -> El {
             body = body.child(buttons.child(button("recheck", "Check again", t, |s| s.recheck())));
         }
         Status::Checking | Status::Ready(_) => {}
+    }
+    if queued > 0 {
+        body = body.child(note(
+            "sign-in-queued",
+            &if queued == 1 {
+                "Your queued message is kept and goes out once Claude Code is ready.".to_string()
+            } else {
+                format!(
+                    "Your {queued} queued messages are kept and go out once Claude Code is ready."
+                )
+            },
+            t,
+        ));
     }
     col()
         .key("sign-in-screen")
@@ -1329,6 +1355,9 @@ fn transcript(
             continue;
         }
         let who = match m.author {
+            Author::Captain if m.while_working => {
+                "You \u{b7} sent while your chief of staff was working"
+            }
             Author::Captain => "You",
             Author::ChiefOfStaff => "Chief of staff",
             Author::Subagent => "Subagent",

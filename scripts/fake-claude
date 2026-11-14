@@ -38,6 +38,10 @@
 # A message containing "whereami" is answered with the session's working directory and FM_HOME.
 # After a message "wake: TEXT" and its reply, a second turn nobody asked for says TEXT, the way
 # a firstmate Stop hook wakes an idle session.
+#
+# With --replay-user-messages, each message is echoed back as the turn that takes it in starts, as
+# the real `claude` does. A message "slow: TEXT" takes a second before its reply, so a message sent
+# meanwhile waits for the next turn, as the real `claude` holds one when the turn has no step left.
 set -eu
 home=${FAKE_CLAUDE_HOME:?FAKE_CLAUDE_HOME must name a scratch directory}
 state=$(cat "$home/state" 2>/dev/null || echo signed-out)
@@ -98,7 +102,7 @@ auth)
   ;;
 -p)
   # The app passes compact JSON; these pull out the one server and the one hook it names.
-  mcp_url='' hook_url='' hook_base='' mcp_auth='' hook_auth=''
+  mcp_url='' hook_url='' hook_base='' mcp_auth='' hook_auth='' replay=''
   while [ $# -gt 0 ]; do
     case $1 in
     --mcp-config)
@@ -106,6 +110,7 @@ auth)
       mcp_auth=$(printf '%s' "$2" | sed -E 's/.*"Authorization":"([^"]*)".*/\1/')
       shift
       ;;
+    --replay-user-messages) replay=1 ;;
     --settings)
       hook_base=$(printf '%s' "$2" | sed -E 's#.*"url":"(http://[^/"]*)/hooks/.*#\1#')
       hook_url=$hook_base/hooks/pre-tool-use
@@ -128,6 +133,9 @@ auth)
   # stream-json in and out: one user record per line, one turn per record.
   while IFS= read -r line; do
     text=$(printf '%s' "$line" | sed -E 's/.*"content":"(([^"\\]|\\.)*)".*/\1/')
+    if [ -n "$replay" ]; then
+      printf '%s\n' "{\"type\":\"user\",\"isReplay\":true,\"message\":{\"role\":\"user\",\"content\":\"$text\"},\"parent_tool_use_id\":null}"
+    fi
     context=$(post "$hook_base/hooks/user-prompt-submit" "$hook_auth" "{\"hook_event_name\":\"UserPromptSubmit\",\"prompt\":\"\"}" 30 || true)
     case $text in
     'context?')
@@ -138,6 +146,7 @@ auth)
       ;;
     *envcheck*) text="api-key:${ANTHROPIC_API_KEY:+reached} token:${ANTHROPIC_AUTH_TOKEN:+reached}" ;;
     *whereami*) text="cwd=$(pwd -P) FM_HOME=${FM_HOME:-unset}" ;;
+    slow:*) sleep 1 ;;
     stuck:*)
       # A turn that never finishes, and ignores its hooks and input, until it is signalled.
       i=0
