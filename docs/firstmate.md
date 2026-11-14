@@ -291,7 +291,7 @@ instead.
 repositories, so you can pick one instead of typing its address. Type in its field to filter the
 list, or choose **Show repositories**. Choosing one puts its address, such as
 `https://github.com/acme/payments-api`, into your message, which you then send, exactly as a
-chosen folder's path is. The app does not clone anything: firstmate's procedure clones and
+chosen folder's path is, and empties the field. The app does not clone anything: firstmate's procedure clones and
 registers the repository after your yes, as it does for any address.
 
 - **Where the list comes from.** The app runs the GitHub CLI you already signed in with:
