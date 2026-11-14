@@ -1,0 +1,1 @@
+{"root":"merge","elements":{"merge":{"type":"Choice","props":{"question":"Merge authority for velvet-hammer is yolo on. Do you want it off?","options":[{"value":"yolo-off","label":"yolo off","hint":"Every merge waits for your word."},{"value":"yolo-on","label":"yolo on","hint":"I merge green pull requests on my own."}],"recommended":"yolo-off"},"children":[]}}}

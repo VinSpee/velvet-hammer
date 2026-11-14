@@ -368,10 +368,87 @@ impl App {
             self.act(Action::Ui(ui::UiAction {
                 tool: id.to_string(),
                 did: did.clone(),
-                params,
-                inputs: inputs.clone(),
+                sent: ui::Sent::Submit {
+                    params,
+                    inputs: inputs.clone(),
+                },
             }));
         }
+    }
+
+    /// Picks or unpicks `value` in the view's `Choice` drawn as `node`, one that takes several
+    /// options and is sent with its Send button.
+    pub fn pick(&mut self, id: &str, node: &str, value: &str) {
+        let picks = self
+            .ui
+            .entry(id.to_string())
+            .or_default()
+            .picks
+            .entry(node.to_string())
+            .or_default();
+        match picks.iter().position(|v| v == value) {
+            Some(at) => {
+                picks.remove(at);
+            }
+            None => picks.push(value.to_string()),
+        }
+    }
+
+    /// Sends the captain's answer to the view's `Choice` drawn as `node`: `picked` are option
+    /// values, and the Other field's text, if any, goes with them. A `Choice` is answered once.
+    pub fn answer(&mut self, id: &str, node: &str, picked: &[String]) {
+        let Some(question) = self.view_choice(id, node) else {
+            return;
+        };
+        let ui::What::Choice {
+            question, options, ..
+        } = question
+        else {
+            return;
+        };
+        if !self.chat_ready() {
+            return;
+        }
+        let live = self.ui.entry(id.to_string()).or_default();
+        if live.answered.contains_key(node) {
+            return;
+        }
+        let other = live
+            .edits
+            .get(&ui::other_field(node))
+            .map(|e| e.text.trim().to_string())
+            .unwrap_or_default();
+        let answer = ui::Answer {
+            // In the order the view lists them, whatever order they were picked in.
+            picked: options
+                .into_iter()
+                .filter(|o| picked.contains(&o.value))
+                .collect(),
+            other,
+        };
+        live.answered.insert(node.to_string(), answer.clone());
+        live.picks.remove(node);
+        self.act(Action::Ui(ui::UiAction {
+            tool: id.to_string(),
+            did: answer.did(),
+            sent: ui::Sent::Answer { question, answer },
+        }));
+    }
+
+    /// The `Choice` a view draws as `node`, as the captain sees it now.
+    fn view_choice(&self, id: &str, node: &str) -> Option<ui::What> {
+        let spec = self.view_spec(id).ok()?;
+        let state = self
+            .ui
+            .get(id)
+            .map_or_else(|| spec.state.clone(), |live| live.state(&spec));
+        fn find(n: &ui::Node, key: &str) -> Option<ui::What> {
+            if n.key == key && matches!(n.what, ui::What::Choice { .. }) {
+                return Some(n.what.clone());
+            }
+            n.children.iter().find_map(|c| find(c, key))
+        }
+        find(ui::tree(&spec, &state).root.as_ref()?, node)
     }
 
     /// Checks or unchecks a view's checkbox, writing its bound path, then fires its actions.
@@ -1036,6 +1113,28 @@ fn main() {
                 *s = viewing(spec("ui-unknown.json"), true)
             }),
             ("view-too-large", |s| *s = viewing(too_large(), true)),
+            // A question with a fixed set of answers, asked with a Choice: the merge-authority
+            // question with yolo off recommended, the same after the captain chose yolo off, a
+            // Choice that takes several picks with two picked and an answer of the captain's own
+            // typed, and on the fake `claude` the question asked in prose, sent back by the stop
+            // hook, asked again with a Choice and answered.
+            ("choice-ask", |s| *s = viewing(spec("ui-choice.json"), true)),
+            ("choice-answered", |s| {
+                *s = viewing(spec("ui-choice.json"), true);
+                s.answer(VIEW, "merge", &["yolo-off".into()]);
+            }),
+            ("choice-multiple", |s| {
+                *s = viewing(spec("ui-choice-multiple.json"), true);
+                s.pick(VIEW, "checks", "tests");
+                s.pick(VIEW, "checks", "screens");
+                s.view_edit(VIEW, &ui::other_field("checks"), "").text = "A changelog entry".into();
+            }),
+            ("choice-enforced", |s| {
+                *s = fake_in(Mode::Run);
+                say_until(s, ASK, "Pick one above.");
+                s.answer(FAKE_CHOICE, "merge", &["yolo-off".into()]);
+                s.settle(replied);
+            }),
             // Visual replies: the settings page, a list the fake sent as text that was sent back
             // once and shown as a view, and a reply that ignored the feedback, sent back once.
             ("visuals-settings", |s| {
@@ -1093,6 +1192,13 @@ fn main() {
 }
 
 /// The list the visual-replies scenes and tests have the fake send as text.
+/// The merge-authority question the fake `claude` asks in prose, then with a Choice.
+const ASK: &str = "ask: Merge authority for velvet-hammer is yolo on. Recommended: yolo off. Do \
+                   you want it off?";
+
+/// The tool use the fake `claude` asks [`ASK`] with.
+const FAKE_CHOICE: &str = "toolu_fake_choice";
+
 const LIST: &str = "list: Merge the docs PR, Renew the domain, Answer the window-size question";
 
 /// A merge through firstmate's script, which its rules ask the captain about.
@@ -2876,6 +2982,55 @@ mod tests {
     }
 
     #[test]
+    fn a_choice_sends_the_exact_value_once_and_shows_it_as_the_captains_choice() {
+        let mut rt = view_runtime(spec("ui-choice.json"));
+        assert!(rt.find("tool-1-ui-merge-recommended").is_some());
+        assert!(
+            texts(&rt)
+                .iter()
+                .any(|t| t == "Every merge waits for your word.")
+        );
+        tap(&mut rt, "tool-1-ui-merge-option-0");
+        let chat = rt.state.ws.chat.clone();
+        assert_eq!(chat[2].author, Author::Captain);
+        assert_eq!(chat[2].text, "Chose \u{201c}yolo off\u{201d}.");
+        assert_eq!(
+            chat[3].text,
+            "Thanks. I got the values [\"yolo-off\"] and the words \u{201c}\u{201d}."
+        );
+        assert!(rt.find("tool-1-ui-merge-sent").is_some());
+        assert!(rt.find("tool-1-ui-merge-other").is_none());
+        // The answered Choice takes no more presses.
+        tap(&mut rt, "tool-1-ui-merge-option-1");
+        assert_eq!(rt.state.ws.chat.len(), chat.len());
+    }
+
+    #[test]
+    fn a_choice_of_several_sends_the_picks_in_order_with_the_captains_own_words() {
+        let mut rt = view_runtime(spec("ui-choice-multiple.json"));
+        tap(&mut rt, "tool-1-ui-checks-option-2");
+        tap(&mut rt, "tool-1-ui-checks-option-0");
+        tap(&mut rt, "tool-1-ui-checks-option-3");
+        tap(&mut rt, "tool-1-ui-checks-option-3");
+        assert_eq!(rt.state.ws.chat.len(), 2, "picking sends nothing");
+        rt.update(|s, _| {
+            s.view_edit(VIEW, &ui::other_field("checks"), "").text = "A changelog entry".into()
+        });
+        tap(&mut rt, "tool-1-ui-checks-send");
+        let chat = &rt.state.ws.chat;
+        assert_eq!(
+            chat[2].text,
+            "Chose \u{201c}Tests\u{201d} and \u{201c}Screenshots\u{201d}, and answered \
+             \u{201c}A changelog entry\u{201d}."
+        );
+        assert_eq!(
+            chat[3].text,
+            "Thanks. I got the values [\"tests\", \"screens\"] and the words \u{201c}A changelog \
+             entry\u{201d}."
+        );
+    }
+
+    #[test]
     fn inputs_and_checkboxes_bind_state_and_a_repeat_follows_it() {
         let mut rt = view_runtime(spec("ui-todos.json"));
         assert!(rt.find("tool-1-ui-done.1").is_none());
@@ -3048,6 +3203,48 @@ mod tests {
         assert!(text < notice && notice < view, "{text} {notice} {view}");
         assert!(texts(&rt).iter().any(|t| t == "Renew the domain"));
         assert!(rt.find(&format!("msg-{notice}")).is_some());
+    }
+
+    #[test]
+    fn a_question_asked_in_prose_is_asked_again_with_a_choice_and_its_value_comes_back() {
+        let mut rt = runtime_with(fake_in(Mode::Run));
+        send_until(&mut rt, ASK, "Pick one above.");
+        assert_eq!(
+            notices(&rt),
+            [
+                "Velvet Hammer asked the chief of staff to show this as a view: the reply asks a \
+                 question with a fixed set of answers."
+            ]
+        );
+        let key = rt
+            .elements()
+            .iter()
+            .filter_map(|e| e.key.clone())
+            .find(|k| k.ends_with("-ui-merge-option-0"))
+            .expect("the Choice's first option");
+        tap(&mut rt, &key);
+        wait(&mut rt, |s| {
+            replied(s)
+                && s.ws
+                    .chat
+                    .last()
+                    .is_some_and(|m| m.text.starts_with("You said:"))
+        });
+        let chat = &rt.state.ws.chat;
+        let chose = &chat[chat.len() - 2];
+        assert_eq!(chose.author, Author::Captain);
+        assert_eq!(chose.text, "Chose \u{201c}yolo off\u{201d}.");
+        // The fake echoes what it received: the option's exact value, never a bare "No".
+        let echoed = &chat[chat.len() - 1].text;
+        assert!(
+            echoed.contains("with the option \"yolo-off\" (\u{201c}yolo off\u{201d})"),
+            "{echoed}"
+        );
+        // Answered once: a second press sends nothing.
+        let len = rt.state.ws.chat.len();
+        rt.update(|s, _| s.answer(FAKE_CHOICE, "merge", &["yolo-on".into()]));
+        rt.frame(1.0 / 60.0);
+        assert_eq!(rt.state.ws.chat.len(), len);
     }
 
     #[test]

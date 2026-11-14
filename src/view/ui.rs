@@ -371,6 +371,13 @@ impl Draw<'_> {
                     .child(tick)
                     .child(words(label, type_::BODY, t.text))
             }
+            What::Choice {
+                question,
+                options,
+                recommended,
+                multiple,
+                other,
+            } => self.choice(node, question, options, recommended, *multiple, *other),
             What::Unknown(kind) => el()
                 .key(key)
                 .padding(space::S2)
@@ -381,6 +388,202 @@ impl Draw<'_> {
                         .font(type_::LABEL)
                         .color(t.text_secondary),
                 ),
+        }
+    }
+}
+
+impl Draw<'_> {
+    /// A `Choice`: the question, one row per option with the recommended one marked, an Other
+    /// field, and for several picks a Send button. A press on an option of a single choice sends
+    /// it at once. Once answered, it shows the answer and takes no more presses.
+    fn choice(
+        &self,
+        node: &Node,
+        question: &str,
+        options: &[ui::Opt],
+        recommended: &str,
+        multiple: bool,
+        other: bool,
+    ) -> El {
+        let (t, key) = (self.t, self.key(node));
+        let live = self.s.ui.get(self.id);
+        let answered = live.and_then(|l| l.answered.get(&node.key));
+        let picks = live.and_then(|l| l.picks.get(&node.key));
+        let on = |value: &str| match answered {
+            Some(answer) => answer.picked.iter().any(|o| o.value == value),
+            None => picks.is_some_and(|p| p.iter().any(|v| v == value)),
+        };
+        let mut choice = col()
+            .key(key.clone())
+            .role(if multiple { "group" } else { "radiogroup" })
+            .label(question.to_string())
+            .padding(space::S3)
+            .gap(space::S2)
+            .radius(radius::MD)
+            .fill(t.bg)
+            .border(1.0, t.card_border)
+            .child(words(question, type_::TITLE, t.text));
+        for (i, option) in options.iter().enumerate() {
+            let picked = on(&option.value);
+            let best = !recommended.is_empty() && option.value == recommended;
+            let mut mark = el()
+                .w(16.0)
+                .h(16.0)
+                .center()
+                .radius(if multiple { 4.0 } else { 8.0 })
+                .border(1.0, t.card_border);
+            if picked {
+                let inner = if multiple {
+                    text("\u{2713}").font(type_::LABEL).color(t.knob)
+                } else {
+                    el().w(6.0).h(6.0).radius(3.0).fill(t.knob)
+                };
+                mark = mark.fill(tok::accent(0, true)).child(inner);
+            }
+            let mut label =
+                row()
+                    .gap(space::S2)
+                    .center_y()
+                    .child(words(&option.label, type_::BODY, t.text));
+            if best {
+                label = label.child(
+                    el().key(format!("{key}-recommended"))
+                        .h(18.0)
+                        .px(space::S2)
+                        .center()
+                        .radius(radius::SM)
+                        .fill(tok::accent(0, true))
+                        .child(text("Recommended").font(type_::LABEL).color(t.knob)),
+                );
+            }
+            let mut words_col = col().grow(1.0).w(0.0).gap(2.0).child(label);
+            if !option.hint.is_empty() {
+                words_col = words_col.child(words(&option.hint, type_::LABEL, t.text_secondary));
+            }
+            let mut row_el = row()
+                .key(format!("{key}-option-{i}"))
+                .role(if multiple { "checkbox" } else { "radio" })
+                .label(if best {
+                    format!("{} (recommended)", option.label)
+                } else {
+                    option.label.clone()
+                })
+                .description(option.hint.clone())
+                .checked(picked)
+                .gap(space::S2)
+                .center_y()
+                .padding(space::S2)
+                .radius(radius::SM)
+                .border(
+                    1.0,
+                    if best {
+                        tok::accent(0, true)
+                    } else {
+                        t.card_border
+                    },
+                )
+                .child(mark)
+                .child(words_col);
+            if answered.is_some() {
+                row_el = row_el.disabled(true);
+                if !picked {
+                    row_el = row_el.opacity(0.5);
+                }
+            } else {
+                let (id, node_key, value) =
+                    (self.id.to_string(), node.key.clone(), option.value.clone());
+                row_el = row_el.focusable(true).on_press(move |s: &mut App| {
+                    if multiple {
+                        s.pick(&id, &node_key, &value)
+                    } else {
+                        s.answer(&id, &node_key, std::slice::from_ref(&value))
+                    }
+                });
+            }
+            choice = choice.child(row_el);
+        }
+        match answered {
+            Some(answer) => {
+                if !answer.other.is_empty() {
+                    choice = choice.child(
+                        words(
+                            &format!("Your answer: {}", answer.other),
+                            type_::BODY,
+                            t.text,
+                        )
+                        .key(format!("{key}-other-sent")),
+                    );
+                }
+                choice.child(
+                    words("Sent.", type_::LABEL, t.text_secondary).key(format!("{key}-sent")),
+                )
+            }
+            None => {
+                let path = ui::other_field(&node.key);
+                if other {
+                    let shown = live
+                        .and_then(|l| l.edits.get(&path))
+                        .cloned()
+                        .unwrap_or_default();
+                    let (id, node_key, field) =
+                        (self.id.to_string(), node.key.clone(), path.clone());
+                    let picked: Vec<String> = picks.cloned().unwrap_or_default();
+                    let input = text_input(&shown, type_::BODY)
+                        .key(format!("{key}-other"))
+                        .label("Other answer")
+                        .single_line()
+                        .grow(1.0)
+                        .color(t.text)
+                        .placeholder("Other\u{2026} (Return sends it)", t.text_secondary)
+                        .on_edit(move |s: &mut App| s.view_edit(&id, &field, ""));
+                    let id = self.id.to_string();
+                    let input = input.on_submit(move |s: &mut App, _| {
+                        let typed =
+                            s.ui.get(&id)
+                                .and_then(|l| l.edits.get(&ui::other_field(&node_key)))
+                                .is_some_and(|e| !e.text.trim().is_empty());
+                        if typed {
+                            s.answer(&id, &node_key, &picked)
+                        }
+                    });
+                    choice = choice.child(
+                        row()
+                            .h(32.0)
+                            .px(space::S3)
+                            .center_y()
+                            .radius(radius::MD)
+                            .fill(t.bg)
+                            .border(1.0, t.card_border)
+                            .child(input),
+                    );
+                }
+                if multiple {
+                    let (id, node_key) = (self.id.to_string(), node.key.clone());
+                    let picked: Vec<String> = picks.cloned().unwrap_or_default();
+                    let typed = live
+                        .and_then(|l| l.edits.get(&path))
+                        .is_some_and(|e| !e.text.trim().is_empty());
+                    let mut send = el()
+                        .key(format!("{key}-send"))
+                        .role("button")
+                        .label("Send")
+                        .h(28.0)
+                        .px(space::S3)
+                        .center()
+                        .radius(radius::SM)
+                        .fill(tok::accent(0, true))
+                        .child(text("Send").font(type_::LABEL).color(t.knob));
+                    // Nothing picked and nothing typed is not an answer yet.
+                    send = if picked.is_empty() && !typed {
+                        send.disabled(true).opacity(0.5)
+                    } else {
+                        send.focusable(true)
+                            .on_press(move |s: &mut App| s.answer(&id, &node_key, &picked))
+                    };
+                    choice = choice.child(row().child(send));
+                }
+                choice
+            }
         }
     }
 }
