@@ -1829,7 +1829,7 @@ mod tests {
         let locked = rt.state.data.join("locked.pdf");
         std::fs::write(&locked, b"secret").unwrap();
         std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
-        rt.state.attach_files(&[locked.clone()]);
+        rt.state.attach_files(std::slice::from_ref(&locked));
         copied(&mut rt);
         std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o600)).unwrap();
         assert!(rt.state.attached.is_empty());
@@ -1851,7 +1851,7 @@ mod tests {
         assert!(rt.state.pending.is_empty());
         rt.state.attach_files(&[locked]);
         std::fs::set_permissions(
-            &rt.state.data.join("locked.pdf"),
+            rt.state.data.join("locked.pdf"),
             std::fs::Permissions::from_mode(0o000),
         )
         .unwrap();
