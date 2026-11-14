@@ -960,7 +960,10 @@ impl App {
         if i >= self.queue.len() {
             return;
         }
-        self.queue.remove(i);
+        for gone in self.queue.remove(i).attachments {
+            self.attachment_media.remove(&gone.path);
+            attach::discard(&gone);
+        }
         self.editing = match self.editing.take() {
             Some((at, _)) if at == i => None,
             Some((at, edit)) if at > i => Some((at - 1, edit)),
@@ -6651,6 +6654,23 @@ mod tests {
             .rfind(|m| m.author == Author::Captain)
             .unwrap();
         assert_eq!(sent.attachments.len(), 1);
+    }
+
+    #[test]
+    fn deleting_a_queued_message_deletes_its_attachment_copies() {
+        let (mut app, _finish) = working_stub();
+        app.delivery.change(|d| *d = messages::Delivery::Queue);
+        app.draft.text = "Start.".into();
+        app.send();
+        app.attach_files(&[fixture("notes.md").into()]);
+        settle_attachments(&mut app);
+        app.send();
+        let copy = app.queue[0].attachments[0].path.clone();
+        assert!(copy.exists());
+        app.delete_queued(0);
+        assert!(app.queue.is_empty());
+        assert!(!copy.exists());
+        assert!(!app.attachment_media.contains_key(&copy));
     }
 
     #[test]
