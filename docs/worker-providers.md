@@ -105,7 +105,9 @@ When the message asks for a worker ("send", or "dispatch", then the words up to 
   (`guard::a_claude_model_is_never_spawned_through_pi`); installing a stand-in release, refusing
   a tampered one and a failed download, the `PATH` order, the model-listing parser, and
   `connect` writing only `config/pi-account` and `auth.json` with mode 0600 (`pi::tests`); and
-  reading a worker's harness and model from its meta record (`bearings::tests`). All of them run
+  reading a worker's harness and model from its meta record (`bearings::tests`); and opening the
+  app leaving a firstmate home untouched (`opening_the_app_writes_nothing_into_the_firstmate_home`
+  in `main.rs`). All of them run
   in scratch directories, never in the captain's firstmate home.
 - **Headless scenes:** the four screenshots above, checked by `scripts/verify.sh`.
 - **The real pi 1.5.2 release**, by hand on macOS (arm64): the archive matched the checksum in
