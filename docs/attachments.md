@@ -41,7 +41,7 @@ When a file is attached, the app copies it into `attachments/` in its data direc
 (`~/.velvet-hammer`, or `$VELVET_HAMMER_DATA`), each in a folder of its own that only your user
 can read. A pasted image is saved there as `Pasted image.png`. The copy is what is sent and
 shown, so moving or deleting the original afterwards changes nothing. Removing a chip before
-sending deletes its copy; a sent attachment's copy is kept, so the message keeps showing it.
+sending, or deleting a queued message that carries attachments, deletes their copies; a sent attachment's copy is kept, so the message keeps showing it.
 
 When the conversation is kept across restarts (see [The conversation](conversation.md)), each
 message keeps its attachments: `history.jsonl` records the path of each copy with its name, size
