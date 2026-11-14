@@ -102,6 +102,8 @@ struct Serving {
     home: Option<Home>,
     /// The reply in progress, for the stop hook.
     turn: Mutex<Turn>,
+    /// The session has been told about message links (see [`crate::links::INSTRUCTION`]).
+    told_links: AtomicBool,
 }
 
 fn read<T: Clone>(shared: &Shared<T>) -> T {
@@ -133,6 +135,7 @@ impl Bridge {
             policies,
             home,
             turn: Mutex::new(Turn::default()),
+            told_links: AtomicBool::new(false),
         });
         let (expected, done, on_call) = (
             format!("Bearer {token}"),
@@ -387,16 +390,23 @@ fn lock(turn: &Mutex<Turn>) -> std::sync::MutexGuard<'_, Turn> {
 }
 
 /// A message from the captain starts a new reply, and carries the standing instruction to use
-/// views when the visual-replies mode asks for one.
+/// views when the visual-replies mode asks for one. The session's first message also says how
+/// message links work, once.
 fn user_prompt_submit(serving: &Serving) -> Value {
     lock(&serving.turn).prompt();
-    match read(&serving.policies.visual).instruction() {
-        Some(text) => json!({"hookSpecificOutput": {
-            "hookEventName": "UserPromptSubmit",
-            "additionalContext": text,
-        }}),
-        None => json!({}),
+    let links =
+        (!serving.told_links.swap(true, Ordering::SeqCst)).then_some(crate::links::INSTRUCTION);
+    let context: Vec<&str> = links
+        .into_iter()
+        .chain(read(&serving.policies.visual).instruction())
+        .collect();
+    if context.is_empty() {
+        return json!({});
     }
+    json!({"hookSpecificOutput": {
+        "hookEventName": "UserPromptSubmit",
+        "additionalContext": context.join("\n\n"),
+    }})
 }
 
 /// Decides one Stop hook: a final reply of a qualifying shape with no view in its turn is sent
@@ -955,6 +965,26 @@ mod tests {
                 "{mode:?}"
             );
         }
+    }
+
+    #[test]
+    fn the_first_message_of_a_session_says_how_message_links_work_once() {
+        let (bridge, _, policies) = bridge_on(Settings::default(), None);
+        *policies.visual.write().unwrap() = visual::Mode::Off;
+        let auth = bearer(&bridge);
+        let prompt = json!({"hook_event_name": "UserPromptSubmit", "prompt": "hello"});
+        let (_, first) = post(
+            &bridge,
+            "/hooks/user-prompt-submit",
+            Some(&auth),
+            prompt.clone(),
+        );
+        assert_eq!(
+            first["hookSpecificOutput"]["additionalContext"],
+            crate::links::INSTRUCTION
+        );
+        let (_, second) = post(&bridge, "/hooks/user-prompt-submit", Some(&auth), prompt);
+        assert_eq!(second, json!({}));
     }
 
     #[test]

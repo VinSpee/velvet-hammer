@@ -51,7 +51,10 @@ The window has three columns:
   **Done adding**.
   Cmd+F (Ctrl+F on Windows and Linux) opens a find bar that searches the whole conversation,
   and the conversation is kept across restarts in the app's data directory, earlier sessions
-  above a divider (see [The conversation: find and history](docs/conversation.md)).
+  above a divider (see [The conversation: find and history](docs/conversation.md)). Every
+  message has a link, `velvet-hammer://message/<id>`, that **Copy link** copies; a link in any
+  message shows as a chip that goes to the message, and the chief of staff gets each message
+  you link to quoted with your words (see [Message links](docs/links.md)).
   The chief of staff's messages are Markdown, shown formatted: bold, italic, strikethrough,
   inline code and code blocks, headings, lists, block quotes and links. A line break shows as
   written, HTML shows as text, and a reply still arriving never shows a half-written marker. A link
@@ -111,6 +114,8 @@ The window has three columns:
   stepping through them (see [docs/conversation.md](docs/conversation.md)).
 - `src/history.rs`: the conversation kept across restarts in `history.jsonl`, and the setting
   that turns it off.
+- `src/links.rs`: message links: their form, the chips they draw as, and the quotes the chief
+  of staff gets for the messages the captain links to (see [docs/links.md](docs/links.md)).
 - `src/markdown.rs`: prepares the chief of staff's Markdown for Rune's Markdown view, keeping
   line breaks and showing HTML as text.
 - `src/view.rs`: the Rune view, with the tool-use views in `src/view/tool.rs`, the
@@ -140,6 +145,8 @@ talks to Anthropic:
   standard input, and the reply streams into the chat as Claude Code produces it. The process
   runs in the managed firstmate clone with `FM_HOME` set to the app's own firstmate home, so it
   starts as firstmate (see [The managed firstmate clone](docs/firstmate.md)).
+- **Message links.** Each message is sent with a line giving its link, and with any message it
+  links to quoted (see [Message links](docs/links.md)).
 - **Tools and hooks.** The chat session also gets `--mcp-config` and `--settings` flags that point
   at a server the app runs on `127.0.0.1` for that session only. Its `app_note` tool adds a note
   to **For you to do**, its `app_ui` tool shows a view in the chat, and its PreToolUse hook applies
@@ -329,6 +336,11 @@ It writes these files to `OUT_DIR`:
 | `find-none.png`, `find-none.json` | A query with no matches |
 | `history.png`, `history.json` | After a restart: the kept earlier session above its divider, found by find |
 | `find-keys.png`, `find-keys-*.json` | `scripts/find.json` on a long chat: Cmd+F, typing, Enter and Cmd+G, then Escape |
+| `link-copied.png`, `link-copied.json` | A message's link copied with **Copy link** |
+| `link-opened.png`, `link-opened.json` | A message link opened: the chat scrolled to the message, highlighted |
+| `link-context.png`, `link-context.json` | A link in the captain's message as a chip, and the fake echoing the quote it was sent |
+| `link-missing.png`, `link-missing.json` | A link to a message that is not in the chat |
+| `open-link.png`, `open-link-*.json` | `scripts/open-link.json`: a link the system opened with the app, then the highlight fading |
 | `walk-sent.json` | `scripts/walkthrough.json` after typing and sending a message |
 | `walk-end.png`, `walk-end.json` | The same script after answering an item, finishing the task and opening a peek |
 

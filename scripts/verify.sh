@@ -33,7 +33,7 @@ for scene in chat replied empty peek signed-out signing-in signed-in expired cli
   formatted formatted-all formatted-streaming tool-image tool-image-broken tool-video tool-generic tool-picture \
   view-static view-streaming view-state view-action view-unknown view-too-large \
   visuals-settings visuals-enforced visuals-capped rules-settings rules-merge-ask rules-project-ask \
-  find find-stepped find-none history; do
+  find find-stepped find-none history link-copied link-opened link-context link-missing; do
   headless --scene "$scene" --snap "$out/$scene.png"
   headless --scene "$scene" --tree "$out/$scene.json"
 done
@@ -51,6 +51,14 @@ for mark in found stepped closed; do
   headless --scene long-chat --script "$find" --at "mark:$mark" --tree "$out/find-keys-$mark.json"
 done
 headless --scene long-chat --script "$find" --at mark:stepped --snap "$out/find-keys.png"
+
+# A message link the system opened with the app (macOS and Windows deliver these to
+# App::on_open_url), then the highlight fading.
+links=$root/scripts/open-link.json
+for mark in opened faded; do
+  headless --scene long-chat --script "$links" --at "mark:$mark" --tree "$out/open-link-$mark.json"
+done
+headless --scene long-chat --script "$links" --at mark:opened --snap "$out/open-link.png"
 
 failures=0
 check() { # check FILE yes|no PATTERN
@@ -355,6 +363,19 @@ check find-keys-found.json yes '"text": "1 of 4"'
 check find-keys-stepped.json yes '"text": "3 of 4"'
 check find-keys-closed.json no  '"key": "find-bar"'
 check find-keys-closed.json yes '"text": "hi"'
+# Message links: the copy button, a link opened and highlighted, a link in the captain's message
+# drawn as a chip and quoted to the chief of staff, and a link to a missing message.
+check link-copied.json yes '"key": "msg-1-link"'
+check link-copied.json yes '"text": "Link copied"'
+check chat.json yes '"text": "Copy link"'
+check link-opened.json yes '"text": "Reply 5: nothing new."'
+check link-context.json yes 'do what this answer says: ↪ Chief of staff: You said: Plan: merge the docs PR'
+check link-context.json yes '[Linked messages, quoted by Velvet Hammer]'
+check link-context.json yes ', written by you, the chief of staff:'
+check link-missing.json yes 'what did ⚠ Message not found say?'
+check link-missing.json yes ': message not found. No message in this chat has this link.'
+check open-link-opened.json yes '"text": "Reply 5: nothing new."'
+check open-link-faded.json yes '"text": "Reply 5: nothing new."'
 # The scripted run.
 check walk-sent.json yes '"text": "Ship it when CI is green."'
 check walk-sent.json yes 'Got it:'

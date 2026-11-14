@@ -15,7 +15,7 @@ use rune_kit::search::Fold;
 
 use crate::model::Author;
 use crate::tools::{self, Handler};
-use crate::{App, ui};
+use crate::{App, links, ui};
 
 /// The find bar.
 #[derive(Default)]
@@ -89,8 +89,10 @@ pub fn searched(s: &App, i: usize) -> Searched {
     let m = &s.ws.chat[i];
     match (&m.tool, m.author) {
         (Some(tool), _) => Searched::Card(card_words(s, tool)),
-        (None, Author::ChiefOfStaff) => Searched::Markdown(crate::markdown::prepare(&m.text)),
-        (None, _) => Searched::Text(m.text.clone()),
+        (None, Author::ChiefOfStaff) => {
+            Searched::Markdown(crate::markdown::prepare(&links::markdown(&m.text, &s.ws)))
+        }
+        (None, _) => Searched::Text(links::display(&m.text, &s.ws).0),
     }
 }
 
@@ -98,7 +100,8 @@ pub fn searched(s: &App, i: usize) -> Searched {
 pub fn search(s: &App, query: &str) -> Vec<Hits> {
     let query = query.trim();
     let mut out = Vec::new();
-    if query.is_empty() {
+    // A message link goes to its message instead (see [`App::follow_find`]).
+    if query.is_empty() || links::parse(query).is_some() {
         return out;
     }
     let mut first = 0;
@@ -219,6 +222,11 @@ impl App {
             self.find.current = 0;
             self.find.reveal = true;
             changed = true;
+            // A message link pasted into the bar goes to its message.
+            if let Some(id) = links::parse(self.find.searched.trim()) {
+                let url = links::url(id);
+                self.open_link(&url, tx);
+            }
         }
         if std::mem::take(&mut self.find.reveal) {
             let hits = search(self, &self.find.query.text);

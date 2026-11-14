@@ -11,6 +11,7 @@ mod find;
 mod firstmate;
 mod guard;
 mod history;
+mod links;
 mod markdown;
 mod model;
 mod projects;
@@ -87,6 +88,19 @@ pub struct App {
     /// The captain hold the next message answers, by its key.
     pub answering: Option<String>,
     pub draft: TextEdit,
+    /// The chat message under the pointer, whose link button shows.
+    pub hovered: Option<usize>,
+    /// The element that has focus, as of the last frame.
+    pub focused: Option<String>,
+    /// The message whose link was just copied, by its id.
+    pub copied: Option<String>,
+    /// The message a link just went to, highlighted until the time given, or the id of one that
+    /// is not in the chat.
+    pub flash: Option<(Result<String, String>, f64)>,
+    /// Seconds since the app started, as of the last frame.
+    pub now: f64,
+    /// An element to scroll to on the next frame, once the view shows it.
+    pub scroll_to: Option<String>,
     pub showing: Showing,
     /// The chat message the chief of staff is still writing.
     pub replying: Option<usize>,
@@ -199,6 +213,12 @@ impl App {
             wake: None,
             answering: None,
             draft: TextEdit::default(),
+            hovered: None,
+            focused: None,
+            copied: None,
+            flash: None,
+            now: 0.0,
+            scroll_to: None,
             showing: Showing::Chat,
             replying: None,
             media: HashMap::new(),
@@ -801,8 +821,56 @@ fn replied(s: &App) -> bool {
             .is_some_and(|m| m.author != Author::Captain)
 }
 
-fn poll(s: &mut App, _: f64, tx: &mut Tx) -> bool {
-    s.drain() | s.follow_find(tx)
+fn poll(s: &mut App, now: f64, tx: &mut Tx) -> bool {
+    s.now = now;
+    let mut changed = s.drain() | s.follow_find(tx);
+    if let Some(key) = s.scroll_to.take() {
+        tx.scroll_center(key);
+    }
+    if s.flash.as_ref().is_some_and(|(_, until)| *until <= now) {
+        s.flash = None;
+        changed = true;
+    }
+    let focused = tx.focused().map(str::to_string);
+    if focused != s.focused {
+        s.focused = focused;
+        changed = true;
+    }
+    changed
+}
+
+/// How long a message a link went to stays highlighted, in seconds.
+const FLASH: f64 = 2.5;
+
+impl App {
+    /// Goes to the message a message link names: shows the chat, scrolls to the message and
+    /// highlights it briefly, or says the message is not in the chat. Any other link opens in the
+    /// browser. `url` may come from outside the app (a link the system opened), so it is parsed
+    /// and nothing else is done with it.
+    pub fn open_link(&mut self, url: &str, tx: &mut Tx) {
+        match links::parse(url.trim()) {
+            Some(id) => {
+                let id = id.to_string();
+                self.go_to(&id);
+                tx.wake_after(Duration::from_secs_f64(FLASH));
+            }
+            None => {
+                let _ = tx.open_url(url);
+            }
+        }
+    }
+
+    pub fn go_to(&mut self, id: &str) {
+        self.showing = Showing::Chat;
+        let target = match self.ws.message(id) {
+            Some((i, m)) => {
+                self.scroll_to = Some(view::message_key(i, m));
+                Ok(id.to_string())
+            }
+            None => Err(id.to_string()),
+        };
+        self.flash = Some((target, self.now + FLASH));
+    }
 }
 
 /// The app's keyboard shortcuts, heard when the focused control does not take the key. Cmd is
@@ -836,7 +904,7 @@ fn setup(s: &mut App, wake: Waker) {
 }
 
 fn main() {
-    rune::run(AppSpec::<App> {
+    rune::App::new(AppSpec::<App> {
         scenes: &[
             ("chat", |s| *s = stub()),
             ("replied", |s| {
@@ -1161,6 +1229,28 @@ fn main() {
                 s.find.open = true;
                 s.find.query.text = "zeppelin".into();
             }),
+            // Message links: a link copied, one opened scrolling to its message, a link in the
+            // captain's message quoted to the chief of staff, and one to a missing message.
+            ("link-copied", |s| {
+                *s = stub();
+                s.hovered = Some(1);
+                s.copied = Some(s.ws.chat[1].id.clone());
+            }),
+            ("link-opened", |s| {
+                *s = long_chat(40);
+                s.ws.items.clear();
+                s.go_to("000000000005");
+            }),
+            ("link-context", |s| {
+                *s = fake_in(Mode::Run);
+                say(s, "Plan: merge the docs PR first, then tag the release.");
+                let answer = links::url(&s.ws.chat[s.ws.chat.len() - 1].id);
+                say(s, &format!("do what this answer says: {answer}"));
+            }),
+            ("link-missing", |s| {
+                *s = fake_in(Mode::Run);
+                say(s, &format!("what did {} say?", links::url("0000deadbeef")));
+            }),
             ("rules-project-ask", |s| {
                 *s = rules_lab("rules-project-ask");
                 let file = s.firstmate.home_dir().join("projects/site/README.md");
@@ -1174,7 +1264,11 @@ fn main() {
         poll: Some(poll),
         on_key: Some(on_key),
         ..AppSpec::new("Velvet Hammer", (1100.0, 720.0), init, view::view)
-    });
+    })
+    // A message link the system opened with the app; macOS needs the app bundle to declare the
+    // scheme first (see docs/links.md).
+    .on_open_url(|s: &mut App, url: &str, tx: &mut Tx| s.open_link(url, tx))
+    .run();
 }
 
 /// The list the visual-replies scenes and tests have the fake send as text.
@@ -1391,7 +1485,10 @@ fn long_chat(n: usize) -> App {
         } else {
             format!("Reply {i}: nothing new.")
         };
-        app.ws.chat.push(Message::new(Author::ChiefOfStaff, words));
+        let mut reply = Message::new(Author::ChiefOfStaff, words);
+        // Fixed ids, so scripts can link to them (scripts/open-link.json).
+        reply.id = format!("{i:012x}");
+        app.ws.chat.push(reply);
     }
     app
 }
@@ -3534,5 +3631,153 @@ mod tests {
         type_text(&mut rt, "zeppelin");
         assert_eq!(find_count(&rt), ["1 of 2"]);
         assert!(on_screen(&rt, &find::match_key(0)));
+    }
+
+    #[test]
+    fn a_messages_link_button_copies_its_link() {
+        let mut rt = runtime();
+        let board = rune::clipboard::memory();
+        rt.use_clipboard(&board);
+        let id = rt.state.ws.chat[1].id.clone();
+        assert_eq!(rt.state.hovered, None);
+        // The button shows once the pointer is over its message.
+        let (x, y) = rt.find("msg-1-link").unwrap();
+        rt.pointer_move(x, y);
+        settle(&mut rt);
+        assert_eq!(rt.state.hovered, Some(1));
+        tap(&mut rt, "msg-1-link");
+        assert_eq!(rt.state.copied.as_deref(), Some(id.as_str()), "pressed");
+        assert_eq!(
+            board.text().as_deref().map(|t| t.as_str()),
+            Some(links::url(&id).as_str())
+        );
+        assert_eq!(texts_under(&rt, "msg-1-link"), ["Link copied"]);
+        assert_eq!(rt.state.hovered, Some(1));
+    }
+
+    #[test]
+    fn opening_a_message_link_scrolls_to_the_message_and_highlights_it_briefly() {
+        let mut rt = runtime_with(long_chat(40));
+        settle(&mut rt);
+        assert!(!on_screen(&rt, "msg-5"));
+        let url = links::url(&rt.state.ws.chat[5].id);
+        rt.update(|s, tx| s.open_link(&url, tx));
+        settle(&mut rt);
+        assert!(on_screen(&rt, "msg-5"));
+        assert!(matches!(&rt.state.flash, Some((Ok(_), _))));
+        for _ in 0..200 {
+            rt.frame(1.0 / 60.0);
+        }
+        assert_eq!(rt.state.flash, None, "the highlight fades");
+        // From another page, the link comes back to the chat.
+        rt.state.showing = Showing::Approvals;
+        let url = links::url(&rt.state.ws.chat[0].id);
+        rt.update(|s, tx| s.open_link(&url, tx));
+        settle(&mut rt);
+        assert_eq!(rt.state.showing, Showing::Chat);
+        assert!(on_screen(&rt, "msg-0"));
+    }
+
+    #[test]
+    fn a_link_pasted_into_find_goes_to_its_message() {
+        let mut rt = runtime_with(long_chat(40));
+        let url = links::url(&rt.state.ws.chat[3].id);
+        chord(&mut rt, 'f', false);
+        type_text(&mut rt, &url);
+        assert!(on_screen(&rt, "msg-3"));
+        assert_eq!(find_count(&rt), ["Went to the linked message"]);
+        rt.state.find.query.text = links::url("0000deadbeef");
+        settle(&mut rt);
+        assert_eq!(find_count(&rt), ["Message not found"]);
+    }
+
+    #[test]
+    fn links_in_messages_show_as_chips_naming_their_message() {
+        let mut rt = runtime();
+        let answer = rt.state.ws.chat[1].id.clone();
+        let words = format!(
+            "Do what this says: {} and {}",
+            links::url(&answer),
+            links::url("0000deadbeef")
+        );
+        rt.update(|s, _| {
+            let first = links::url(&s.ws.chat[0].id);
+            s.ws.chat.push(Message::new(Author::Captain, words));
+            s.ws.chat.push(Message::new(
+                Author::ChiefOfStaff,
+                format!("As you asked in {first}."),
+            ));
+        });
+        settle(&mut rt);
+        let all = texts(&rt).join("\n");
+        assert!(
+            all.contains(
+                "Do what this says: \u{21aa} Chief of staff: On it. I've split the work between \
+                 two crewmates. Two questi… and \u{26a0} Message not found"
+            ),
+            "{all}"
+        );
+        assert!(all.contains("\u{21aa} You: Get the desktop skeleton building and check it"));
+        assert!(
+            !all.contains("velvet-hammer://"),
+            "links show as chips: {all}"
+        );
+    }
+
+    #[test]
+    fn a_link_in_the_captains_message_reaches_the_chief_of_staff_quoted() {
+        let mut rt = runtime_with(fake_in(Mode::Run));
+        assert_eq!(send_and_wait(&mut rt, "links?"), "You said: links: told");
+        assert_eq!(
+            send_and_wait(&mut rt, "links?"),
+            "You said: links: not told",
+            "told once per session"
+        );
+        send_and_wait(&mut rt, "Plan: merge the docs PR first.");
+        let answer = rt.state.ws.chat.last().unwrap().id.clone();
+        let words = format!(
+            "do what this answer says: {} {}",
+            links::url(&answer),
+            links::url("0000deadbeef")
+        );
+        let reply = send_and_wait(&mut rt, &words);
+        assert!(reply.starts_with(&format!("You said: {words}")), "{reply}");
+        assert!(
+            reply.contains(&format!(
+                "<<< {}, written by you, the chief of staff:\nYou said: Plan: merge the docs PR \
+                 first.\n>>>",
+                links::url(&answer)
+            )),
+            "{reply}"
+        );
+        assert!(reply.contains(&format!(
+            "<<< {}: message not found.",
+            links::url("0000deadbeef")
+        )));
+        // The captain's own message keeps their words, with the links as chips.
+        let said = &rt.state.ws.chat[rt.state.ws.chat.len() - 2];
+        assert_eq!(said.text, words);
+    }
+
+    #[test]
+    fn nothing_kept_from_an_earlier_session_reaches_the_chief_of_staff_unless_linked() {
+        let home = scratch("signed-in");
+        let mut first = runtime_with(on_fake(FAKE_CLAUDE, &home, &[]));
+        wait(&mut first, settled);
+        send_and_wait(&mut first, "The zeppelin code is 42.");
+        let kept = first.state.ws.chat[first.state.ws.chat.len() - 2]
+            .id
+            .clone();
+        drop(first);
+
+        let mut rt = runtime_with(on_fake(FAKE_CLAUDE, &home, &[]));
+        wait(&mut rt, settled);
+        assert_eq!(rt.state.ws.earlier, 2);
+        assert_eq!(send_and_wait(&mut rt, "hello"), "You said: hello");
+        let reply = send_and_wait(&mut rt, &format!("what was {}", links::url(&kept)));
+        assert!(
+            reply.contains("written by the captain:\nThe zeppelin code is 42."),
+            "{reply}"
+        );
     }
 }

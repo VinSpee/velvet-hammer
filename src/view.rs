@@ -12,6 +12,7 @@ use crate::guard;
 
 use crate::find::{self, Hits};
 use crate::firstmate::{Checkout, Distro, Firstmate, Standing, Work};
+use crate::links;
 use crate::model::{Action, Agent, Author, Item, ItemKind, Message, Plan, Status};
 use crate::projects::Project;
 
@@ -943,6 +944,7 @@ fn chat(s: &App, plan: &Plan, t: Theme, dark: bool) -> El {
             &s.ws.chat,
             s.replying,
             Found {
+                chat: true,
                 earlier: s.ws.earlier,
                 hits: &hits,
                 current: s.find.current,
@@ -968,6 +970,18 @@ fn chat(s: &App, plan: &Plan, t: Theme, dark: bool) -> El {
                 .child(button("answer-cancel", "Cancel", t, |s| s.answering = None))
         }))
         .children(s.adding.then(|| adding(s, t, dark)))
+        .children(match &s.flash {
+            Some((Err(id), _)) => Some(warning(
+                "link-missing",
+                &format!(
+                    "That message is not in this conversation: {}. It may be from history that \
+                     was cleared or not kept.",
+                    links::url(id)
+                ),
+                dark,
+            )),
+            _ => None,
+        })
         .child(composer)
 }
 
@@ -975,8 +989,15 @@ fn chat(s: &App, plan: &Plan, t: Theme, dark: bool) -> El {
 /// and stepping through them.
 fn find_bar(s: &App, hits: &[Hits], t: Theme) -> El {
     let total = find::total(hits);
-    let count = if s.find.query.text.trim().is_empty() {
+    let query = s.find.query.text.trim();
+    let count = if query.is_empty() {
         String::new()
+    } else if let Some(id) = links::parse(query) {
+        if s.ws.message(id).is_some() {
+            "Went to the linked message".to_string()
+        } else {
+            "Message not found".to_string()
+        }
     } else if total == 0 {
         "No matches".to_string()
     } else {
@@ -1399,6 +1420,8 @@ fn peek(s: &App, agent: &Agent, t: Theme, dark: bool) -> El {
 /// the find bar with the current one.
 #[derive(Default)]
 struct Found<'a> {
+    /// The transcript is the chief of staff's chat, whose messages have links.
+    chat: bool,
     earlier: usize,
     hits: &'a [Hits],
     current: usize,
@@ -1465,7 +1488,7 @@ fn transcript(
                     .collect::<Vec<_>>()
             });
             markdown(
-                &m.text,
+                &links::markdown(&m.text, &s.ws),
                 replying == Some(i),
                 marks.unwrap_or_default(),
                 dark,
@@ -1482,26 +1505,62 @@ fn transcript(
                             .key(find::match_key(n))
                     })
                 });
-            text(m.text.clone())
+            let (shown, chips) = links::display(&m.text, &s.ws);
+            let mut words = text(shown)
                 .font(type_::BODY)
                 .color(t.text)
                 .wrap()
+                .selectable(true)
                 .text_highlights(marks)
+                .pills(
+                    chips
+                        .iter()
+                        .map(|c| (c.range.clone(), chip_style(c.found, t, dark))),
+                )
+                .on_link(|s: &mut App, url: &str, tx: &mut rune::Tx| s.open_link(url, tx));
+            for chip in &chips {
+                words = words.link(rune::Link::new(chip.range.clone(), chip.url.clone()));
+            }
+            words
         };
-        list = list.child(
-            col()
-                .key(format!("msg-{i}"))
-                .padding(space::S3)
-                .gap(space::S1)
-                .radius(radius::MD)
-                .fill(if m.author == Author::Captain {
-                    t.control_off
-                } else {
-                    t.card
-                })
-                .child(text(who).font(type_::SECTION).color(t.text_secondary))
-                .child(words),
+        let flashed = matches!(&s.flash, Some((Ok(id), _)) if *id == m.id) && found.chat;
+        let mut header = row().gap(space::S2).center_y().child(
+            text(who)
+                .font(type_::SECTION)
+                .color(t.text_secondary)
+                .grow(1.0),
         );
+        if found.chat {
+            header = header.child(link_button(s, i, m, t));
+        }
+        let mut card = col()
+            .key(format!("msg-{i}"))
+            .padding(space::S3)
+            .gap(space::S1)
+            .radius(radius::MD)
+            .fill(if flashed {
+                tok::accent(0, dark).alpha(0.18)
+            } else if m.author == Author::Captain {
+                t.control_off
+            } else {
+                t.card
+            })
+            .child(header)
+            .child(words);
+        if flashed {
+            card = card.border(2.0, tok::accent(0, dark));
+        }
+        if found.chat {
+            card = card.on_hover_change(move |s: &mut App, inside, _| {
+                if inside {
+                    s.hovered = Some(i);
+                } else if s.hovered == Some(i) {
+                    s.hovered = None;
+                    s.copied = None;
+                }
+            });
+        }
+        list = list.child(card);
     }
     col()
         .key(key)
@@ -1509,6 +1568,50 @@ fn transcript(
         .min_h(0.0)
         .scroll(ScrollSpec { stick_bottom: true })
         .child(list)
+}
+
+/// The key of chat message `i`'s element: its card for a tool use, its bubble otherwise.
+pub fn message_key(i: usize, m: &Message) -> String {
+    if m.tool.is_some() {
+        format!("tool-{i}")
+    } else {
+        format!("msg-{i}")
+    }
+}
+
+/// How a link chip looks: the accent for a message in the chat, the warning colour for one that
+/// is not.
+fn chip_style(found: bool, t: Theme, dark: bool) -> rune::PillStyle {
+    let tint = if found {
+        tok::accent(0, dark)
+    } else {
+        tok::accent(3, dark)
+    };
+    rune::PillStyle::new().bg(tint.alpha(0.22)).fg(t.text)
+}
+
+/// The small button that copies message `i`'s link. It shows while the pointer is over the
+/// message or the button has focus, and stays reachable with Tab.
+fn link_button(s: &App, i: usize, m: &Message, t: Theme) -> El {
+    let key = format!("msg-{i}-link");
+    let copied = s.copied.as_deref() == Some(m.id.as_str());
+    let shown = copied || s.hovered == Some(i) || s.focused.as_deref() == Some(key.as_str());
+    let id = m.id.clone();
+    small_button(
+        &key,
+        if copied { "Link copied" } else { "Copy link" },
+        t,
+        |_| {},
+    )
+    .label(format!(
+        "Copy the link to this message, {}",
+        links::url(&m.id)
+    ))
+    .opacity(if shown { 1.0 } else { 0.0 })
+    .on_press_tx(move |s: &mut App, tx: &mut rune::Tx| {
+        tx.copy(links::url(&id));
+        s.copied = Some(id.clone());
+    })
 }
 
 /// The line between the messages kept from earlier sessions and this session's.
@@ -1531,9 +1634,10 @@ fn earlier_divider(t: Theme) -> El {
 }
 
 /// Markdown from the chief of staff, formatted (see [`crate::markdown`]), with the find bar's
-/// matches marked. Nothing in it runs: HTML shows as text. Links open in the default browser
-/// only when pressed, and only `http`, `https` and `mailto` links open at all
-/// ([`rune::Tx::open_url`] refuses the rest).
+/// matches marked. Nothing in it runs: HTML shows as text. A message link draws as a chip and
+/// goes to its message (see [`crate::links`]); other links open in the default browser only when
+/// pressed, and only `http`, `https` and `mailto` links open at all ([`rune::Tx::open_url`]
+/// refuses the rest).
 fn markdown(
     source: &str,
     streaming: bool,
@@ -1544,9 +1648,18 @@ fn markdown(
         .highlights(marks)
         .streaming(streaming)
         .selectable(true)
-        .on_link_tx(|_: &mut App, url: &str, tx: &mut rune::Tx| {
-            let _ = tx.open_url(url);
+        .link_style(move |url: &str| {
+            links::parse(url).map(|_| {
+                let chip = rune::Span::new(0, 0)
+                    .color(tok::theme(dark).text)
+                    .bg(tok::accent(0, dark).alpha(0.22), 3.0);
+                (
+                    chip,
+                    rune::LinkPaint::new().bg(tok::accent(0, dark).alpha(0.35)),
+                )
+            })
         })
+        .on_link_tx(|s: &mut App, url: &str, tx: &mut rune::Tx| s.open_link(url, tx))
         .build(&Kit::neutral(dark))
 }
 
