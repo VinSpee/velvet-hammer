@@ -145,7 +145,7 @@ pub(super) fn block(
                 .child(words(part.to_string(), spans, wrap, t).grow(1.0).min_w(0.0))
         }
         Look::Plain => words(part.to_string(), Vec::new(), wrap, t),
-        Look::Prose => super::super::markdown(part, false, dark),
+        Look::Prose => super::super::markdown(part, false, Vec::new(), dark),
     };
     let mut frame = col()
         .key(format!("{key}-output"))

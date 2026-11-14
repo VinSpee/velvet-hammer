@@ -121,7 +121,7 @@ pub struct App {
     /// When each tool use started, or how long it took once its result arrived, by its id.
     pub clock: HashMap<String, Clock>,
     /// The copy button pressed last, by its key, which says it copied.
-    pub copied: Option<String>,
+    pub copy_pressed: Option<String>,
     /// The state of each view the chief of staff showed, by its tool use's id.
     pub ui: HashMap<String, ui::Live>,
     /// The images views show, by the path a view gave, or why one is not shown.
@@ -263,7 +263,7 @@ impl App {
             media: HashMap::new(),
             cards: HashMap::new(),
             clock: HashMap::new(),
-            copied: None,
+            copy_pressed: None,
             ui: HashMap::new(),
             ui_images: HashMap::new(),
             images: ImageCache::new(media_wake.clone()),

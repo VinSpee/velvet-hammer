@@ -471,7 +471,7 @@ const COMMAND_PREVIEW: usize = 60;
 /// A small button that copies `what` and says so until another copy button is pressed. `label`
 /// is what it copies, for assistive technology.
 fn copy_button(s: &App, key: &str, label: &str, what: String, t: Theme) -> El {
-    let copied = s.copied.as_deref() == Some(key);
+    let copied = s.copy_pressed.as_deref() == Some(key);
     let id = key.to_string();
     el().key(key)
         .role("button")
@@ -488,7 +488,7 @@ fn copy_button(s: &App, key: &str, label: &str, what: String, t: Theme) -> El {
         .fill(t.control_off)
         .on_press_tx(move |s: &mut App, tx: &mut rune::Tx| {
             tx.copy(what.clone());
-            s.copied = Some(id.clone());
+            s.copy_pressed = Some(id.clone());
         })
         .child(
             text(if copied { "Copied" } else { "Copy" })
