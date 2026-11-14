@@ -3,6 +3,7 @@
 //! `cargo run -- --snap chat.png` renders it headless (see the README for every scene).
 
 mod agent;
+mod ansi;
 mod approval;
 mod bearings;
 mod bridge;
@@ -28,7 +29,7 @@ mod ui;
 mod view;
 mod visual;
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, channel};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -161,8 +162,12 @@ pub struct App {
     pub replying: Option<usize>,
     /// How each finished tool use is drawn, by its id, with the image or video it shows.
     pub media: HashMap<String, Media>,
-    /// The tool uses whose results the captain unfolded, by id.
-    pub unfolded: HashSet<String>,
+    /// How the captain set out each tool use's card, by its id.
+    pub cards: HashMap<String, Card>,
+    /// When each tool use started, or how long it took once its result arrived, by its id.
+    pub clock: HashMap<String, Clock>,
+    /// The copy button pressed last, by its key, which says it copied.
+    pub copy_pressed: Option<String>,
     /// The state of each view the chief of staff showed, by its tool use's id.
     pub ui: HashMap<String, ui::Live>,
     /// The images views show, by the path a view gave, or why one is not shown.
@@ -182,6 +187,25 @@ pub struct Media {
     pub image: Option<Result<Image, String>>,
     /// The player of a video handler.
     pub video: Option<Player>,
+}
+
+/// What the captain opened in a tool use's card. Everything starts closed.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Card {
+    /// Every line of the result, not only its first few.
+    pub all_lines: bool,
+    /// The whole command, not only its first line.
+    pub full_input: bool,
+    /// Long lines run on and scroll sideways instead of wrapping.
+    pub no_wrap: bool,
+}
+
+/// A tool use's time: from the moment its call arrived to the moment its result did, which
+/// includes any wait for the captain's approval.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Clock {
+    Started(Instant),
+    Took(Duration),
 }
 
 /// What the middle column shows.
@@ -334,7 +358,9 @@ impl App {
             showing: Showing::Chat,
             replying: None,
             media: HashMap::new(),
-            unfolded: HashSet::new(),
+            cards: HashMap::new(),
+            clock: HashMap::new(),
+            copy_pressed: None,
             ui: HashMap::new(),
             ui_images: HashMap::new(),
             images: ImageCache::new(media_wake.clone()),
@@ -515,7 +541,11 @@ impl App {
                 let id = tool.id.clone();
                 match self.tool_mut(&id) {
                     Some(shown) => shown.input = tool.input,
-                    None => self.ws.chat.push(Message::tool(tool)),
+                    None => {
+                        self.clock
+                            .insert(id.clone(), Clock::Started(Instant::now()));
+                        self.ws.chat.push(Message::tool(tool));
+                    }
                 }
                 self.load_view_images(&id);
             }
@@ -531,6 +561,9 @@ impl App {
                 };
                 tool.result = Some(result);
                 let handler = tools::handler(tool);
+                if let Some(Clock::Started(at)) = self.clock.get(&id) {
+                    self.clock.insert(id.clone(), Clock::Took(at.elapsed()));
+                }
                 let media = self.media_for(&handler);
                 self.media.insert(id.clone(), media);
                 if let Some(i) = self
@@ -1597,12 +1630,28 @@ fn main() {
             ("tool-generic", |s| {
                 *s = fake_in(Mode::Run);
                 say(s, "shell: ls");
-                s.unfolded.insert("toolu_fake_Bash".into());
+                s.cards
+                    .entry("toolu_fake_Bash".into())
+                    .or_default()
+                    .all_lines = true;
             }),
             ("tool-picture", |s| {
                 *s = shown(&fixture("chart.png"));
                 s.showing = Showing::Picture("toolu_fake_Read".into());
             }),
+            // Tool calls as cards: the captain's Bash example of a long test run, the same
+            // run unfolded, commands that failed, ran, printed colours or nothing, edits as
+            // diffs, and reads, searches and a fetch.
+            ("tool-bash", |s| *s = ran("tools-bash.json")),
+            ("tool-bash-open", |s| {
+                *s = ran("tools-bash.json");
+                let card = s.cards.entry("toolu_bash".into()).or_default();
+                card.all_lines = true;
+                card.full_input = true;
+            }),
+            ("tool-terminal", |s| *s = ran("tools-terminal.json")),
+            ("tool-diff", |s| *s = ran("tools-diff.json")),
+            ("tool-files", |s| *s = ran("tools-files.json")),
             // Views the chief of staff showed with `app_ui` (json-render specs): every kind of
             // component, the same view half streamed, state bound to inputs and a repeat after
             // the captain ticked, typed and added, a submit and the reply to it, a component the
@@ -2365,6 +2414,44 @@ fn shown(path: &str) -> App {
             let _ = image.wait();
         }
     }
+    app
+}
+
+/// The stub app after the turn a `scripts/fixtures` file describes: the captain's question, the
+/// chief of staff's first words, its tool uses with their results and how long each took (none
+/// for one still running), and its reply.
+fn ran(name: &str) -> App {
+    let turn: serde_json::Value = serde_json::from_str(&fixture_text(name)).expect("fixture JSON");
+    let words = |field: &str| turn[field].as_str().unwrap_or_default().to_string();
+    let mut app = stub();
+    app.ws.chat = vec![
+        Message::new(Author::Captain, words("ask")),
+        Message::new(Author::ChiefOfStaff, words("lead")),
+    ];
+    for tool in turn["tools"].as_array().into_iter().flatten() {
+        let id = tool["id"].as_str().unwrap_or_default().to_string();
+        app.take(Event::Tool(tools::ToolUse {
+            id: id.clone(),
+            name: tool["name"].as_str().unwrap_or_default().into(),
+            input: tool["input"].clone(),
+            result: None,
+        }));
+        let Some(text) = tool["result"].as_str() else {
+            continue;
+        };
+        app.take(Event::ToolResult {
+            id: id.clone(),
+            result: tools::ToolResult {
+                is_error: tool["is_error"] == true,
+                content: vec![tools::Content::Text(text.into())],
+            },
+        });
+        let took = Duration::from_secs_f64(tool["took"].as_f64().unwrap_or_default());
+        app.clock.insert(id, Clock::Took(took));
+    }
+    app.ws
+        .chat
+        .push(Message::new(Author::ChiefOfStaff, words("reply")));
     app
 }
 
@@ -4236,16 +4323,37 @@ mod tests {
     }
 
     #[test]
-    fn any_other_tool_shows_compactly_with_its_result_folded() {
+    fn a_command_from_claude_shows_as_a_terminal_card_and_any_other_tool_as_text() {
         let mut app = fake_in(Mode::Run);
         say(&mut app, "shell: ls");
+        // An MCP tool the registry does not know draws its result as text.
+        app.take(Event::Tool(tools::ToolUse {
+            id: "toolu_mcp".into(),
+            name: "mcp__weather__forecast".into(),
+            input: serde_json::json!({"city": "Lisbon"}),
+            result: None,
+        }));
+        app.take(Event::ToolResult {
+            id: "toolu_mcp".into(),
+            result: tools::ToolResult {
+                is_error: false,
+                content: vec![tools::Content::Text("Sunny, 24 °C".into())],
+            },
+        });
         let mut rt = runtime_with(app);
+        rt.frame(1.0 / 60.0);
         assert!(texts(&rt).iter().any(|t| t == "Bash"));
-        assert!(rt.find("tool-2-result").is_none());
-        tap(&mut rt, "tool-2-toggle");
-        assert!(texts(&rt).iter().any(|t| t == "one\ntwo\nthree"));
-        tap(&mut rt, "tool-2-toggle");
-        assert!(rt.find("tool-2-result").is_none());
+        assert_eq!(texts_under(&rt, "tool-2-command"), ["ls"]);
+        // Three lines fit the preview, so they show whole with nothing to unfold.
+        assert!(texts_under(&rt, "tool-2-output").contains(&"one\ntwo\nthree".to_string()));
+        assert!(rt.find("tool-2-more").is_none());
+        assert!(matches!(
+            rt.state.clock.get("toolu_fake_Bash"),
+            Some(Clock::Took(_))
+        ));
+        let generic = texts_under(&rt, "tool-4");
+        assert!(generic.contains(&"mcp__weather__forecast".to_string()));
+        assert!(generic.contains(&"Sunny, 24 °C".to_string()));
     }
 
     fn view_runtime(input: serde_json::Value) -> Runtime<App> {
@@ -5794,6 +5902,85 @@ mod tests {
         );
         press_key(&mut rt, Key::Escape, false);
         assert_eq!(rt.state.open_menu, None);
+    }
+
+    #[test]
+    fn a_long_command_output_shows_its_first_lines_until_unfolded() {
+        let mut rt = runtime_with(ran("tools-bash.json"));
+        rt.frame(1.0 / 60.0);
+        let output = texts_under(&rt, "tool-2-output").concat();
+        assert!(output.contains("running 112 tests"));
+        assert!(!output.contains("test result: ok"));
+        assert_eq!(texts_under(&rt, "tool-2-status"), ["Done"]);
+        assert_eq!(texts_under(&rt, "tool-2-took"), ["42 s"]);
+        tap_scrolled(&mut rt, "tool-2-more");
+        assert!(
+            texts_under(&rt, "tool-2-output")
+                .concat()
+                .contains("test result: ok")
+        );
+        assert_eq!(texts_under(&rt, "tool-2-more"), ["Show fewer lines"]);
+        // The command shows its first line cut to the width, then whole.
+        tap_scrolled(&mut rt, "tool-2-command-toggle");
+        assert!(rt.state.cards["toolu_bash"].full_input);
+        tap_scrolled(&mut rt, "tool-2-wrap");
+        assert!(rt.state.cards["toolu_bash"].no_wrap);
+    }
+
+    #[test]
+    fn the_copy_buttons_copy_the_command_and_the_output_without_escapes() {
+        let mut rt = runtime_with(ran("tools-terminal.json"));
+        let clipboard = rune::clipboard::memory();
+        rt.use_clipboard(&clipboard);
+        tap_scrolled(&mut rt, "tool-3-copy");
+        assert_eq!(
+            clipboard.text().as_deref().map(String::as_str),
+            Some("cargo clippy --color always --all-targets -- -D warnings")
+        );
+        assert_eq!(texts_under(&rt, "tool-3-copy"), ["Copied"]);
+        tap_scrolled(&mut rt, "tool-3-copy-output");
+        let copied = clipboard.text().unwrap().to_string();
+        assert!(copied.starts_with("    Checking velvet-hammer"));
+        assert!(!copied.contains('\u{1b}'));
+        assert_eq!(texts_under(&rt, "tool-3-copy"), ["Copy"]);
+    }
+
+    #[test]
+    fn a_failed_command_shows_its_exit_code_and_its_colours_not_their_escapes() {
+        let mut rt = runtime_with(ran("tools-terminal.json"));
+        rt.frame(1.0 / 60.0);
+        assert_eq!(texts_under(&rt, "tool-3-status"), ["Exit code 101"]);
+        let output = texts_under(&rt, "tool-3-output").concat();
+        assert!(output.contains("error: unused variable"));
+        assert!(!output.contains('\u{1b}') && !output.contains("Exit code"));
+        // Nothing came back yet from the command still running, and an empty one says so.
+        assert_eq!(texts_under(&rt, "tool-6-status"), ["Running\u{2026}"]);
+        assert!(rt.find("tool-6-output").is_none());
+        assert!(rt.find("tool-4-empty").is_some());
+    }
+
+    #[test]
+    fn edits_show_as_diffs_and_reads_as_numbered_code() {
+        let mut rt = runtime_with(ran("tools-diff.json"));
+        rt.frame(1.0 / 60.0);
+        assert_eq!(texts_under(&rt, "tool-2-counts"), ["+2", "\u{2212}1"]);
+        assert_eq!(texts_under(&rt, "tool-3-counts"), ["+5"]);
+        assert!(
+            texts_under(&rt, "tool-2-diff").contains(&"    let name = name.trim();".to_string())
+        );
+        assert_eq!(texts_under(&rt, "tool-5-status"), ["Failed"]);
+        assert!(texts_under(&rt, "tool-5-error")[0].starts_with("String to replace not found"));
+        let mut rt = runtime_with(ran("tools-files.json"));
+        rt.frame(1.0 / 60.0);
+        assert_eq!(texts_under(&rt, "tool-2-found"), ["Found 2 files"]);
+        assert_eq!(texts_under(&rt, "tool-3-found"), ["3 results"]);
+        let numbers = texts_under(&rt, "tool-4-numbers");
+        assert!(numbers[0].starts_with("1\n2\n3"));
+        assert!(
+            texts_under(&rt, "tool-4-output")
+                .iter()
+                .any(|t| t.starts_with("use std::path::Path;"))
+        );
     }
 
     /// The captain's messages in the chat, in order.

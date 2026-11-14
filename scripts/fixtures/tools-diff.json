@@ -1,0 +1,59 @@
+{
+  "ask": "Tidy the greeting and write release notes.",
+  "lead": "Editing the greeting and adding notes.",
+  "tools": [
+    {
+      "id": "toolu_edit",
+      "name": "Edit",
+      "input": {
+        "file_path": "/Users/captain/Projects/hello/src/greet.rs",
+        "old_string": "fn greet(name: &str) -> String {\n    format!(\"Hello, {name}\")\n}\n",
+        "new_string": "fn greet(name: &str) -> String {\n    let name = name.trim();\n    format!(\"Hello, {name}!\")\n}\n"
+      },
+      "result": "The file /Users/captain/Projects/hello/src/greet.rs has been updated.",
+      "took": 0.0
+    },
+    {
+      "id": "toolu_write",
+      "name": "Write",
+      "input": {
+        "file_path": "/Users/captain/Projects/hello/NOTES.md",
+        "content": "# Release notes\n\n- Tool calls render as cards.\n- Bash output keeps its colours.\n- Edits show as diffs.\n"
+      },
+      "result": "File created successfully at: /Users/captain/Projects/hello/NOTES.md",
+      "took": 0.0
+    },
+    {
+      "id": "toolu_multi",
+      "name": "MultiEdit",
+      "input": {
+        "file_path": "/Users/captain/Projects/hello/Cargo.toml",
+        "edits": [
+          {
+            "old_string": "version = \"0.1.0\"",
+            "new_string": "version = \"0.2.0\""
+          },
+          {
+            "old_string": "edition = \"2021\"",
+            "new_string": "edition = \"2024\""
+          }
+        ]
+      },
+      "result": "Applied 2 edits to /Users/captain/Projects/hello/Cargo.toml",
+      "took": 0.0
+    },
+    {
+      "id": "toolu_failed_edit",
+      "name": "Edit",
+      "input": {
+        "file_path": "/Users/captain/Projects/hello/src/main.rs",
+        "old_string": "println!(\"hi\");",
+        "new_string": "println!(\"hello\");"
+      },
+      "result": "<tool_use_error>String to replace not found in file.\nString: println!(\"hi\");</tool_use_error>",
+      "is_error": true,
+      "took": 0.0
+    }
+  ],
+  "reply": "Done: the greeting trims names, and NOTES.md lists the release."
+}
