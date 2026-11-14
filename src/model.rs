@@ -9,7 +9,8 @@ pub type Id = u32;
 
 /// Who wrote a message: the captain, the chief of staff, or a subagent (in a peek transcript).
 /// `Problem` is a failure the agent layer reported, shown in the chat in its own words. `Tool` is
-/// one of the chief of staff's tool uses.
+/// one of the chief of staff's tool uses. `App` is something Velvet Hammer itself did, such as
+/// sending a reply back to be shown as a view.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Author {
     Captain,
@@ -17,6 +18,7 @@ pub enum Author {
     Subagent,
     Problem,
     Tool,
+    App,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

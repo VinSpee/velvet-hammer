@@ -4,8 +4,9 @@
 //! `claude -p --input-format stream-json --output-format stream-json` session carries the chat.
 //! The app never reads, stores or forwards a credential; it only reads the fields `claude`
 //! prints about the sign-in. The session calls back into the app through a [`Bridge`]: one tool
-//! and one hook, passed as flags to that session only. The hook applies the captain's
-//! tool-approval settings ([`crate::approval`]).
+//! and hooks, passed as flags to that session only. The hooks apply firstmate's rules
+//! ([`crate::guard`]), the captain's tool-approval settings ([`crate::approval`]) and the
+//! visual-replies mode ([`crate::visual`]).
 
 use std::collections::HashMap;
 use std::io::{self, BufRead, BufReader, Read, Write};
@@ -13,7 +14,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Output, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, Sender, channel};
-use std::sync::{Arc, OnceLock, RwLock};
+use std::sync::{Arc, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -22,8 +23,8 @@ use rune::Waker;
 use serde_json::{Value, json};
 
 use crate::agent::{ChiefOfStaff, Event};
-use crate::approval::{Policy, Settings};
-use crate::bridge::{Bridge, Call};
+use crate::bridge::{Bridge, Call, Policies};
+use crate::guard::Home;
 use crate::model::{Action, Id, Item, ItemKind, Plan, Status, Workspace};
 use crate::tools::{self, ToolUse};
 use crate::ui;
@@ -65,8 +66,8 @@ pub struct Claude {
     approvals: HashMap<Id, Approval>,
     /// Notes `app_note` added, by item, so marking one done can say which.
     notes: HashMap<Id, String>,
-    /// The tool-approval settings the session's hook decides with.
-    policy: Policy,
+    /// The settings the session's hooks decide with.
+    policies: Policies,
 }
 
 /// Where a firstmate chief of staff runs: the managed clone is the working directory, so
@@ -112,7 +113,7 @@ impl Claude {
             approvals: HashMap::new(),
             notes: HashMap::new(),
             // Asks about everything until the app hands over the captain's settings.
-            policy: Arc::new(RwLock::new(Settings::ask_every_time())),
+            policies: Policies::ask_every_time(),
         }
     }
 
@@ -235,9 +236,17 @@ impl Claude {
             self.out.push(Event::Activity(entry));
             return;
         }
+        // The reply so far ends here, so the captain sees it was sent back before the view.
+        if let Call::Nudged(why) = call {
+            self.finish_reply();
+            self.out.push(Event::Notice(format!(
+                "Velvet Hammer asked the chief of staff to show this as a view: the reply {why}."
+            )));
+            return;
+        }
         let id = self.item_id();
         let item = match call {
-            Call::Expired(_) | Call::Logged(_) => return,
+            Call::Expired(_) | Call::Logged(_) | Call::Nudged(_) => return,
             Call::Note(text) => {
                 self.notes.insert(id, text.clone());
                 Item {
@@ -250,9 +259,10 @@ impl Claude {
             }
             Call::Approve {
                 ticket,
-                tool,
+                title,
                 input,
                 answer,
+                ..
             } => {
                 self.approvals.insert(id, Approval { ticket, answer });
                 Item {
@@ -260,7 +270,7 @@ impl Claude {
                     kind: ItemKind::NeedsInput {
                         options: vec![ALLOW.into(), DENY.into()],
                     },
-                    title: format!("Allow {tool}?"),
+                    title,
                     detail: input,
                     agent: None,
                 }
@@ -395,7 +405,7 @@ impl Claude {
                     &self.program,
                     &self.env,
                     self.workplace.as_ref(),
-                    &self.policy,
+                    &self.policies,
                     &self.outbox,
                 )
                 .map_err(|e| format!("Could not start Claude Code: {e}"))?,
@@ -424,8 +434,8 @@ impl ChiefOfStaff for Claude {
         self.workplace.as_ref().map(|w| w.clone.as_path())
     }
 
-    fn approve_with(&mut self, policy: Policy) {
-        self.policy = policy;
+    fn approve_with(&mut self, policies: Policies) {
+        self.policies = policies;
     }
 
     fn act(&mut self, _ws: &Workspace, action: &Action) {
@@ -770,11 +780,14 @@ impl Session {
         program: &PathBuf,
         env: &[(String, String)],
         workplace: Option<&Workplace>,
-        policy: &Policy,
+        policies: &Policies,
         outbox: &Outbox,
     ) -> io::Result<Session> {
         let calls = outbox.clone();
-        let bridge = Bridge::start(policy.clone(), move |call| calls.send(Msg::Call(id, call)))?;
+        let home = workplace.map(|w| Home::new(&w.home));
+        let bridge = Bridge::start(policies.clone(), home, move |call| {
+            calls.send(Msg::Call(id, call))
+        })?;
         let mut command = Command::new(program);
         if let Some(Workplace { clone, home }) = workplace {
             crate::firstmate::prepare_home(home)?;

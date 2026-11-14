@@ -3,7 +3,7 @@
 //! it; the PreToolUse hook in [`crate::bridge`] asks [`Settings::decide`] about every tool use,
 //! and every decision lands in the [`Activity`] log.
 //!
-//! The settings live in the app's own data directory ([`Store`]), never in the captain's Claude
+//! The settings live in the app's own data directory ([`Store`], a [`crate::store::Store`]), never in the captain's Claude
 //! settings or in a repository. A fresh install runs without asking, as recommended. A settings
 //! file the app cannot read makes every tool use ask until the captain saves new settings, so a
 //! damaged file never silently drops a rule.
@@ -23,18 +23,15 @@
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, RwLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use rune::TextEdit;
 use serde_json::{Value, json};
 
+use crate::store::{self, Saved, Shared, suffixed};
+
 /// The settings file in the data directory.
 pub const SETTINGS_FILE: &str = "tool-approval.json";
-/// Where an unreadable settings file is kept when the captain saves over it.
-const BAD_SUFFIX: &str = ".bad";
-/// The settings file's schema version. A file with another version is not read.
-const VERSION: u64 = 1;
 /// The activity log in the data directory: one JSON object per line.
 pub const LOG_FILE: &str = "tool-activity.jsonl";
 /// How many log entries the app keeps in memory and shows.
@@ -265,6 +262,27 @@ impl Settings {
             rules: Vec::new(),
         }
     }
+}
+
+fn read_only(tool: &str) -> bool {
+    READ_ONLY.contains(&tool) || tool.starts_with(&format!("mcp__{}__", crate::bridge::SERVER))
+}
+
+/// The settings shared with the hook, which reads them for every tool use, so a change applies
+/// to a session that is already running.
+pub type Policy = Shared<Settings>;
+
+/// The settings as saved in the data directory. A file that cannot be read makes every tool use
+/// ask.
+pub type Store = store::Store<Settings>;
+
+impl Saved for Settings {
+    const FILE: &'static str = SETTINGS_FILE;
+    const FALLBACK: &'static str = "every tool use asks you";
+
+    fn fallback() -> Self {
+        Settings::ask_every_time()
+    }
 
     fn to_json(&self) -> Value {
         let rules: Vec<Value> = self
@@ -272,17 +290,13 @@ impl Settings {
             .iter()
             .map(|r| json!({"effect": r.effect.key(), "tool": r.tool, "pattern": r.pattern}))
             .collect();
-        json!({"version": VERSION, "mode": self.mode.key(), "rules": rules})
+        json!({"version": store::VERSION, "mode": self.mode.key(), "rules": rules})
     }
 
     /// Reads the settings file's JSON. Anything it does not understand fails the whole file, so
     /// a rule is never dropped quietly.
-    fn from_json(value: &Value) -> Result<Settings, String> {
-        match value["version"].as_u64() {
-            Some(VERSION) => {}
-            Some(other) => return Err(format!("it has schema version {other}, not {VERSION}")),
-            None => return Err("it has no schema version".into()),
-        }
+    fn from_json(value: &Value) -> Result<Self, String> {
+        store::check_version(value)?;
         let mode = value["mode"]
             .as_str()
             .and_then(Mode::from_key)
@@ -318,124 +332,6 @@ impl Settings {
     }
 }
 
-fn read_only(tool: &str) -> bool {
-    READ_ONLY.contains(&tool) || tool.starts_with(&format!("mcp__{}__", crate::bridge::SERVER))
-}
-
-/// The settings shared with the hook, which reads them for every tool use, so a change applies
-/// to a session that is already running.
-pub type Policy = Arc<RwLock<Settings>>;
-
-/// The settings as saved in the data directory.
-pub struct Store {
-    path: PathBuf,
-    settings: Settings,
-    policy: Policy,
-    /// Why the file could not be read or saved, for the settings page.
-    problem: Option<String>,
-    /// The file exists but could not be read; the next save keeps it as `<file>.bad`.
-    unreadable: bool,
-}
-
-impl Store {
-    /// Reads `dir/tool-approval.json`. A missing file gives the recommended default; one that
-    /// cannot be read gives [`Mode::Ask`] and a problem to show.
-    pub fn open(dir: &Path) -> Store {
-        let path = dir.join(SETTINGS_FILE);
-        let read = match fs::read(&path) {
-            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
-            Err(e) => Err(e.to_string()),
-            Ok(bytes) => serde_json::from_slice::<Value>(&bytes)
-                .map_err(|_| "it is not valid JSON".to_string())
-                .and_then(|value| Settings::from_json(&value))
-                .map(Some),
-        };
-        let (settings, problem) = match read {
-            Ok(settings) => (settings.unwrap_or_default(), None),
-            Err(why) => (
-                Settings::ask_every_time(),
-                Some(format!(
-                    "Velvet Hammer could not read {} ({why}), so every tool use asks you until \
-                     you change a setting here. The old file is then kept as {SETTINGS_FILE}{BAD_SUFFIX}.",
-                    path.display()
-                )),
-            ),
-        };
-        Store {
-            path,
-            policy: Arc::new(RwLock::new(settings.clone())),
-            unreadable: problem.is_some(),
-            settings,
-            problem,
-        }
-    }
-
-    pub fn settings(&self) -> &Settings {
-        &self.settings
-    }
-
-    pub fn policy(&self) -> Policy {
-        self.policy.clone()
-    }
-
-    pub fn problem(&self) -> Option<&str> {
-        self.problem.as_deref()
-    }
-
-    pub fn path(&self) -> &Path {
-        &self.path
-    }
-
-    /// Changes the settings and saves them. If the save fails, nothing changes and the page says
-    /// why, so the app never runs on settings it could not keep.
-    pub fn change(&mut self, edit: impl FnOnce(&mut Settings)) {
-        let mut next = self.settings.clone();
-        edit(&mut next);
-        match self.save(&next) {
-            Ok(()) => {
-                *self.policy.write().unwrap_or_else(|e| e.into_inner()) = next.clone();
-                self.settings = next;
-                self.problem = None;
-                self.unreadable = false;
-            }
-            Err(e) => {
-                self.problem = Some(format!(
-                    "Velvet Hammer could not save {}: {e}. The change was not made.",
-                    self.path.display()
-                ))
-            }
-        }
-    }
-
-    /// Writes the file whole or not at all: a temporary file beside it, synced, then renamed
-    /// over it.
-    fn save(&self, settings: &Settings) -> io::Result<()> {
-        let dir = self.path.parent().expect("the file is in a directory");
-        fs::create_dir_all(dir)?;
-        let temporary = suffixed(&self.path, &format!(".tmp-{}", std::process::id()));
-        let mut file = File::create(&temporary)?;
-        let written = serde_json::to_vec_pretty(&settings.to_json())
-            .map_err(io::Error::other)
-            .and_then(|bytes| file.write_all(&bytes))
-            .and_then(|()| file.sync_all())
-            .and_then(|()| {
-                if self.unreadable && self.path.exists() {
-                    fs::copy(&self.path, suffixed(&self.path, BAD_SUFFIX))?;
-                }
-                fs::rename(&temporary, &self.path)
-            });
-        if written.is_err() {
-            let _ = fs::remove_file(&temporary);
-        }
-        written?;
-        // Makes the rename itself durable.
-        if let Ok(dir) = File::open(dir) {
-            let _ = dir.sync_all();
-        }
-        Ok(())
-    }
-}
-
 /// Creates the directory, and any missing parents, readable by its owner only.
 fn create_private_dir(dir: &Path) -> io::Result<()> {
     let mut builder = fs::DirBuilder::new();
@@ -468,12 +364,6 @@ fn make_private(_: &Path) -> io::Result<()> {
     Ok(())
 }
 
-fn suffixed(path: &Path, suffix: &str) -> PathBuf {
-    let mut name = path.as_os_str().to_owned();
-    name.push(suffix);
-    PathBuf::from(name)
-}
-
 /// One tool use and what was decided.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Entry {
@@ -485,6 +375,8 @@ pub struct Entry {
     pub allowed: bool,
     /// How it was decided, such as "by the mode Run without asking".
     pub how: String,
+    /// The firstmate rule that decided it, by its key (see [`crate::guard`]).
+    pub rule: Option<String>,
 }
 
 impl Entry {
@@ -503,12 +395,23 @@ impl Entry {
             subject,
             allowed,
             how,
+            rule: None,
         }
     }
 
+    /// The same entry, decided by the firstmate rule `key`.
+    pub fn by_rule(mut self, key: &str) -> Entry {
+        self.rule = Some(key.to_string());
+        self
+    }
+
     fn to_json(&self) -> Value {
-        json!({"at": self.at, "tool": self.tool, "subject": self.subject,
-               "decision": if self.allowed { "allow" } else { "deny" }, "how": self.how})
+        let mut out = json!({"at": self.at, "tool": self.tool, "subject": self.subject,
+               "decision": if self.allowed { "allow" } else { "deny" }, "how": self.how});
+        if let Some(rule) = &self.rule {
+            out["rule"] = json!(rule);
+        }
+        out
     }
 
     fn from_json(value: &Value) -> Option<Entry> {
@@ -522,6 +425,7 @@ impl Entry {
                 _ => return None,
             },
             how: value["how"].as_str()?.to_string(),
+            rule: value["rule"].as_str().map(str::to_string),
         })
     }
 }
@@ -635,7 +539,7 @@ pub fn input_text(input: &Value) -> String {
 /// The commands of a Bash command line, split at `;`, `&`, `|`, newlines, parentheses and
 /// backticks. Splitting inside a quoted string only makes allow rules match less and deny and
 /// ask rules match more.
-fn commands(line: &str) -> Vec<&str> {
+pub fn commands(line: &str) -> Vec<&str> {
     line.split([';', '&', '|', '\n', '(', ')', '`'])
         .map(|c| c.trim().trim_end_matches('$').trim())
         .filter(|c| !c.is_empty())
@@ -977,7 +881,7 @@ mod tests {
             s.rules.push(rule(Effect::Allow, "Edit", None));
         });
         assert!(store.problem().is_none());
-        assert_eq!(store.policy().read().unwrap().mode, Mode::ReadOnly);
+        assert_eq!(store.shared().read().unwrap().mode, Mode::ReadOnly);
         let again = Store::open(&dir);
         assert_eq!(again.settings(), store.settings());
         assert!(again.problem().is_none());
@@ -1006,7 +910,7 @@ mod tests {
                 store.problem().unwrap().contains("every tool use asks you"),
                 "{bad}"
             );
-            assert_eq!(store.policy().read().unwrap().mode, Mode::Ask);
+            assert_eq!(store.shared().read().unwrap().mode, Mode::Ask);
             store.change(|s| s.mode = Mode::Run);
             assert!(store.problem().is_none());
             assert_eq!(
@@ -1029,7 +933,7 @@ mod tests {
         store.change(|s| s.mode = Mode::Run);
         fs::set_permissions(&dir, fs::Permissions::from_mode(0o700)).unwrap();
         assert_eq!(store.settings().mode, Mode::Ask);
-        assert_eq!(store.policy().read().unwrap().mode, Mode::Ask);
+        assert_eq!(store.shared().read().unwrap().mode, Mode::Ask);
         assert!(store.problem().unwrap().contains("could not save"));
         assert_eq!(Store::open(&dir).settings().mode, Mode::Ask);
     }

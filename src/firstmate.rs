@@ -457,18 +457,25 @@ pub mod lab {
     }
 
     impl Lab {
-        /// A fresh upstream with one commit, and an empty data directory.
+        /// A fresh upstream with one commit, and an empty data directory, under `target/`.
         pub fn new() -> Lab {
             use std::sync::atomic::{AtomicU32, Ordering};
             static RUN: AtomicU32 = AtomicU32::new(0);
-            let root = Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("target/firstmate-lab")
-                .join(format!(
-                    "{}-{}",
-                    std::process::id(),
-                    RUN.fetch_add(1, Ordering::Relaxed)
-                ));
-            let _ = std::fs::remove_dir_all(&root);
+            Lab::at(
+                &Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("target/firstmate-lab")
+                    .join(format!(
+                        "{}-{}",
+                        std::process::id(),
+                        RUN.fetch_add(1, Ordering::Relaxed)
+                    )),
+            )
+        }
+
+        /// The same at `root`, which is emptied first: for screenshots, a short path that names
+        /// no one's home directory.
+        pub fn at(root: &Path) -> Lab {
+            let _ = std::fs::remove_dir_all(root);
             let lab = Lab {
                 upstream: root.join("upstream"),
                 data: root.join("data"),

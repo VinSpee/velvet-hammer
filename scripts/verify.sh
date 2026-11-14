@@ -31,7 +31,8 @@ for scene in chat replied empty peek signed-out signing-in signed-in expired cli
   firstmate-modified firstmate-blocked firstmate-session firstmate-panels firstmate-answering firstmate-crew \
   projects-fresh projects-empty projects-adding projects-listed \
   formatted formatted-all formatted-streaming tool-image tool-image-broken tool-video tool-generic tool-picture \
-  view-static view-streaming view-state view-action view-unknown view-too-large; do
+  view-static view-streaming view-state view-action view-unknown view-too-large \
+  visuals-settings visuals-enforced visuals-capped rules-settings rules-merge-ask rules-project-ask; do
   headless --scene "$scene" --snap "$out/$scene.png"
   headless --scene "$scene" --tree "$out/$scene.json"
 done
@@ -289,6 +290,42 @@ check view-unknown.json yes '"text": "Unknown component “BarChart”"'
 check view-unknown.json yes '"text": "Monday was the slowest."'
 check view-too-large.json yes 'more than the limit of 200, so it is not shown.'
 check view-too-large.json no  '"key": "tool-1-ui-main"'
+# Visual replies: the settings page, a list sent back once and shown as a view, and a reply that
+# ignored the feedback, sent back only once.
+check chat.json yes '"key": "visuals"'
+check chat.json yes '"text": "Enforce"'
+check visuals-settings.json yes '"key": "visuals-page"'
+check visuals-settings.json yes '"text": "● Enforce (Recommended)"'
+check visuals-settings.json yes '"key": "visual-mode-nudge"'
+check visuals-settings.json yes '"key": "visual-mode-off"'
+check visuals-settings.json yes '"key": "visual-shape-4"'
+check visuals-settings.json yes '"key": "visual-instruction"'
+check visuals-settings.json yes '"text": "Sent back once to be shown as a view: the reply lists 3 items."'
+check visuals-enforced.json yes 'Velvet Hammer asked the chief of staff to show this as a view: the reply lists 3 items.'
+check visuals-enforced.json yes '"text": "Velvet Hammer"'
+check visuals-enforced.json yes '"text": "Chief of staff'"'"'s view"'
+check visuals-enforced.json yes '"text": "Start on the first"'
+check visuals-enforced.json yes '"text": "Shown above."'
+check visuals-capped.json yes 'the reply lists 3 items.'
+check visuals-capped.json yes '"text": "Left as text."'
+check visuals-capped.json no  'looped'
+check visuals-capped.json no  '"text": "Chief of staff'"'"'s view"'
+# Firstmate's rules: the page with what two rules did, a merge question that names the pull
+# request, and a write into a project waiting for the captain.
+check chat.json yes '"key": "rules"'
+check chat.json yes '"text": "7 of 7 on"'
+check rules-settings.json yes '"key": "rules-page"'
+check rules-settings.json yes '"key": "guard-merge-through-script"'
+check rules-settings.json yes '"key": "guard-publish-asks-captain-toggle"'
+check rules-settings.json yes '"key": "guard-no-force-push-recent-0"'
+check rules-settings.json yes 'denied by firstmate rule “No force pushes” · git push --force origin main'
+check rules-settings.json yes 'asked by firstmate rule “Every merge waits for your word”; you allowed it'
+check rules-settings.json yes '"key": "guard-projects-read-only-quiet"'
+check rules-merge-ask.json yes '"text": "Merge https://github.com/captain/site/pull/7?"'
+check rules-merge-ask.json yes 'Firstmate'"'"'s hard rule 2: never merge a pull request without the captain'"'"'s explicit word.'
+check rules-merge-ask.json yes '"key": "answer-1-0"'
+check rules-project-ask.json yes 'Let the chief of staff edit /tmp/velvet-hammer/rules-project-ask/data/home/projects/site/README.md?'
+check rules-project-ask.json yes '"key": "answer-1-1"'
 # The scripted run.
 check walk-sent.json yes '"text": "Ship it when CI is green."'
 check walk-sent.json yes 'Got it:'

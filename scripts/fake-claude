@@ -24,6 +24,17 @@
 # tool_use record, then a tool_result with the image as a base64 block for a .png, or a line of
 # text for anything else. "shell: COMMAND" uses Bash, whose result is three lines of text.
 #
+# Each message first goes to the UserPromptSubmit hook, as the real `claude` sends it. A message
+# "context?" is answered with whether that hook added the app's instruction about views.
+#
+# A message "list: A, B, C" is answered with a Markdown list of A, B and C, then the Stop hook is
+# asked about it with the list as `last_assistant_message`. If the hook sends the reply back with
+# feedback, the fake shows the list as a view with the app_ui tool (the MCP call, then the
+# tool_use and tool_result records) and asks the Stop hook again, the way the real `claude`
+# continues a turn, and ends with "Shown above.". "stubborn: A, B, C" ignores the feedback and
+# stops again with the same list and `stop_hook_active` unset, then ends with "Left as text.", or
+# with "looped" if the hook sent it back a second time.
+#
 # A message containing "whereami" is answered with the session's working directory and FM_HOME.
 # After a message "wake: TEXT" and its reply, a second turn nobody asked for says TEXT, the way
 # a firstmate Stop hook wakes an idle session.
@@ -87,7 +98,7 @@ auth)
   ;;
 -p)
   # The app passes compact JSON; these pull out the one server and the one hook it names.
-  mcp_url='' hook_url='' mcp_auth='' hook_auth=''
+  mcp_url='' hook_url='' hook_base='' mcp_auth='' hook_auth=''
   while [ $# -gt 0 ]; do
     case $1 in
     --mcp-config)
@@ -96,7 +107,8 @@ auth)
       shift
       ;;
     --settings)
-      hook_url=$(printf '%s' "$2" | sed -E 's/.*"url":"([^"]*)".*/\1/')
+      hook_base=$(printf '%s' "$2" | sed -E 's#.*"url":"(http://[^/"]*)/hooks/.*#\1#')
+      hook_url=$hook_base/hooks/pre-tool-use
       hook_auth=$(printf '%s' "$2" | sed -E 's/.*"Authorization":"([^"]*)".*/\1/')
       shift
       ;;
@@ -108,11 +120,22 @@ auth)
     curl -sf --max-time "${4:-600}" -H 'Content-Type: application/json' -H "Authorization: $2" \
       --data "$3" "$1"
   }
+  # Asks the Stop hook about REPLY (JSON-escaped): stop REPLY ACTIVE. Prints the response body.
+  stop() {
+    post "$hook_base/hooks/stop" "$hook_auth" "{\"hook_event_name\":\"Stop\",\"stop_hook_active\":$2,\"last_assistant_message\":\"$1\"}" 30
+  }
   echo $$ >"$home/pid"
   # stream-json in and out: one user record per line, one turn per record.
   while IFS= read -r line; do
     text=$(printf '%s' "$line" | sed -E 's/.*"content":"(([^"\\]|\\.)*)".*/\1/')
+    context=$(post "$hook_base/hooks/user-prompt-submit" "$hook_auth" "{\"hook_event_name\":\"UserPromptSubmit\",\"prompt\":\"\"}" 30 || true)
     case $text in
+    'context?')
+      case $context in
+      *app_ui*) text="context: the app asked for views" ;;
+      *) text="context: none" ;;
+      esac
+      ;;
     *envcheck*) text="api-key:${ANTHROPIC_API_KEY:+reached} token:${ANTHROPIC_AUTH_TOKEN:+reached}" ;;
     *whereami*) text="cwd=$(pwd -P) FM_HOME=${FM_HOME:-unset}" ;;
     stuck:*)
@@ -158,6 +181,40 @@ auth)
       continue
     fi
     case $text in
+    list:* | stubborn:*)
+      # The reply as Markdown, and as JSON with its line breaks escaped.
+      items=${text#*: }
+      reply=$(printf '%s' "$items" | sed -E 's/, */\\n- /g')
+      reply="Open items:\\n- $reply"
+      echo '{"type":"stream_event","event":{"type":"message_start","message":{"role":"assistant","content":[]}}}'
+      # printf, not echo: the reply's \n escapes must reach the app as written.
+      printf '%s\n' "{\"type\":\"stream_event\",\"event\":{\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"$reply\"}}}"
+      final=$reply
+      if stop "$reply" false | grep -q additionalContext; then
+        case $text in
+        list:*)
+          spec="{\"root\":\"card\",\"elements\":{\"card\":{\"type\":\"Card\",\"props\":{\"title\":\"Open items\"},\"children\":[\"table\",\"go\"]},\"table\":{\"type\":\"Table\",\"props\":{\"columns\":[\"Item\"],\"rows\":[[\"$(printf '%s' "$items" | sed -E 's/, */\"],[\"/g')\"]]},\"children\":[]},\"go\":{\"type\":\"Button\",\"props\":{\"label\":\"Start on the first\"},\"on\":{\"press\":{\"action\":\"submit\",\"params\":{\"start\":\"first\"}}},\"children\":[]}}}"
+          post "$mcp_url" "$mcp_auth" "{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"tools/call\",\"params\":{\"name\":\"app_ui\",\"arguments\":$spec}}" >/dev/null
+          echo "{\"type\":\"assistant\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"tool_use\",\"id\":\"toolu_fake_view\",\"name\":\"mcp__velvet-hammer__app_ui\",\"input\":$spec}]},\"parent_tool_use_id\":null}"
+          echo '{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_fake_view","content":"The view is shown."}]},"parent_tool_use_id":null}'
+          final="Shown above."
+          echo '{"type":"stream_event","event":{"type":"message_start","message":{"role":"assistant","content":[]}}}'
+          echo '{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Shown above."}}}'
+          stop "$final" true >/dev/null
+          ;;
+        stubborn:*)
+          final="Left as text."
+          if stop "$reply" false | grep -q additionalContext; then
+            final="looped"
+          fi
+          echo '{"type":"stream_event","event":{"type":"message_start","message":{"role":"assistant","content":[]}}}'
+          echo "{\"type\":\"stream_event\",\"event\":{\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"$final\"}}}"
+          ;;
+        esac
+      fi
+      printf '%s\n' "{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"result\":\"$final\"}"
+      continue
+      ;;
     show:* | shell:*)
       case $text in
       show:*)
