@@ -37,6 +37,7 @@ for scene in chat replied empty peek signed-out signing-in signed-in expired cli
   visuals-settings visuals-enforced visuals-capped rules-settings rules-merge-ask rules-project-ask \
   find find-stepped find-none history link-copied link-opened link-context link-missing \
   settings settings-clear menu-windows menu-linux \
+  reminders-list reminder-fired reminder-snooze reminder-settings reminder-link-opened \
   mates-none mates-listed mate-idle mate-working mate-stopped mate-mismatch mate-peek \
   add-mate-scope add-mate-projects add-mate-name add-mate-runtime add-mate-confirm add-mate-created add-mate-refused \
   mate-retire-confirm mate-retire-refused mate-message mate-replied mate-escalation mate-escalation-answered \
@@ -481,6 +482,48 @@ check link-missing.json yes 'what did ⚠ Message not found say?'
 check link-missing.json yes ': message not found. No message in this chat has this link.'
 check open-link-opened.json yes '"text": "Reply 5: nothing new."'
 check open-link-faded.json yes '"text": "Reply 5: nothing new."'
+# Reminders on a fixed clock: the page with each form set, two come due (one overdue) in the
+# banner and For you to do, the snooze menu, and the settings with what each keyword means now.
+check chat.json yes '"key": "reminders"'
+check chat.json yes '"text": "none set"'
+check chat.json no  '"key": "reminder-banner"'
+check reminders-list.json yes '"key": "reminders-page"'
+check reminders-list.json yes '"key": "reminders-coming"'
+check reminders-list.json yes '"key": "reminders-later"'
+check reminders-list.json yes '"text": "Today, 2:50 PM"'
+check reminders-list.json yes '"text": "Today, 5:30 PM"'
+check reminders-list.json yes '"text": "Tomorrow, 9:00 AM"'
+check reminders-list.json yes '"text": "Monday, Nov 16, 9:00 AM"'
+check reminders-list.json yes '"text": "5 coming up · 2 later"'
+check reminders-list.json no  '"key": "reminder-banner"'
+check reminder-fired.json yes '"key": "reminder-banner"'
+check reminder-fired.json yes '"text": "Stretch"'
+check reminder-fired.json yes '"text": "Set Today, 2:30 PM · due Today, 2:32 PM"'
+check reminder-fired.json yes '"key": "reminder-banner-more"'
+check reminder-fired.json yes '"key": "reminder-1"'
+check reminder-fired.json yes 'Reminder · overdue · Set Today, 9:00 AM · due Today, 10:00 AM'
+check reminder-fired.json yes '"key": "panel-1-done"'
+check reminder-fired.json yes '"text": "2 due · 1 coming up · 1 later"'
+check reminder-fired.json no  '"key": "banner-2-snooze-menu"'
+check reminder-snooze.json yes '"key": "banner-2-snooze-menu"'
+check reminder-snooze.json yes '"key": "banner-2-snooze-10m"'
+check reminder-snooze.json yes '"key": "banner-2-snooze-tomorrow"'
+check reminder-snooze.json yes '"key": "snooze-amount"'
+check reminder-settings.json yes '"key": "reminder-settings-page"'
+check reminder-settings.json yes '"key": "reminder-setting-evening-up"'
+check reminder-settings.json yes '"text": "6:00 PM"'
+check reminder-settings.json yes '"text": "Monday"'
+check reminder-settings.json yes '→ Today, 5:30 PM'
+check reminder-settings.json yes '→ Monday, Nov 16, 9:00 AM'
+# A reminder links back to the message it was set in, and its settings are a section of Settings.
+check reminder-fired.json yes '"key": "banner-2-message"'
+check reminder-fired.json yes '"key": "panel-1-message"'
+check reminder-fired.json yes '"text": "↪ Set in this message"'
+check reminder-link-opened.json yes '"key": "chat"'
+check reminder-link-opened.json no  '"key": "reminders-page"'
+check reminder-settings.json yes '"key": "reminder-settings-all-settings"'
+check settings.json yes '"key": "reminder-settings"'
+check settings.json yes '"text": "later today by 6:00 PM · mornings 9:00 AM"'
 # Second mates: none yet, five listed in each state, each one's page, a peek at its terminal,
 # the guided add at each step with its outcome and a refusal, a refused retirement, a message
 # and its reply, an escalation answered, work the chief of staff routed, and the add opened from

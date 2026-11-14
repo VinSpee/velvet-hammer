@@ -21,7 +21,11 @@ a tool call shows: a merge, a forced push, a teardown that discards work, a writ
 or a publish is denied or waits for your word (see
 [Firstmate's rules, enforced by hook](docs/firstmate-rules.md)). The chief of staff shows status
 digests, lists, choices and tables as views by default, and a reply of that kind that arrives as
-text is sent back once for a view (see [Visual replies](docs/visual-replies.md)). **For you to do** shows the notes Claude Code adds with the app's `app_note` tool. The
+text is sent back once for a view (see [Visual replies](docs/visual-replies.md)). **For you to do** shows the notes Claude Code adds with the app's `app_note` tool. Telling
+the chief of staff "remind me in 20 minutes", "later today", "tomorrow morning", "in 3 days",
+"next week" or "later" sets a reminder with the app's `app_remind` tool; the app works out the
+time, and when it comes due it shows in a banner, at the top of For you to do and in Notification
+Center where the app may post (see [Reminders](docs/reminders.md)). The
 agents list shows the tasks firstmate has in flight, and selecting one shows that crewmate's
 terminal. The **Projects** list shows the projects in firstmate's records, and **Add project**
 starts a guided conversation in which the chief of staff adds one with firstmate's own procedure;
@@ -46,6 +50,8 @@ The window has three columns, and every setting is in **Settings** (see
   transcript in place of the chat; **Back to chat** closes it. Under them, **Second mates** lists
   firstmate's second mates with **Add second mate**, and selecting one opens its page; then
   **Projects** lists the projects in firstmate's records with **Add project**.
+  The **Reminders** card at the bottom of the column shows how many are set and opens
+  their page; their settings are the **Reminders** section of Settings.
 - **Chief of staff** (middle): the conversation, with a message field and a **Send** button. A
   line under the heading says what runs it, such as "Claude Code · signed in with your Claude Max
   plan". When Claude Code is not ready, a sign-in screen takes the conversation's place. With no
@@ -78,7 +84,9 @@ The window has three columns, and every setting is in **Settings** (see
   option's exact value. Nothing in a view runs code, reads files or reaches the network. See
   [Views in the chat](docs/json-render.md).
 - **Needs your input** and **For you to do** (right): questions the agents are waiting on, each
-  with answer buttons, and steps only you can take, each with a **Done** button.
+  with answer buttons, and steps only you can take, each with a **Done** button. Reminders that
+  came due come first in For you to do, with **Done**, **Snooze** and **Delete**, and a banner
+  over the middle column shows the latest.
 - **Workers** (a section of Settings): crewmates on models other than Claude, such as
   DeepSeek V4.1 Flash on an opencode Go plan. They run on pi, which the app installs and checks
   itself, with the provider key kept in the macOS keychain; Claude workers stay on Claude Code
@@ -132,8 +140,11 @@ input** and **For you to do**.
   replies, problems). `Stub` simulates it for headless scenes and tests.
 - `src/claude.rs`: `Claude`, the chief of staff on the user's own Claude Code. It runs only the
   `claude` command, as described below.
-- `src/bridge.rs`: the server the chat session's `claude` calls back into: three MCP tools and three
-  hooks, PreToolUse, UserPromptSubmit and Stop (see [docs/extending.md](docs/extending.md)).
+- `src/bridge.rs`: the server the chat session's `claude` calls back into: five MCP tools and
+  three hooks, PreToolUse, UserPromptSubmit and Stop (see [docs/extending.md](docs/extending.md)).
+- `src/reminders.rs`: the captain's reminders: the forms of *when* and the times they stand for,
+  the file they are kept in, and the `app_remind` and `app_reminders` tools' answers (see
+  [docs/reminders.md](docs/reminders.md)).
 - `src/firstmate.rs`: `Firstmate`, the managed firstmate clone. It runs `git` to install the
   clone, compare it with upstream and update it, and never discards a local change. Its `lab`
   module builds scratch git repositories for tests and scenes.
@@ -145,8 +156,8 @@ input** and **For you to do**.
   standing instruction and the stop check with its retry cap (see
   [docs/visual-replies.md](docs/visual-replies.md)).
 - `src/store.rs`: a settings file in the data directory, written whole and shared with the hooks;
-  tool approval, visual replies and firstmate's rules each keep one, and the worker nicknames
-  keep one in the firstmate home's `config/`.
+  tool approval, visual replies, firstmate's rules and reminders each keep one, and the worker
+  nicknames keep one in the firstmate home's `config/`.
 - `src/crew.rs`: worker nicknames, reading a "send a … worker" request and resolving it against
   the nicknames and the models pi lists, and what the hook tells the chief of staff (see
   [docs/worker-providers.md](docs/worker-providers.md)).
@@ -183,7 +194,8 @@ input** and **For you to do**.
 - `src/view.rs`: the Rune view, with the tool-use views in `src/view/tool.rs`, the
   json-render views in `src/view/ui.rs`, the visual-replies and firstmate-rules pages in
   `src/view/policy.rs`, the Settings page and the drawn menu bar in `src/view/settings.rs`,
-  and the Workers page in `src/view/workers.rs`. Every element a
+  the Workers page in `src/view/workers.rs`, and the reminders' banner, card and pages in
+  `src/view/remind.rs`. Every element a
   test or script reaches has a key.
 - `src/main.rs`: the `App` state (workspace, chief of staff, sign-in status, firstmate clone,
   message draft, what the middle column shows), the headless scenes, and the tests.
@@ -254,7 +266,8 @@ are checked first; a rule's deny is final, and its question is asked whatever th
 - **Mode.** **Run without asking** (recommended, and what a fresh install uses): the chief of
   staff will edit files, run commands and use tools without stopping for you, and every tool use
   is still logged. **Auto-allow read-only tools**: `Read`, `Glob`, `Grep`, `LS`, `NotebookRead`,
-  `ToolSearch`, `TodoWrite` and the app's own `app_note` and `app_ui` run at once, and everything else waits
+  `ToolSearch`, `TodoWrite` and the app's own tools (`app_note`, `app_ui`, `app_secondmate`,
+  `app_remind` and `app_reminders`) run at once, and everything else waits
   for you. **Ask every time**: every tool use waits for you.
 - **Rules.** An ordered list of allow, ask and deny rules on top of the mode. A rule names a
   tool (`*` matches any text, so `mcp__github__*` covers a server's tools) and optionally a
@@ -278,6 +291,10 @@ are checked first; a rule's deny is final, and its question is asked whatever th
   (`~/.velvet-hammer`, or `$VELVET_HAMMER_DATA`), which the app moves to
   `tool-activity.jsonl.1` when it passes 1 MB. It is readable by your user only (mode 0600) but
   holds command text as typed, so avoid putting secrets in commands.
+- **Reminders.** The data directory also holds `reminders.json`, which keeps each reminder's
+  text, when it was set, when it is due, whether it has come due and the message it was set in
+  (mode 0600), and
+  `reminder-settings.json`. See [What is stored](docs/reminders.md#what-is-stored).
 - **Where the settings live.** `tool-approval.json` in the same directory (versioned, written to a
   temporary file and renamed into place), never in your Claude settings or a repository.
   Changes apply to a running session at once. If the file cannot be read, every tool use asks
@@ -421,11 +438,17 @@ It writes these files to `OUT_DIR`:
 | `menu-windows.png`, `menu-windows.json` | The menu bar the window draws on Windows, with **File › Settings** open |
 | `menu-linux.png`, `menu-linux.json` | The same on Linux, with **Edit › Preferences** and Find open |
 | `menus-*.json` | `scripts/menus.json`: Settings and Find picked from the menu bar, then Cmd+, |
+| `reminders-list.png`, `reminders-list.json` | The Reminders page with a reminder of each form, on a fixed clock (Friday, 2:30 PM) |
+| `reminder-fired.png`, `reminder-fired.json` | Two reminders due, one overdue: the banner and the top of For you to do |
+| `reminder-snooze.png`, `reminder-snooze.json` | The snooze menu open on the banner |
+| `reminder-settings.png`, `reminder-settings.json` | Reminder settings, with what each keyword means now |
+| `reminder-link-opened.png`, `reminder-link-opened.json` | A due reminder's **Set in this message** pressed: the chat at the captain's message, highlighted |
 | `walk-sent.json` | `scripts/walkthrough.json` after typing and sending a message |
 | `walk-end.png`, `walk-end.json` | The same script after answering an item, finishing the task and opening a peek |
 
-The first four scenes, `approval-settings`, the `formatted` scenes, the `view` scenes and
-`visuals-settings` use the stub; the other `visuals` scenes have the fake `claude` call the prompt
+The first four scenes, `approval-settings`, the `formatted` scenes, the `view` scenes,
+`visuals-settings` and the `reminder` scenes use the stub, the reminder scenes on a fixed clock in
+US Eastern time; the other `visuals` scenes have the fake `claude` call the prompt
 and stop hooks; the `rules` and `workers` scenes run the fake `claude` as firstmate in a scratch clone under
 `/tmp/velvet-hammer`, and the `workers` scenes install a stand-in pi release from a `file://` URL
 there; the `tool`

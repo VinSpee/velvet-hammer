@@ -54,6 +54,13 @@ pub fn settings_page(s: &App, t: Theme, dark: bool) -> El {
             firstmate_summary(&s.firstmate).to_string(),
             Showing::Firstmate,
             t,
+        ))
+        .child(section_card(
+            "reminder-settings",
+            "Reminders",
+            super::remind::settings_summary(s),
+            Showing::ReminderSettings,
+            t,
         ));
     let body = col()
         .key("settings-body")
@@ -64,7 +71,8 @@ pub fn settings_page(s: &App, t: Theme, dark: bool) -> El {
                     "settings-help",
                     "How your chief of staff's tool uses are decided, how its replies are shown, \
                      the workers it can send on other providers, the firstmate rules its hook \
-                     enforces, and the firstmate clone it runs on. Each opens its page.",
+                     enforces, the firstmate clone it runs on, and the times your reminders' \
+                     words stand for. Each opens its page.",
                     t,
                 ))
                 .child(sections),
