@@ -68,10 +68,12 @@ The window has three columns, and every setting is in **Settings** (see
   **Open in your video player**, and any other tool shows its name, its main argument and its
   result folded behind a button. See [Tool calls in the chat](docs/tool-calls.md).
   The chief of staff can also show you a small interactive view, a json-render spec it passes to
-  the app's `app_ui` tool: cards, tables, badges, progress bars, buttons, text fields and
-  checkboxes, drawn natively and filling in as the spec streams. Ticking, typing and adding
-  stay in the view; a submit comes back to the chief of staff as a message from you, with the
-  values you entered. Nothing in a view runs code, reads files or reaches the network. See
+  the app's `app_ui` tool: cards, tables, badges, progress bars, buttons, text fields,
+  checkboxes and choice selectors, drawn natively and filling in as the spec streams. Ticking,
+  typing and adding stay in the view; a submit comes back to the chief of staff as a message from
+  you, with the values you entered. A question with a fixed set of answers, such as yes or no,
+  comes as a selector with the recommended option marked, and your click goes back as that
+  option's exact value. Nothing in a view runs code, reads files or reaches the network. See
   [Views in the chat](docs/json-render.md).
 - **Needs your input** and **For you to do** (right): questions the agents are waiting on, each
   with answer buttons, and steps only you can take, each with a **Done** button.
@@ -381,6 +383,10 @@ It writes these files to `OUT_DIR`:
 | `view-action.png`, `view-action.json` | After **Send the list**: what you did in the chat, and the reply to the submit |
 | `view-unknown.png`, `view-unknown.json` | A view naming a component the catalog lacks, shown as a placeholder |
 | `view-too-large.png`, `view-too-large.json` | A view over the element limit, refused with why |
+| `choice-ask.png`, `choice-ask.json` | A question with a fixed set of answers asked with a Choice: yolo off recommended, yolo on, and an Other field |
+| `choice-answered.png`, `choice-answered.json` | After choosing **yolo off**: the answered Choice, your choice in the chat, and the reply to its exact value |
+| `choice-multiple.png`, `choice-multiple.json` | A Choice that takes several picks, with two picked and an answer of your own typed |
+| `choice-enforced.png`, `choice-enforced.json` | A question the fake asked in prose, sent back by the stop hook, asked again with a Choice and answered |
 | `visuals-settings.png`, `visuals-settings.json` | The Visual replies page: Enforce recommended, the shapes, the instruction and an example |
 | `visuals-enforced.png`, `visuals-enforced.json` | A list the fake sent as text, sent back once by the stop hook and shown as a view |
 | `visuals-capped.png`, `visuals-capped.json` | A reply that ignored the feedback, sent back only once |

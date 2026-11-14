@@ -32,6 +32,7 @@ for scene in chat replied empty peek signed-out signing-in signed-in expired cli
   projects-fresh projects-empty projects-adding projects-listed \
   formatted formatted-all formatted-streaming tool-image tool-image-broken tool-video tool-generic tool-picture \
   view-static view-streaming view-state view-action view-unknown view-too-large \
+  choice-ask choice-answered choice-multiple choice-enforced \
   visuals-settings visuals-enforced visuals-capped rules-settings rules-merge-ask rules-project-ask \
   find find-stepped find-none history link-copied link-opened link-context link-missing \
   settings settings-clear menu-windows menu-linux \
@@ -318,6 +319,27 @@ check view-unknown.json yes '"text": "Unknown component “BarChart”"'
 check view-unknown.json yes '"text": "Monday was the slowest."'
 check view-too-large.json yes 'more than the limit of 200, so it is not shown.'
 check view-too-large.json no  '"key": "tool-1-ui-main"'
+# A question with a fixed set of answers, asked with a Choice: the recommended option marked, the
+# exact value sent and shown as the captain's choice, several picks with their own words, and the
+# stop hook sending a question asked in prose back to be asked with a Choice.
+check choice-ask.json yes '"text": "Merge authority for velvet-hammer is yolo on. Do you want it off?"'
+check choice-ask.json yes '"key": "tool-1-ui-merge-option-0"'
+check choice-ask.json yes '"key": "tool-1-ui-merge-recommended"'
+check choice-ask.json yes '"key": "tool-1-ui-merge-other"'
+check choice-ask.json no  '"key": "tool-1-ui-merge-sent"'
+check choice-answered.json yes '"text": "Chose “yolo off”."'
+check choice-answered.json yes '"key": "tool-1-ui-merge-sent"'
+check choice-answered.json yes 'Thanks. I got the values'
+check choice-answered.json yes 'yolo-off'
+check choice-answered.json no  '"key": "tool-1-ui-merge-other"'
+check choice-multiple.json yes '"key": "tool-1-ui-checks-send"'
+check choice-multiple.json yes '"text": "A changelog entry"'
+check choice-multiple.json no  '"text": "Chose'
+check choice-enforced.json yes 'the reply asks a question with a fixed set of answers.'
+check choice-enforced.json yes '"key": "tool-3-ui-merge-sent"'
+check choice-enforced.json yes '"text": "Chose “yolo off”."'
+check choice-enforced.json yes 'with the option'
+check choice-enforced.json yes 'yolo-off'
 # Visual replies: the settings page, a list sent back once and shown as a view, and a reply that
 # ignored the feedback, sent back only once.
 check settings.json yes '"key": "visuals"'

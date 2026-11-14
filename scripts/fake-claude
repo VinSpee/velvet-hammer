@@ -39,6 +39,10 @@
 # stops again with the same list and `stop_hook_active` unset, then ends with "Left as text.", or
 # with "looped" if the hook sent it back a second time.
 #
+# A message "ask: QUESTION" is answered with QUESTION as text, then the Stop hook is asked about
+# it the same way. If the hook sends it back, the fake asks it with a Choice view (yolo off,
+# recommended, or yolo on) as tool use toolu_fake_choice, and ends with "Pick one above.".
+#
 # A message containing "whereami" is answered with the session's working directory and FM_HOME.
 # After a message "wake: TEXT" and its reply, a second turn nobody asked for says TEXT, the way
 # a firstmate Stop hook wakes an idle session.
@@ -202,6 +206,24 @@ auth)
       continue
     fi
     case $text in
+    ask:*)
+      reply=${text#ask: }
+      final=$reply
+      echo '{"type":"stream_event","event":{"type":"message_start","message":{"role":"assistant","content":[]}}}'
+      echo "{\"type\":\"stream_event\",\"event\":{\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"$reply\"}}}"
+      if stop "$reply" false | grep -q additionalContext; then
+        spec="{\"root\":\"merge\",\"elements\":{\"merge\":{\"type\":\"Choice\",\"props\":{\"question\":\"$reply\",\"options\":[{\"value\":\"yolo-off\",\"label\":\"yolo off\",\"hint\":\"Every merge waits for your word.\"},{\"value\":\"yolo-on\",\"label\":\"yolo on\",\"hint\":\"I merge green pull requests on my own.\"}],\"recommended\":\"yolo-off\"},\"children\":[]}}}"
+        post "$mcp_url" "$mcp_auth" "{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"tools/call\",\"params\":{\"name\":\"app_ui\",\"arguments\":$spec}}" >/dev/null
+        echo "{\"type\":\"assistant\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"tool_use\",\"id\":\"toolu_fake_choice\",\"name\":\"mcp__velvet-hammer__app_ui\",\"input\":$spec}]},\"parent_tool_use_id\":null}"
+        echo '{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_fake_choice","content":"The view is shown."}]},"parent_tool_use_id":null}'
+        final="Pick one above."
+        echo '{"type":"stream_event","event":{"type":"message_start","message":{"role":"assistant","content":[]}}}'
+        echo '{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Pick one above."}}}'
+        stop "$final" true >/dev/null
+      fi
+      printf '%s\n' "{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"result\":\"$final\"}"
+      continue
+      ;;
     list:* | stubborn:*)
       # The reply as Markdown, and as JSON with its line breaks escaped.
       items=${text#*: }

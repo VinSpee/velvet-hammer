@@ -373,7 +373,10 @@ fn mcp(request: &Value, serving: &Serving, on_call: &dyn Fn(Call)) -> Option<Val
         // model learns what was refused or left out.
         "tools/call" if params["name"] == ui::TOOL => Ok(match ui::answer(&params["arguments"]) {
             Ok(text) => {
-                lock(&serving.turn).viewed = true;
+                let mut turn = lock(&serving.turn);
+                turn.viewed = true;
+                turn.asked |= ui::asks(&params["arguments"]);
+                drop(turn);
                 json!({"content": [{"type": "text", "text": text}]})
             }
             Err(problem) => {
