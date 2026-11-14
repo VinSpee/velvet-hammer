@@ -49,6 +49,33 @@ pub(super) fn tool_use(s: &App, i: usize, tool: &ToolUse, t: Theme, dark: bool) 
                         .grow(1.0)
                 })),
         );
+    // Work the chief of staff routed to a second mate: which mate took it.
+    let card = match tool.input["command"]
+        .as_str()
+        .and_then(|command| crate::secondmates::routed_to(command, s.mates.list()))
+    {
+        Some(mate) => {
+            let id = mate.id.clone();
+            card.child(
+                row()
+                    .key(format!("{key}-routed"))
+                    .gap(space::S2)
+                    .center_y()
+                    .child(
+                        text(format!("Routed to second mate {}", mate.id))
+                            .font(type_::LABEL)
+                            .color(t.text),
+                    )
+                    .child(small_button(
+                        &format!("{key}-routed-open"),
+                        "Open",
+                        t,
+                        move |s| s.open_mate(&id),
+                    )),
+            )
+        }
+        None => card,
+    };
     if is_view {
         // The tool's result only says whether the model's spec was accepted; a refusal also
         // shows as the view's own note, so the folded result adds nothing here.
