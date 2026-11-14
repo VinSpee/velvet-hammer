@@ -348,6 +348,20 @@ cargo test                                         # drives taps through Rune's 
 Add `--theme light` to render the light theme. A release build (`cargo build --release`) takes
 the same arguments because the `tooling` feature is on.
 
+## Pipeline validation
+
+Changes go through the [no-mistakes](https://kunchenguid.github.io/no-mistakes/) pipeline, and
+`.no-mistakes.yaml` tells it how to validate this project. Its `commands` fetch dependencies, run
+`cargo test`, lint with `cargo fmt --check` and `cargo clippy -D warnings`, and format with
+`cargo fmt`, each with rustup's proxies first on `PATH` so the pinned toolchain runs instead of
+Homebrew's `rust`. Its `test.instructions` is the runbook the Test step's agent follows: run
+`scripts/verify.sh`, require it to exit zero, and open the rendered scenes the change affects.
+The runbook excludes what cannot run in the pipeline: a real Claude sign-in, the windowed app,
+and a real firstmate home that pushes or merges.
+
+no-mistakes reads `commands` and `test.instructions` from `main`, not from the pushed branch, so
+an edit to them applies to the runs after it merges.
+
 ## License
 
 Velvet Hammer is released under the [MIT License](LICENSE).
