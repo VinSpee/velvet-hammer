@@ -16,8 +16,8 @@ use crate::model::{Action, Agent, Author, Item, ItemKind, Message, Plan, Status}
 use crate::projects::Project;
 
 mod policy;
-mod settings;
 mod remind;
+mod settings;
 mod tool;
 mod ui;
 use policy::{rules_page, visuals_page};
@@ -150,15 +150,14 @@ fn agents(s: &App, t: Theme, dark: bool) -> El {
     if let Some(projects) = &s.projects {
         list = list.child(project_list(s, projects, t, dark));
     }
-    list.child(el().grow(1.0))
-        .child(nav_card(
-            s,
-            "reminders",
-            "Reminders",
-            remind::summary(s),
-            &[Showing::Reminders, Showing::ReminderSettings],
-            t,
-        ))
+    list.child(el().grow(1.0)).child(nav_card(
+        s,
+        "reminders",
+        "Reminders",
+        remind::summary(s),
+        &[Showing::Reminders, Showing::ReminderSettings],
+        t,
+    ))
 }
 
 /// A card at the bottom of the agents column that opens the first of `pages`, and is
