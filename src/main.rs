@@ -1204,11 +1204,6 @@ fn fake_in_firstmate(lab: &Lab, install: bool) -> App {
     app
 }
 
-/// Lets the fake `claude` finish the turn a "slow:" message holds open.
-fn release_slow_turn(home: &std::path::Path) {
-    std::fs::write(home.join("release"), "").expect("release file");
-}
-
 fn settled(s: &App) -> bool {
     s.status != Status::Checking
 }
@@ -2578,6 +2573,11 @@ mod tests {
     use super::*;
     use crate::model::Item;
     use rune::{Env, Runtime};
+
+    /// Lets the fake `claude` finish the turn a "slow:" message holds open.
+    fn release_slow_turn(home: &std::path::Path) {
+        std::fs::write(home.join("release"), "").expect("release file");
+    }
 
     fn runtime() -> Runtime<App> {
         runtime_with(stub())
