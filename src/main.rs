@@ -759,6 +759,7 @@ impl App {
     pub fn finish_adding(&mut self) {
         self.adding = false;
         self.pick_problem = None;
+        self.repos.query.text.clear();
         self.repos.hide();
     }
 
@@ -783,7 +784,7 @@ impl App {
         let Some(repo) = self.repos.repo(index).cloned() else {
             return;
         };
-        self.repos.query.text = repo.full_name();
+        self.repos.query.text.clear();
         self.repos.hide();
         self.draft.text = repo.url();
     }
@@ -2694,11 +2695,8 @@ mod tests {
         key(&mut rt, rune::Key::Enter);
         assert_eq!(rt.state.draft.text, "https://github.com/acme/payments-api");
         assert!(!rt.state.repos.open);
-        assert_eq!(rt.state.repos.query.text, "acme/payments-api");
-        assert_eq!(rt.state.ws.chat.len(), sent);
-        // A second Escape, with the list closed, clears the query.
-        key(&mut rt, rune::Key::Escape);
         assert!(rt.state.repos.query.text.is_empty());
+        assert_eq!(rt.state.ws.chat.len(), sent);
     }
 
     #[test]
