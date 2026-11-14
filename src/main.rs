@@ -3697,7 +3697,11 @@ mod tests {
         let lab = Lab::new();
         let mut app = mates_app(&lab);
         app.open_mate("docs");
-        for text in ["--key abc hello", "--fire-and-forget now", "--resolve-key=k go"] {
+        for text in [
+            "--key abc hello",
+            "--fire-and-forget now",
+            "--resolve-key=k go",
+        ] {
             app.mates.draft("docs").text = text.into();
             app.send_to_mate("docs");
             assert_eq!(app.mates.draft("docs").text, text);
