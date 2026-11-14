@@ -34,7 +34,11 @@ for scene in chat replied empty peek signed-out signing-in signed-in expired cli
   view-static view-streaming view-state view-action view-unknown view-too-large \
   visuals-settings visuals-enforced visuals-capped rules-settings rules-merge-ask rules-project-ask \
   find find-stepped find-none history link-copied link-opened link-context link-missing \
-  settings settings-clear menu-windows menu-linux; do
+  settings settings-clear menu-windows menu-linux \
+  mates-none mates-listed mate-idle mate-working mate-stopped mate-mismatch mate-peek \
+  add-mate-scope add-mate-projects add-mate-name add-mate-runtime add-mate-confirm add-mate-created add-mate-refused \
+  mate-retire-confirm mate-retire-refused mate-message mate-replied mate-escalation mate-escalation-answered \
+  mate-routed mate-from-chat; do
   headless --scene "$scene" --snap "$out/$scene.png"
   headless --scene "$scene" --tree "$out/$scene.json"
 done
@@ -407,6 +411,78 @@ check link-missing.json yes 'what did ⚠ Message not found say?'
 check link-missing.json yes ': message not found. No message in this chat has this link.'
 check open-link-opened.json yes '"text": "Reply 5: nothing new."'
 check open-link-faded.json yes '"text": "Reply 5: nothing new."'
+# Second mates: none yet, five listed in each state, each one's page, a peek at its terminal,
+# the guided add at each step with its outcome and a refusal, a refused retirement, a message
+# and its reply, an escalation answered, work the chief of staff routed, and the add opened from
+# the chat.
+check mates-none.json yes '"key": "mates-none"'
+check mates-none.json yes '"key": "add-mate"'
+check mates-listed.json yes '"key": "mate-docs"'
+check mates-listed.json yes '"text": "running · idle"'
+check mates-listed.json yes '"text": "running · working"'
+check mates-listed.json yes '"text": "stopped · idle"'
+check mates-listed.json yes '"text": "running · waiting on you"'
+check mates-listed.json yes '"key": "mate-web-mismatch"'
+check mates-listed.json no  '"key": "mate-docs-mismatch"'
+check mates-listed.json yes '"key": "hold-support-refund-window"'
+check mates-listed.json yes '"key": "answer-support-refund-window"'
+check mate-idle.json yes '"key": "mate-page"'
+check mate-idle.json yes 'Scope: documentation site work: pages, examples and the docs build'
+check mate-idle.json yes '"key": "mate-interrupt"'
+check mate-idle.json yes '"key": "mate-relaunch"'
+check mate-idle.json yes '"key": "mate-retire"'
+check mate-idle.json yes '"key": "mate-children-none"'
+check mate-idle.json yes 'The docs build passes on main; the last run took 41 seconds.'
+check mate-idle.json yes '"key": "mate-edit-note"'
+check mate-working.json yes '"key": "mate-child-invoice-retries"'
+check mate-working.json yes '"text": "working · running the retry tests"'
+check mate-working.json yes '"key": "mate-child-billing-dashboard"'
+check mate-stopped.json yes '"text": "Session: stopped · idle"'
+check mate-stopped.json yes '"key": "mate-start"'
+check mate-stopped.json no  '"key": "mate-interrupt"'
+check mate-mismatch.json yes '"key": "mate-mismatch"'
+check mate-mismatch.json yes 'invalid home: not a seeded secondmate home'
+check mate-peek.json yes '"text": "Peeking at second mate docs"'
+check mate-peek.json yes 'no routed work; waiting quietly'
+check mate-peek.json yes '"text": "Back to its page"'
+check add-mate-scope.json yes '"key": "add-mate-scope"'
+check add-mate-scope.json yes '"text": "Step 1 of 4"'
+check add-mate-projects.json yes '"key": "add-mate-project-site"'
+check add-mate-projects.json yes 'local-only projects stay with the main firstmate'
+check add-mate-projects.json yes '"key": "add-mate-no-projects"'
+check add-mate-name.json yes '"key": "add-mate-name"'
+check add-mate-name.json yes '/data/secondmates/site.'
+check add-mate-runtime.json yes '"key": "add-mate-runtime-0"'
+check add-mate-runtime.json yes "codex (firstmate's default for second mates)"
+check add-mate-runtime.json yes '"key": "add-mate-runtime-1"'
+check add-mate-confirm.json yes '"key": "add-mate-yes"'
+check add-mate-confirm.json yes '"text": "Yes, create payments"'
+check add-mate-confirm.json yes "1. Run firstmate's bin/fm-home-seed.sh payments"
+check add-mate-confirm.json yes 'bin/fm-spawn.sh payments --secondmate --harness claude'
+check add-mate-confirm.json yes 'Nothing remote is created, pushed or published'
+check add-mate-created.json yes '"key": "mate-payments"'
+check add-mate-created.json yes 'Firstmate created payments with its home at'
+check add-mate-created.json no  '"key": "mate-mismatch"'
+check add-mate-refused.json yes '"key": "add-mate-problem"'
+check add-mate-refused.json yes 'Firstmate refused to create payments'
+check add-mate-refused.json yes 'is not initialized for no-mistakes; refusing to mutate preexisting clone'
+check mate-retire-confirm.json yes '"key": "mate-confirm"'
+check mate-retire-confirm.json yes '"text": "Retire billing?"'
+check mate-retire-confirm.json yes 'Velvet Hammer never forces a retirement'
+check mate-retire-refused.json yes 'Firstmate refused to retire billing, and nothing was changed.'
+check mate-retire-refused.json yes 'REFUSED: secondmate billing still has in-flight work'
+check mate-retire-refused.json no  'WARNING: watcher'
+check mate-message.json yes '"text": "Is the search page live yet?"'
+check mate-message.json yes "Delivered to docs's inbox."
+check mate-replied.json yes 'waits for its pull request to merge.'
+check mate-replied.json no  '**built**'
+check mate-escalation.json yes '"key": "mate-hold-refund-window"'
+check mate-escalation.json yes '"key": "mate-answering"'
+check mate-escalation-answered.json yes "The captain's answer to your captain hold refund-window: 30 days, counted from delivery."
+check mate-escalation-answered.json no  '"key": "mate-answering"'
+check mate-routed.json yes '"text": "Routed to second mate docs"'
+check mate-from-chat.json yes '"key": "add-mate-page"'
+check mate-from-chat.json yes 'the billing service, its invoices and payment retries'
 # The scripted run.
 check walk-sent.json yes '"text": "Ship it when CI is green."'
 check walk-sent.json yes 'Got it:'

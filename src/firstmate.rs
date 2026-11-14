@@ -497,6 +497,9 @@ pub mod lab {
                  # Stands in for firstmate's bearings snapshot: prints what a test put in the home.\n\
                  cat \"$FM_HOME/data/bearings.json\" 2>/dev/null || echo '{\"schema\":\"fm-bearings.v1\"}'\n",
             );
+            for (file, text) in SECONDMATE_SCRIPTS {
+                lab.script(file, &text.replacen("\n", STAND_IN, 1));
+            }
             lab.release("AGENTS.md", "# Firstmate\n\nYou are the first mate.\n");
             lab
         }
@@ -549,6 +552,90 @@ pub mod lab {
             std::fs::write(data.join("projects.md"), text).expect("write registry");
         }
 
+        /// Firstmate's operational home in this lab.
+        pub fn home(&self) -> PathBuf {
+            self.data.join("home")
+        }
+
+        /// A second mate registered in this lab's home, as `bin/fm-home-seed.sh` registers one:
+        /// its registry line, and its own home, beside the app's, with the identity marker and
+        /// its charter. `projects` may be empty.
+        pub fn second_mate(&self, id: &str, charter: &str, scope: &str, projects: &[&str]) {
+            let mate = self.data.join("secondmates").join(id);
+            std::fs::create_dir_all(mate.join("data")).expect("mkdir");
+            std::fs::create_dir_all(mate.join("state")).expect("mkdir");
+            std::fs::write(mate.join(".fm-secondmate-home"), format!("{id}\n")).expect("marker");
+            std::fs::write(mate.join("data/charter.md"), format!("{charter}\n")).expect("charter");
+            let data = self.home().join("data");
+            std::fs::create_dir_all(&data).expect("mkdir");
+            let line = format!(
+                "- {id} - {charter} (home: {}; scope: {scope}; projects: {}; added 2026-11-13)\n",
+                mate.display(),
+                projects.join(", ")
+            );
+            let registry = data.join("secondmates.md");
+            let mut text = std::fs::read_to_string(&registry).unwrap_or_default();
+            text.push_str(&line);
+            std::fs::write(registry, text).expect("write registry");
+        }
+
+        /// Mate `id` has a task in flight in its own home, which retirement refuses over.
+        pub fn mate_child(&self, id: &str, child: &str) {
+            let state = self.data.join("secondmates").join(id).join("state");
+            std::fs::create_dir_all(&state).expect("mkdir");
+            std::fs::write(state.join(format!("{child}.meta")), "kind=ship\n").expect("meta");
+        }
+
+        /// Mate `id`, or one of its home's scripts, appends `line` to its parent channel.
+        pub fn mate_says(&self, id: &str, line: &str) {
+            let state = self.home().join("state");
+            std::fs::create_dir_all(&state).expect("mkdir");
+            let path = state.join(format!("{id}.status"));
+            let mut text = std::fs::read_to_string(&path).unwrap_or_default();
+            text.push_str(line);
+            text.push('\n');
+            std::fs::write(path, text).expect("write status");
+        }
+
+        /// A message firstmate delivered to mate `id`'s inbox, in `bin/fm-send.sh`'s record
+        /// format, read by the mate when `read` is set.
+        pub fn mate_inbox(&self, id: &str, seq: u32, at: &str, corr: &str, text: &str, read: bool) {
+            let mut dir = self.home().join("state").join(format!("{id}.inbox"));
+            if read {
+                dir = dir.join("handled");
+            }
+            std::fs::create_dir_all(&dir).expect("mkdir");
+            std::fs::write(
+                dir.join(format!("{seq:03}.msg")),
+                format!(
+                    "schema=fm-task-inbox.v1\nat={at}\nbody-terminator=1\n--\n\
+                     [fm-from-firstmate]\u{2063}corr={corr} {text}\n"
+                ),
+            )
+            .expect("write inbox record");
+        }
+
+        /// The calls the lab's stand-ins for firstmate's scripts received, one per line.
+        #[cfg(test)]
+        pub fn calls(&self) -> String {
+            std::fs::read_to_string(self.home().join("data/calls.log")).unwrap_or_default()
+        }
+
+        /// The next run of firstmate script `script` (such as `fm-home-seed.sh`) refuses with
+        /// `words` on its standard error.
+        pub fn refuse(&self, script: &str, words: &str) {
+            let data = self.home().join("data");
+            std::fs::create_dir_all(&data).expect("mkdir");
+            std::fs::write(data.join(format!("refuse-{script}.txt")), words).expect("refusal");
+        }
+
+        /// What firstmate's `bin/fm-harness.sh <mode>` prints from now on.
+        pub fn harness(&self, mode: &str, name: &str) {
+            let data = self.home().join("data");
+            std::fs::create_dir_all(&data).expect("mkdir");
+            std::fs::write(data.join(format!("harness-{mode}.txt")), name).expect("harness");
+        }
+
         /// Upstream publishes `text` as `file`.
         pub fn release(&self, file: &str, text: &str) {
             std::fs::write(self.upstream.join(file), text).expect("write upstream file");
@@ -562,6 +649,79 @@ pub mod lab {
         }
     }
 }
+
+/// The start of each stand-in below, after its first line: it logs the call, then refuses if a
+/// test said to.
+const STAND_IN: &str = "\n\
+    mkdir -p \"$FM_HOME/data\"\n\
+    echo \"$(basename \"$0\") $*\" >> \"$FM_HOME/data/calls.log\"\n\
+    refusal=\"$FM_HOME/data/refuse-$(basename \"$0\").txt\"\n\
+    if [ -f \"$refusal\" ]; then cat \"$refusal\" >&2; rm -f \"$refusal\"; exit 1; fi\n";
+
+/// Stand-ins for the firstmate scripts the app runs on second mates. Each logs its call to
+/// `data/calls.log` and refuses with `data/refuse-<script>.txt` when a test put one there.
+/// Otherwise each prints and writes what the real script did in a scratch home (firstmate
+/// 427056c4): the registry line `bin/fm-home-seed.sh` wrote, the inbox record
+/// `bin/fm-send.sh` wrote, and the refusal `bin/fm-teardown.sh` printed for a mate with a task
+/// in flight.
+const SECONDMATE_SCRIPTS: [(&str, &str); 6] = [
+    (
+        "bin/fm-home-seed.sh",
+        r#"#!/bin/sh
+id=$1 home=$2; shift 2
+projects=$(printf '%s' "$*" | sed 's/--no-projects//; s/^ *//; s/ /, /g')
+mkdir -p "$home/data" "$home/state"
+printf '%s\n' "$FM_SECONDMATE_CHARTER" > "$home/data/charter.md"
+printf '%s\n' "$id" > "$home/.fm-secondmate-home"
+printf -- '- %s - %s (home: %s; scope: %s; projects: %s; added 2026-11-13)\n' "$id" "$FM_SECONDMATE_CHARTER" "$home" "$FM_SECONDMATE_CHARTER" "$projects" >> "$FM_HOME/data/secondmates.md"
+echo "home=$home"
+"#,
+    ),
+    (
+        "bin/fm-spawn.sh",
+        r#"#!/bin/sh
+echo "spawned $1 kind=secondmate"
+"#,
+    ),
+    (
+        "bin/fm-control.sh",
+        r#"#!/bin/sh
+echo "$2: ok"
+"#,
+    ),
+    (
+        "bin/fm-teardown.sh",
+        r#"#!/bin/sh
+home=$(sed -n "s/^- $1 - .*(home: \([^;]*\);.*/\1/p" "$FM_HOME/data/secondmates.md")
+for meta in "$home"/state/*.meta; do
+  [ -e "$meta" ] || continue
+  echo "WARNING: watcher still down (same stale episode; last beat: never, grace 300s) - full banner already printed this episode." >&2
+  echo "REFUSED: secondmate $1 still has in-flight work in $home/state." >&2
+  echo "Found $(basename "$meta"). Let that home finish or explicitly discard with --force." >&2
+  exit 1
+done
+grep -v "^- $1 - " "$FM_HOME/data/secondmates.md" > "$FM_HOME/data/secondmates.md.new"
+mv "$FM_HOME/data/secondmates.md.new" "$FM_HOME/data/secondmates.md"
+rm -rf "$home"
+"#,
+    ),
+    (
+        "bin/fm-send.sh",
+        r#"#!/bin/sh
+inbox="$FM_HOME/state/$1.inbox"
+mkdir -p "$inbox"
+seq=$(( $(ls "$inbox" "$inbox/handled" 2>/dev/null | grep -c '\.msg$') + 1 ))
+corr=$(printf '%016x' "$seq")
+printf 'schema=fm-task-inbox.v1\nat=%s\nbody-terminator=1\n--\n[fm-from-firstmate]\342\201\243corr=%s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$corr" "$2" > "$inbox/$(printf '%03d' "$seq").msg"
+"#,
+    ),
+    (
+        "bin/fm-harness.sh",
+        r#"#!/bin/sh
+cat "$FM_HOME/data/harness-$1.txt" 2>/dev/null || echo claude
+"#,
+    ),
+];
 
 #[cfg(test)]
 mod tests {

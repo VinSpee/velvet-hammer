@@ -26,7 +26,11 @@ agents list shows the tasks firstmate has in flight, and selecting one shows tha
 terminal. The **Projects** list shows the projects in firstmate's records, and **Add project**
 starts a guided conversation in which the chief of staff adds one with firstmate's own procedure;
 with no projects yet, the chat opens with a prompt to add the first (see
-[Projects](docs/firstmate.md#projects)). [Where the integration stands](docs/firstmate.md#where-the-integration-stands) lists
+[Projects](docs/firstmate.md#projects)). **Second mates** lists firstmate's second mates with
+how each one stands; **Add second mate** walks you through creating one and runs firstmate's
+own scripts after your yes, and each mate's page starts, interrupts, relaunches or retires it,
+peeks at its terminal, and holds a conversation with it and the questions it escalated (see
+[Second mates](docs/firstmate.md#second-mates)). [Where the integration stands](docs/firstmate.md#where-the-integration-stands) lists
 what works end to end and what is not verified. A stub with sample data stands in for the agent layer in headless scenes and tests. The interface
 and code will change.
 
@@ -39,8 +43,9 @@ The window has three columns, and every setting is in **Settings** (see
 [Settings and menus](#settings-and-menus)):
 
 - **Agents** (left): the subagents the chief of staff manages. Selecting one opens a peek at its
-  transcript in place of the chat; **Back to chat** closes it. Under them, **Projects** lists the
-  projects in firstmate's records with **Add project**.
+  transcript in place of the chat; **Back to chat** closes it. Under them, **Second mates** lists
+  firstmate's second mates with **Add second mate**, and selecting one opens its page; then
+  **Projects** lists the projects in firstmate's records with **Add project**.
 - **Chief of staff** (middle): the conversation, with a message field and a **Send** button. A
   line under the heading says what runs it, such as "Claude Code · signed in with your Claude Max
   plan". When Claude Code is not ready, a sign-in screen takes the conversation's place. With no
@@ -117,7 +122,7 @@ input** and **For you to do**.
   replies, problems). `Stub` simulates it for headless scenes and tests.
 - `src/claude.rs`: `Claude`, the chief of staff on the user's own Claude Code. It runs only the
   `claude` command, as described below.
-- `src/bridge.rs`: the server the chat session's `claude` calls back into: two MCP tools and three
+- `src/bridge.rs`: the server the chat session's `claude` calls back into: three MCP tools and three
   hooks, PreToolUse, UserPromptSubmit and Stop (see [docs/extending.md](docs/extending.md)).
 - `src/firstmate.rs`: `Firstmate`, the managed firstmate clone. It runs `git` to install the
   clone, compare it with upstream and update it, and never discards a local change. Its `lab`
@@ -134,6 +139,9 @@ input** and **For you to do**.
 - `src/projects.rs`: the projects in firstmate's records (its registry `data/projects.md` and
   the clones under `projects/`), re-read every two seconds, and the system folder dialog the add
   flow uses.
+- `src/secondmates.rs`: firstmate's second mates: the registry and snapshot read into one record per
+  mate, the guided add, the actions that run firstmate's scripts, and each mate's conversation
+  (see [docs/firstmate.md](docs/firstmate.md#second-mates)). Its page is in `src/view/mates.rs`.
 - `src/bearings.rs`: what waits on the captain, read from firstmate's records by running its
   `bin/fm-bearings-snapshot.sh --json` whenever the records change.
 - `scripts/fake-claude`: a stand-in for `claude` that speaks the same protocol without an account.
@@ -393,7 +401,10 @@ scenes have the fake `claude` use Read and Bash on the files in `scripts/fixture
 they need no Claude account; each waits for the fake's real processes before rendering. The
 firstmate and projects scenes run `git` on a scratch upstream repository under `target/`, so
 they need no network; the projects scenes write the registry firstmate's procedure would write,
-because the fake `claude` cannot run that procedure. The
+because the fake `claude` cannot run that procedure. The `mates`, `mate` and `add-mate` scenes run the fake
+`claude` as firstmate in a scratch home under `/tmp/velvet-hammer`, with stand-ins of
+firstmate's second-mate scripts that write what the real ones did (see
+[Second mates](docs/firstmate.md#second-mates)). The
 walkthrough runs on the stub's `chat` scene. The `.json` files are Rune element trees. The script then checks them for the keys and text each
 state must or must not have (for example `needs-input`, `input-1`, `for-you-empty`, `peek`) and
 exits non-zero if any check fails.
