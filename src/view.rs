@@ -917,7 +917,15 @@ fn chat(s: &App, plan: &Plan, t: Theme, dark: bool) -> El {
                 .border(1.0, t.card_border)
                 .child(input),
         )
-        .child(button("send", "Send", t, |s| s.send()));
+        .child({
+            let send = button("send", "Send", t, |s| s.send());
+            if s.adding_attachments() {
+                send.fill(t.control_off)
+                    .label("Send, once the attachments are added")
+            } else {
+                send
+            }
+        });
     let mut header = col()
         .gap(2.0)
         .child(heading("Chief of staff", t))

@@ -31,7 +31,7 @@ for scene in chat replied empty peek signed-out signing-in signed-in expired cli
   firstmate-modified firstmate-blocked firstmate-session firstmate-panels firstmate-answering firstmate-crew \
   projects-fresh projects-empty projects-adding projects-listed \
   formatted formatted-all formatted-streaming tool-image tool-image-broken tool-video tool-generic tool-picture \
-  attach-draft attach-sent attach-too-large attach-drop \
+  attach-draft attach-sent attach-too-large attach-adding attach-drop \
   view-static view-streaming view-state view-action view-unknown view-too-large \
   visuals-settings visuals-enforced visuals-capped rules-settings rules-merge-ask rules-project-ask; do
   headless --scene "$scene" --snap "$out/$scene.png"
@@ -341,6 +341,11 @@ check attach-sent.json no  '"key": "attachments"'
 check attach-too-large.json yes '"key": "attach-problem"'
 check attach-too-large.json yes 'is 200 MB. Attachments can be up to 50 MB each.'
 check attach-too-large.json no  '"key": "attachment-1"'
+check attach-adding.json yes '"key": "adding-0-status"'
+check attach-adding.json yes '"text": "Adding…"'
+check attach-adding.json yes '"key": "adding-1-problem"'
+check attach-adding.json yes '"label": "Remove locked.pdf"'
+check attach-adding.json yes '"label": "Send, once the attachments are added"'
 check attach-drop.json yes '"key": "attach-drop-hint"'
 # The scripted run.
 check walk-sent.json yes '"text": "Ship it when CI is green."'

@@ -68,8 +68,23 @@ impl Attachment {
     }
 }
 
-/// Copies the file at `source` into `data`'s attachments folder.
-pub fn file(data: &Path, source: &Path) -> Result<Attachment, String> {
+/// What a draft's attachment is made from, while its copy is being made.
+pub enum Origin {
+    File(PathBuf),
+    Png(Vec<u8>),
+}
+
+/// An attachment of the draft whose copy is not made yet, or could not be.
+pub struct Pending {
+    pub id: u64,
+    pub name: String,
+    /// Why the copy could not be made; `None` while it is being made.
+    pub failed: Option<String>,
+}
+
+/// The name of the file at `source`, once it is known to be a file within the size cap. This
+/// reads no more than the file's metadata, so it is quick enough to run before a copy starts.
+pub fn check(source: &Path) -> Result<String, String> {
     let name = source
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
@@ -85,6 +100,12 @@ pub fn file(data: &Path, source: &Path) -> Result<Attachment, String> {
         return Err(format!("\u{201c}{name}\u{201d} is not a file."));
     }
     within_cap(&name, meta.len())?;
+    Ok(name)
+}
+
+/// Copies the file at `source` into `data`'s attachments folder.
+pub fn file(data: &Path, source: &Path) -> Result<Attachment, String> {
+    let name = check(source)?;
     let path = slot(data, &name)?;
     let bytes = fs::copy(source, &path)
         .map_err(|e| format!("\u{201c}{name}\u{201d} could not be copied: {e}."))?;
@@ -139,7 +160,7 @@ pub fn size(bytes: u64) -> String {
     }
 }
 
-fn within_cap(name: &str, bytes: u64) -> Result<(), String> {
+pub fn within_cap(name: &str, bytes: u64) -> Result<(), String> {
     if bytes > MAX_BYTES {
         return Err(format!(
             "\u{201c}{name}\u{201d} is {}. Attachments can be up to {} each.",

@@ -61,7 +61,8 @@ The window has three columns:
   You can attach images, videos and other files to a message by pasting them (a screenshot, or
   files copied in Finder) or dropping them on the chat. Each shows as a chip with a thumbnail, a
   first frame or the file's name and size, and a **×** to remove it before sending. The app keeps
-  its own copy in its data directory; an image goes to the chief of staff as image content and
+  its own copy in its data directory, made in the background (the chip reads "Adding…" and
+  **Send** waits until it is done); an image goes to the chief of staff as image content and
   every file as its path. A file can be up to 50 MB. See [Attachments](docs/attachments.md).
   The chief of staff can also show you a small interactive view, a json-render spec it passes to
   the app's `app_ui` tool: cards, tables, badges, progress bars, buttons, text fields and
@@ -317,6 +318,7 @@ It writes these files to `OUT_DIR`:
 | `attach-draft.png`, `attach-draft.json` | A chart, a video and a Markdown file attached to the draft, as chips |
 | `attach-sent.png`, `attach-sent.json` | The message that carried an image and a file, and the fake `claude` saying it got one image block and two listed files |
 | `attach-too-large.png`, `attach-too-large.json` | A file over the 50 MB cap, refused with why |
+| `attach-adding.png`, `attach-adding.json` | Files still being copied (**Adding…**) and one whose copy failed, as chips, with **Send** waiting |
 | `attach-drop.png`, `attach-drop.json` | A file drag over the chat |
 | `view-static.png`, `view-static.json` | A json-render view: a card with badges, a progress bar, a table, an alert and buttons |
 | `view-streaming.png`, `view-streaming.json` | The same view with a little over half of its spec streamed |

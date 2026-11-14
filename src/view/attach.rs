@@ -6,14 +6,14 @@ use rune::{El, SurfaceFit, col, el, row, text};
 
 use super::{small_button, warning};
 use crate::App;
-use crate::attach::{Attachment, Kind};
+use crate::attach::{Attachment, Kind, Pending};
 
 /// The side of a chip's thumbnail.
 const THUMB: f32 = 40.0;
 
 /// The draft's attachments, each removable, and why the last one could not be attached.
 pub(super) fn tray(s: &App, t: Theme, dark: bool) -> Option<El> {
-    if s.attached.is_empty() && s.attach_problem.is_none() && !s.drop_over {
+    if s.attached.is_empty() && s.pending.is_empty() && s.attach_problem.is_none() && !s.drop_over {
         return None;
     }
     let mut chips = row().key("attachments").gap(space::S2).flex_wrap();
@@ -25,6 +25,9 @@ pub(super) fn tray(s: &App, t: Theme, dark: bool) -> Option<El> {
         .label(format!("Remove {}", a.name));
         chips = chips.child(chip(s, &key, a, t).child(remove));
     }
+    for p in &s.pending {
+        chips = chips.child(pending(p, t, dark));
+    }
     Some(
         col()
             .gap(space::S2)
@@ -34,13 +37,64 @@ pub(super) fn tray(s: &App, t: Theme, dark: bool) -> Option<El> {
                     .font(type_::LABEL)
                     .color(tok::accent(0, true))
             }))
-            .children((!s.attached.is_empty()).then_some(chips))
+            .children((!s.attached.is_empty() || !s.pending.is_empty()).then_some(chips))
             .children(
                 s.attach_problem
                     .as_ref()
                     .map(|why| warning("attach-problem", why, dark)),
             ),
     )
+}
+
+/// A chip for a file whose copy is being made, or could not be: its name, and "Adding" or why
+/// not, with a way to remove it.
+fn pending(p: &Pending, t: Theme, dark: bool) -> El {
+    let key = format!("adding-{}", p.id);
+    let remove = {
+        let id = p.id;
+        small_button(&format!("{key}-remove"), "\u{d7}", t, move |s: &mut App| {
+            s.remove_pending(id)
+        })
+        .label(format!("Remove {}", p.name))
+    };
+    let status = match &p.failed {
+        None => text("Adding\u{2026}")
+            .key(format!("{key}-status"))
+            .font(type_::LABEL)
+            .color(t.text_secondary),
+        Some(why) => warning(&format!("{key}-problem"), why, dark).font(type_::LABEL),
+    };
+    row()
+        .key(key.clone())
+        .max_w(280.0)
+        .gap(space::S2)
+        .padding(space::S1)
+        .center_y()
+        .radius(radius::MD)
+        .fill(t.card)
+        .border(1.0, t.card_border)
+        .child(badge(
+            el().key(format!("{key}-thumb"))
+                .size(THUMB, THUMB)
+                .radius(radius::SM)
+                .fill(t.bg),
+            "\u{2026}",
+            t,
+        ))
+        .child(
+            col()
+                .grow(1.0)
+                .min_w(0.0)
+                .child(
+                    text(p.name.clone())
+                        .key(format!("{key}-name"))
+                        .font(type_::LABEL)
+                        .color(t.text)
+                        .truncate_middle(),
+                )
+                .child(status),
+        )
+        .child(remove)
 }
 
 /// The attachments a sent message carried. Pressing one opens it in its default app.

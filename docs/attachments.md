@@ -18,11 +18,20 @@ for a video, and the file's extension for anything else, with the file's name an
 **×** button that removes it. **Send** sends the message with its attachments; a message may be
 attachments alone, with no text.
 
+The copy runs on a background thread, one per paste or drop, so a large video does not freeze the
+window. Until its copy finishes, a file shows as a chip with its name and "Adding…" and no
+thumbnail, and **Send** does nothing (it is dimmed). If the copy fails, the chip says why, in
+words such as "Permission denied", and its **×** removes it; a failed chip does not hold up
+**Send**, and sending clears it. Removing a chip that is still being added deletes the copy when
+it finishes.
+
 ## Limits
 
 - A file can be up to 50 MB, and a message can carry up to 10 attachments.
 - A folder cannot be attached; attach the files in it instead.
-- A file that cannot be attached says why above the message field, in words such as
+- The size, folder and attachment-count limits are checked before any copy starts, and an
+  attachment still being added counts toward the 10.
+- A file refused by those limits says why above the message field, in words such as
   "“screen-recording.mov” is 200 MB. Attachments can be up to 50 MB each." The other files in
   the same paste or drop still attach.
 
@@ -62,4 +71,5 @@ Pressing an attachment on a sent message opens it in its default app.
 | A chart, a video and a Markdown file attached to a draft | [draft.png](screens/attachments/draft.png) |
 | The message that carried them, and the fake `claude` saying it got one image block and two listed files | [sent.png](screens/attachments/sent.png) |
 | A file over the size cap, refused with why | [too-large.png](screens/attachments/too-large.png) |
+| A file still being added, one whose copy failed, and Send waiting | [adding.png](screens/attachments/adding.png) |
 | A file drag over the chat | [drop.png](screens/attachments/drop.png) |
