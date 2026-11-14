@@ -1,0 +1,12 @@
+{"events": [
+  {"t": 0.1, "type": "tap", "key": "chat-input"},
+  {"t": 0.3, "type": "key", "name": "f", "cmd": true},
+  {"t": 0.5, "type": "type", "text": "release"},
+  {"t": 1.0, "type": "mark", "name": "found"},
+  {"t": 1.2, "type": "key", "name": "Enter"},
+  {"t": 1.4, "type": "key", "name": "g", "cmd": true},
+  {"t": 2.0, "type": "mark", "name": "stepped"},
+  {"t": 2.2, "type": "key", "name": "Escape"},
+  {"t": 2.4, "type": "type", "text": "hi"},
+  {"t": 2.8, "type": "mark", "name": "closed"}
+]}

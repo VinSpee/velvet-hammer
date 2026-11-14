@@ -32,7 +32,8 @@ for scene in chat replied empty peek signed-out signing-in signed-in expired cli
   projects-fresh projects-empty projects-adding projects-listed \
   formatted formatted-all formatted-streaming tool-image tool-image-broken tool-video tool-generic tool-picture \
   view-static view-streaming view-state view-action view-unknown view-too-large \
-  visuals-settings visuals-enforced visuals-capped rules-settings rules-merge-ask rules-project-ask; do
+  visuals-settings visuals-enforced visuals-capped rules-settings rules-merge-ask rules-project-ask \
+  find find-stepped find-none history; do
   headless --scene "$scene" --snap "$out/$scene.png"
   headless --scene "$scene" --tree "$out/$scene.json"
 done
@@ -42,6 +43,14 @@ done
 headless --scene chat --script "$walk" --at mark:sent --tree "$out/walk-sent.json"
 headless --scene chat --script "$walk" --at mark:end --tree "$out/walk-end.json"
 headless --scene chat --script "$walk" --at mark:end --snap "$out/walk-end.png"
+
+# Find through the keyboard on a long chat: Cmd+F (Ctrl+F off macOS), typing, Enter and Cmd+G,
+# then Escape back to the message field.
+find=$root/scripts/find.json
+for mark in found stepped closed; do
+  headless --scene long-chat --script "$find" --at "mark:$mark" --tree "$out/find-keys-$mark.json"
+done
+headless --scene long-chat --script "$find" --at mark:stepped --snap "$out/find-keys.png"
 
 failures=0
 check() { # check FILE yes|no PATTERN
@@ -326,6 +335,26 @@ check rules-merge-ask.json yes 'Firstmate'"'"'s hard rule 2: never merge a pull 
 check rules-merge-ask.json yes '"key": "answer-1-0"'
 check rules-project-ask.json yes 'Let the chief of staff edit /tmp/velvet-hammer/rules-project-ask/data/home/projects/site/README.md?'
 check rules-project-ask.json yes '"key": "answer-1-1"'
+# Find in the conversation: the count and the highlighted matches, the current one after
+# stepping, no matches, and the history kept from an earlier session above its divider.
+check find.json yes '"key": "find-bar"'
+check find.json yes '"text": "1 of 4"'
+check find.json yes '"key": "find-0"'
+check find.json yes '"key": "find-3"'
+check find-stepped.json yes '"text": "3 of 4"'
+check find-none.json yes '"text": "No matches"'
+check find-none.json no  '"key": "find-0"'
+check history.json yes '"key": "earlier-divider"'
+check history.json yes '"text": "Remember the zeppelin plan for the launch."'
+check history.json yes '"text": "1 of 2"'
+check chat.json no  '"key": "find-bar"'
+check chat.json no  '"key": "earlier-divider"'
+check find-keys-found.json yes '"key": "find-bar"'
+check find-keys-found.json yes '"text": "release"'
+check find-keys-found.json yes '"text": "1 of 4"'
+check find-keys-stepped.json yes '"text": "3 of 4"'
+check find-keys-closed.json no  '"key": "find-bar"'
+check find-keys-closed.json yes '"text": "hi"'
 # The scripted run.
 check walk-sent.json yes '"text": "Ship it when CI is green."'
 check walk-sent.json yes 'Got it:'

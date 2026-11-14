@@ -7,8 +7,10 @@ mod approval;
 mod bearings;
 mod bridge;
 mod claude;
+mod find;
 mod firstmate;
 mod guard;
+mod history;
 mod markdown;
 mod model;
 mod projects;
@@ -24,7 +26,7 @@ use std::sync::mpsc::{Receiver, channel};
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
-use rune::{AppSpec, Image, ImageCache, Player, TextEdit, Tx, Waker};
+use rune::{AppSpec, Image, ImageCache, Key, KeyEvent, Player, TextEdit, Tx, Waker};
 
 use agent::{ChiefOfStaff, Event, Stub};
 use approval::{Activity, Mode, Store};
@@ -53,6 +55,12 @@ pub struct App {
     pub visual_example: TextEdit,
     /// Which of firstmate's rules the hook enforces.
     pub rules: store::Store<guard::Settings>,
+    /// Whether the conversation is kept across restarts.
+    pub keeping: store::Store<history::Keeping>,
+    /// The conversation as kept across restarts.
+    pub history: history::History,
+    /// The find bar over the conversation.
+    pub find: find::Find,
     /// Keeps `captain` current from firstmate's records, when the chief of staff is firstmate.
     watcher: Option<bearings::Watcher>,
     /// What firstmate's records say waits on the captain.
@@ -142,6 +150,8 @@ impl App {
         let approvals = Store::open(data);
         let visuals = store::Store::<visual::Mode>::open(data);
         let rules = store::Store::<guard::Settings>::open(data);
+        let keeping = store::Store::<history::Keeping>::open(data);
+        let mut history = history::History::new(data);
         chief.approve_with(bridge::Policies {
             approval: approvals.shared(),
             visual: visuals.shared(),
@@ -156,8 +166,14 @@ impl App {
                 }
             }
         });
+        let mut ws = chief.open();
+        if keeping.settings().0 {
+            let earlier = history.load();
+            ws.earlier = earlier.len();
+            ws.chat.splice(0..0, earlier);
+        }
         let mut app = App {
-            ws: chief.open(),
+            ws,
             chief,
             status: Status::Checking,
             firstmate,
@@ -167,6 +183,9 @@ impl App {
             visuals,
             visual_example: TextEdit::new(visual::EXAMPLE),
             rules,
+            keeping,
+            history,
+            find: find::Find::default(),
             watcher,
             captain: Bearings::default(),
             captain_problem: None,
@@ -190,8 +209,26 @@ impl App {
             window_wake,
             media_wake,
         };
+        // A tool use kept from an earlier session shows as it did, but for its image bytes.
+        for i in 0..app.ws.earlier {
+            if let Some(tool) = app.ws.chat[i].tool.clone()
+                && tool.result.is_some()
+            {
+                let media = app.media_for(&tools::handler(&tool));
+                app.media.insert(tool.id, media);
+            }
+        }
         app.drain();
         app
+    }
+
+    /// Writes the finished chat message `i` to the history, if the captain keeps it.
+    fn keep(&mut self, i: usize) {
+        if self.keeping.settings().0
+            && let Some(message) = self.ws.chat.get(i)
+        {
+            self.history.record(message);
+        }
     }
 
     /// Applies what the agent layer reported; true when anything changed.
@@ -247,18 +284,25 @@ impl App {
                         self.replying = Some(self.ws.chat.len() - 1);
                     }
                 }
-                if done {
-                    self.replying = None;
+                if done && let Some(i) = self.replying.take() {
+                    self.keep(i);
                 }
             }
             Event::Problem(text) => {
-                self.replying = None;
+                // A reply cut short is kept as far as it got.
+                if let Some(i) = self.replying.take() {
+                    self.keep(i);
+                }
                 self.ws.chat.push(Message::new(Author::Problem, text));
+                self.keep(self.ws.chat.len() - 1);
             }
             Event::Item(item) => self.ws.items.push(item),
             Event::Withdrawn(id) => self.ws.items.retain(|i| i.id != id),
             Event::Activity(entry) => self.activity.record(entry),
-            Event::Notice(text) => self.ws.chat.push(Message::new(Author::App, text)),
+            Event::Notice(text) => {
+                self.ws.chat.push(Message::new(Author::App, text));
+                self.keep(self.ws.chat.len() - 1);
+            }
             // A view tool use arrives first as it starts streaming, then whole.
             Event::Tool(tool) => {
                 let id = tool.id.clone();
@@ -281,7 +325,15 @@ impl App {
                 tool.result = Some(result);
                 let handler = tools::handler(tool);
                 let media = self.media_for(&handler);
-                self.media.insert(id, media);
+                self.media.insert(id.clone(), media);
+                if let Some(i) = self
+                    .ws
+                    .chat
+                    .iter()
+                    .position(|m| m.tool.as_ref().is_some_and(|t| t.id == id))
+                {
+                    self.keep(i);
+                }
             }
         }
     }
@@ -450,6 +502,9 @@ impl App {
 
     pub fn act(&mut self, action: Action) {
         self.ws.apply(&action);
+        if matches!(action, Action::Say(_) | Action::Ui(_)) {
+            self.keep(self.ws.chat.len() - 1);
+        }
         self.chief.act(&self.ws, &action);
         self.drain();
     }
@@ -746,8 +801,25 @@ fn replied(s: &App) -> bool {
             .is_some_and(|m| m.author != Author::Captain)
 }
 
-fn poll(s: &mut App, _: f64, _: &mut Tx) -> bool {
-    s.drain()
+fn poll(s: &mut App, _: f64, tx: &mut Tx) -> bool {
+    s.drain() | s.follow_find(tx)
+}
+
+/// The app's keyboard shortcuts, heard when the focused control does not take the key. Cmd is
+/// Ctrl off macOS.
+fn on_key(s: &mut App, key: &KeyEvent, tx: &mut Tx) -> bool {
+    if key.is_command('f') {
+        s.open_find(tx);
+    } else if key.is_command('g') && s.find.open {
+        s.step_find(if key.mods.shift { -1 } else { 1 });
+    } else if key.is_command('g') {
+        s.open_find(tx);
+    } else if key.key == Key::Escape && s.find.open {
+        s.close_find(tx);
+    } else {
+        return false;
+    }
+    true
 }
 
 fn setup(s: &mut App, wake: Waker) {
@@ -1077,6 +1149,18 @@ fn main() {
                 s.send();
                 s.settle(|s| s.ws.needs_input().next().is_some());
             }),
+            // Find in the conversation: a long chat for scripts/find.json, matches with the first
+            // current, the third current after stepping, a query with none, and the history kept
+            // from an earlier session.
+            ("long-chat", |s| *s = long_chat(40)),
+            ("find", |s| *s = finding("release", 0)),
+            ("find-stepped", |s| *s = finding("release", 2)),
+            ("find-none", |s| *s = finding("zebra", 0)),
+            ("history", |s| {
+                *s = reopened();
+                s.find.open = true;
+                s.find.query.text = "zeppelin".into();
+            }),
             ("rules-project-ask", |s| {
                 *s = rules_lab("rules-project-ask");
                 let file = s.firstmate.home_dir().join("projects/site/README.md");
@@ -1088,6 +1172,7 @@ fn main() {
         min_size: Some((900.0, 560.0)),
         setup: Some(setup),
         poll: Some(poll),
+        on_key: Some(on_key),
         ..AppSpec::new("Velvet Hammer", (1100.0, 720.0), init, view::view)
     });
 }
@@ -1296,6 +1381,43 @@ fn press(s: &mut App, id: &str) {
     s.fire(VIEW, &trigger, did);
 }
 
+/// The stub's chat with `n` more messages from the chief of staff, every tenth naming the
+/// release, so the matches are far apart.
+fn long_chat(n: usize) -> App {
+    let mut app = stub();
+    for i in 0..n {
+        let words = if i % 10 == 0 {
+            format!("Reply {i}: the **release** is on track.")
+        } else {
+            format!("Reply {i}: nothing new.")
+        };
+        app.ws.chat.push(Message::new(Author::ChiefOfStaff, words));
+    }
+    app
+}
+
+/// The stub's chat with the find bar open on `query`, at match `current`.
+fn finding(query: &str, current: usize) -> App {
+    let mut app = long_chat(40);
+    app.ws.items.clear();
+    app.find.open = true;
+    app.find.query.text = query.into();
+    app.find.searched = query.into();
+    app.find.current = current;
+    app.find.reveal = true;
+    app
+}
+
+/// The stub on a data directory where an earlier session asked about the zeppelin plan.
+fn reopened() -> App {
+    let data = scratch("unused");
+    let mut first = App::new(Box::new(Stub::default()), installed_firstmate(), &data);
+    first.draft.text = "Remember the zeppelin plan for the launch.".into();
+    first.send();
+    drop(first);
+    App::new(Box::new(Stub::default()), installed_firstmate(), &data)
+}
+
 /// Sends `text` and waits for the reply, for scenes.
 fn say(s: &mut App, text: &str) {
     s.draft.text = text.into();
@@ -1333,6 +1455,7 @@ mod tests {
         };
         let mut rt = Runtime::new(app, view::view, (1100.0, 720.0), env);
         rt.poll = Some(poll);
+        rt.on_key = Some(on_key);
         rt.frame(0.0);
         rt
     }
@@ -3234,5 +3357,182 @@ mod tests {
         assert_eq!(texts_under(&rt, "rules-summary"), ["6 of 7 on"]);
         tap(&mut rt, "rules-activity");
         assert_eq!(rt.state.showing, Showing::Activity);
+    }
+
+    /// Presses `key` with Cmd (Ctrl off macOS) held, and Shift when `shift`.
+    fn chord(rt: &mut Runtime<App>, c: char, shift: bool) {
+        let mac = cfg!(target_os = "macos");
+        let mods = rune::Mods {
+            cmd: true,
+            shift,
+            ctrl: !mac,
+            logo: mac,
+            ..rune::Mods::default()
+        };
+        rt.key(KeyEvent {
+            key: Key::Command(c),
+            mods,
+        });
+        settle(rt);
+    }
+
+    fn press_key(rt: &mut Runtime<App>, key: Key, shift: bool) {
+        let mods = rune::Mods {
+            shift,
+            ..rune::Mods::default()
+        };
+        rt.key(KeyEvent { key, mods });
+        settle(rt);
+    }
+
+    fn type_text(rt: &mut Runtime<App>, words: &str) {
+        for c in words.chars() {
+            rt.key(KeyEvent {
+                key: Key::Text(c.to_string()),
+                mods: rune::Mods::default(),
+            });
+        }
+        settle(rt);
+    }
+
+    fn settle(rt: &mut Runtime<App>) {
+        for _ in 0..30 {
+            rt.frame(1.0 / 60.0);
+        }
+    }
+
+    fn find_count(rt: &Runtime<App>) -> Vec<String> {
+        texts_under(rt, "find-count")
+    }
+
+    /// Whether the element keyed `key` is drawn inside the window.
+    fn on_screen(rt: &Runtime<App>, key: &str) -> bool {
+        rt.find(key).is_some_and(|(_, y)| (0.0..720.0).contains(&y))
+    }
+
+    #[test]
+    fn cmd_f_opens_find_over_the_conversation_and_counts_matches() {
+        let mut rt = runtime_with(long_chat(40));
+        tap(&mut rt, "chat-input");
+        assert!(rt.find("find-bar").is_none());
+        chord(&mut rt, 'f', false);
+        assert!(rt.find("find-bar").is_some());
+        // The cursor is in the find field, not the message field.
+        type_text(&mut rt, "RELEASE");
+        assert_eq!(rt.state.find.query.text, "RELEASE");
+        assert!(rt.state.draft.text.is_empty());
+        assert_eq!(find_count(&rt), ["1 of 4"]);
+        assert!(rt.find(&find::match_key(0)).is_some());
+        assert!(on_screen(&rt, &find::match_key(0)));
+    }
+
+    #[test]
+    fn a_query_with_no_matches_says_so() {
+        let mut rt = runtime_with(long_chat(5));
+        chord(&mut rt, 'f', false);
+        type_text(&mut rt, "zebra");
+        assert_eq!(find_count(&rt), ["No matches"]);
+        assert!(rt.find(&find::match_key(0)).is_none());
+        // Stepping with nothing to step to changes nothing.
+        press_key(&mut rt, Key::Enter, false);
+        assert_eq!(rt.state.find.current, 0);
+    }
+
+    #[test]
+    fn enter_and_cmd_g_step_through_the_matches_and_scroll_to_each() {
+        let mut rt = runtime_with(long_chat(40));
+        chord(&mut rt, 'f', false);
+        type_text(&mut rt, "release");
+        assert_eq!(find_count(&rt), ["1 of 4"]);
+        press_key(&mut rt, Key::Enter, false);
+        assert_eq!(find_count(&rt), ["2 of 4"]);
+        assert!(on_screen(&rt, &find::match_key(1)));
+        chord(&mut rt, 'g', false);
+        chord(&mut rt, 'g', false);
+        assert_eq!(find_count(&rt), ["4 of 4"]);
+        assert!(on_screen(&rt, &find::match_key(3)));
+        assert!(!on_screen(&rt, &find::match_key(0)));
+        // Past the last it wraps to the first, and back.
+        press_key(&mut rt, Key::Enter, false);
+        assert_eq!(find_count(&rt), ["1 of 4"]);
+        assert!(on_screen(&rt, &find::match_key(0)));
+        press_key(&mut rt, Key::Enter, true);
+        assert_eq!(find_count(&rt), ["4 of 4"]);
+        chord(&mut rt, 'g', true);
+        assert_eq!(find_count(&rt), ["3 of 4"]);
+        tap(&mut rt, "find-previous");
+        assert_eq!(find_count(&rt), ["2 of 4"]);
+        tap(&mut rt, "find-next");
+        assert_eq!(find_count(&rt), ["3 of 4"]);
+    }
+
+    #[test]
+    fn escape_closes_find_and_returns_to_the_message_field() {
+        let mut rt = runtime_with(long_chat(5));
+        chord(&mut rt, 'f', false);
+        type_text(&mut rt, "release");
+        press_key(&mut rt, Key::Escape, false);
+        assert!(rt.find("find-bar").is_none());
+        assert!(rt.find(&find::match_key(0)).is_none());
+        type_text(&mut rt, "hi");
+        assert_eq!(rt.state.draft.text, "hi");
+        // Opening it again keeps the query.
+        chord(&mut rt, 'f', false);
+        assert_eq!(find_count(&rt), ["1 of 1"]);
+    }
+
+    #[test]
+    fn find_is_case_insensitive_and_searches_captain_messages() {
+        let mut rt = runtime();
+        chord(&mut rt, 'f', false);
+        type_text(&mut rt, "desktop SKELETON");
+        assert_eq!(find_count(&rt), ["1 of 1"]);
+        assert_eq!(
+            find::search(&rt.state, "desktop SKELETON")[0].message,
+            0,
+            "the captain's first message"
+        );
+    }
+
+    #[test]
+    fn find_searches_tool_uses_and_the_words_in_views() {
+        let mut rt = runtime_with(viewing(spec("ui-release.json"), true));
+        chord(&mut rt, 'f', false);
+        let hits = find::search(&rt.state, "release");
+        assert!(hits.iter().any(|h| h.card), "the view's card");
+        type_text(&mut rt, "release");
+        assert!(rt.find("find-count").is_some());
+        assert_ne!(find_count(&rt), ["No matches"]);
+
+        let mut rt = runtime_with(fake_in(Mode::Run));
+        send_and_wait(&mut rt, "shell: ls");
+        let hits = find::search(&rt.state, "three");
+        assert_eq!(hits.len(), 1, "the command's output");
+        assert!(hits[0].card);
+    }
+
+    #[test]
+    fn the_conversation_is_kept_across_a_restart_and_find_searches_it() {
+        let data = scratch("unused");
+        let mut first = App::new(Box::new(Stub::default()), installed_firstmate(), &data);
+        first.draft.text = "Remember the zeppelin plan.".into();
+        first.send();
+        let said = first.ws.chat[first.ws.chat.len() - 2].clone();
+        let replied = first.ws.chat.last().unwrap().clone();
+        drop(first);
+
+        let mut rt = runtime_with(App::new(
+            Box::new(Stub::default()),
+            installed_firstmate(),
+            &data,
+        ));
+        assert_eq!(rt.state.ws.earlier, 2);
+        assert_eq!(rt.state.ws.chat[0], said);
+        assert_eq!(rt.state.ws.chat[1], replied);
+        assert!(rt.find("earlier-divider").is_some());
+        chord(&mut rt, 'f', false);
+        type_text(&mut rt, "zeppelin");
+        assert_eq!(find_count(&rt), ["1 of 2"]);
+        assert!(on_screen(&rt, &find::match_key(0)));
     }
 }

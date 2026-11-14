@@ -49,6 +49,9 @@ The window has three columns:
   projects yet, a card above the conversation explains them and offers **Add a project**; while
   you add one, a row above the message field offers **Choose a folder…**, **Yes**, **No** and
   **Done adding**.
+  Cmd+F (Ctrl+F on Windows and Linux) opens a find bar that searches the whole conversation,
+  and the conversation is kept across restarts in the app's data directory, earlier sessions
+  above a divider (see [The conversation: find and history](docs/conversation.md)).
   The chief of staff's messages are Markdown, shown formatted: bold, italic, strikethrough,
   inline code and code blocks, headings, lists, block quotes and links. A line break shows as
   written, HTML shows as text, and a reply still arriving never shows a half-written marker. A link
@@ -104,6 +107,10 @@ The window has three columns:
 - `src/ui.rs`: json-render views: the catalog, reading a spec (whole or still streaming) within
   its limits, its state, the tree to draw and the actions its controls fire (see
   [docs/json-render.md](docs/json-render.md)).
+- `src/find.rs`: find in the conversation: what each message is searched as, the matches and
+  stepping through them (see [docs/conversation.md](docs/conversation.md)).
+- `src/history.rs`: the conversation kept across restarts in `history.jsonl`, and the setting
+  that turns it off.
 - `src/markdown.rs`: prepares the chief of staff's Markdown for Rune's Markdown view, keeping
   line breaks and showing HTML as text.
 - `src/view.rs`: the Rune view, with the tool-use views in `src/view/tool.rs`, the
@@ -317,6 +324,11 @@ It writes these files to `OUT_DIR`:
 | `rules-settings.png`, `rules-settings.json` | The Firstmate rules page after a forced push was denied and a merge was asked about and allowed |
 | `rules-merge-ask.png`, `rules-merge-ask.json` | A merge through firstmate's script waiting for you, naming the pull request |
 | `rules-project-ask.png`, `rules-project-ask.json` | A write into a project waiting for you, naming the file |
+| `find.png`, `find.json` | The find bar on a long chat: four matches, the first current |
+| `find-stepped.png`, `find-stepped.json` | The third match current, scrolled into view |
+| `find-none.png`, `find-none.json` | A query with no matches |
+| `history.png`, `history.json` | After a restart: the kept earlier session above its divider, found by find |
+| `find-keys.png`, `find-keys-*.json` | `scripts/find.json` on a long chat: Cmd+F, typing, Enter and Cmd+G, then Escape |
 | `walk-sent.json` | `scripts/walkthrough.json` after typing and sending a message |
 | `walk-end.png`, `walk-end.json` | The same script after answering an item, finishing the task and opening a peek |
 

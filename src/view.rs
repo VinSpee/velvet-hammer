@@ -4,12 +4,13 @@
 
 use crate::{App, Showing};
 use rune::tok::{self, Theme, radius, space, type_};
-use rune::{Cx, El, ScrollSpec, TextEdit, col, el, row, text, text_input};
-use rune_kit::{Kit, Markdown};
+use rune::{Cx, El, ScrollSpec, TextEdit, TextHighlight, col, el, row, text, text_input};
+use rune_kit::{Highlight, Kit, Markdown};
 
 use crate::approval::{self, Effect, Mode};
 use crate::guard;
 
+use crate::find::{self, Hits};
 use crate::firstmate::{Checkout, Distro, Firstmate, Standing, Work};
 use crate::model::{Action, Agent, Author, Item, ItemKind, Message, Plan, Status};
 use crate::projects::Project;
@@ -921,6 +922,11 @@ fn chat(s: &App, plan: &Plan, t: Theme, dark: bool) -> El {
             t,
         ));
     }
+    let hits = if s.find.open {
+        find::search(s, &s.find.query.text)
+    } else {
+        Vec::new()
+    };
     col()
         .key("chat")
         .grow(1.0)
@@ -929,8 +935,21 @@ fn chat(s: &App, plan: &Plan, t: Theme, dark: bool) -> El {
         .padding(space::S6)
         .gap(space::S3)
         .child(header)
+        .children(s.find.open.then(|| find_bar(s, &hits, t)))
         .children((s.has_no_projects() && !s.adding).then(|| no_projects(t)))
-        .child(transcript(s, "messages", &s.ws.chat, s.replying, t, dark))
+        .child(transcript(
+            s,
+            "messages",
+            &s.ws.chat,
+            s.replying,
+            Found {
+                earlier: s.ws.earlier,
+                hits: &hits,
+                current: s.find.current,
+            },
+            t,
+            dark,
+        ))
         .children(s.answering.as_ref().map(|key| {
             row()
                 .key("answering")
@@ -950,6 +969,70 @@ fn chat(s: &App, plan: &Plan, t: Theme, dark: bool) -> El {
         }))
         .children(s.adding.then(|| adding(s, t, dark)))
         .child(composer)
+}
+
+/// The find bar over the conversation: the query, where the current match is among them all,
+/// and stepping through them.
+fn find_bar(s: &App, hits: &[Hits], t: Theme) -> El {
+    let total = find::total(hits);
+    let count = if s.find.query.text.trim().is_empty() {
+        String::new()
+    } else if total == 0 {
+        "No matches".to_string()
+    } else {
+        format!("{} of {total}", s.find.current.min(total - 1) + 1)
+    };
+    let input = text_input(&s.find.query, type_::BODY)
+        .key("find-input")
+        .single_line()
+        .grow(1.0)
+        .color(t.text)
+        .placeholder("Find in the conversation", t.text_secondary)
+        .on_edit(|s: &mut App| &mut s.find.query)
+        .on_input_key(
+            |s: &mut App, key: &rune::KeyEvent, tx: &mut rune::Tx| match key.key {
+                rune::Key::Enter => {
+                    s.step_find(if key.mods.shift { -1 } else { 1 });
+                    true
+                }
+                rune::Key::Escape => {
+                    s.close_find(tx);
+                    true
+                }
+                _ => false,
+            },
+        );
+    row()
+        .key("find-bar")
+        .role("search")
+        .label("Find in the conversation")
+        .gap(space::S2)
+        .center_y()
+        .child(
+            row()
+                .grow(1.0)
+                .h(32.0)
+                .px(space::S3)
+                .center_y()
+                .radius(radius::MD)
+                .fill(t.card)
+                .border(1.0, tok::accent(0, true))
+                .child(input),
+        )
+        .child(
+            text(count)
+                .key("find-count")
+                .font(type_::LABEL)
+                .color(t.text_secondary),
+        )
+        .child(small_button("find-previous", "Previous", t, |s| {
+            s.step_find(-1)
+        }))
+        .child(small_button("find-next", "Next", t, |s| s.step_find(1)))
+        .child(
+            small_button("find-close", "Done", t, |_| {})
+                .on_press_tx(|s: &mut App, tx: &mut rune::Tx| s.close_find(tx)),
+        )
 }
 
 /// The empty state: the app works on projects, and there are none yet.
@@ -1306,26 +1389,58 @@ fn peek(s: &App, agent: &Agent, t: Theme, dark: bool) -> El {
             "peek-messages",
             &agent.transcript,
             None,
+            Found::default(),
             t,
             dark,
         ))
 }
 
+/// What a transcript marks: where the messages of this session start, and the matches of
+/// the find bar with the current one.
+#[derive(Default)]
+struct Found<'a> {
+    earlier: usize,
+    hits: &'a [Hits],
+    current: usize,
+}
+
+impl Found<'_> {
+    fn of(&self, i: usize) -> Option<&Hits> {
+        self.hits.iter().find(|h| h.message == i)
+    }
+}
+
+/// The colour behind a match, stronger for the current one.
+fn match_color(current: bool, dark: bool) -> rune::Color {
+    tok::accent(3, dark).alpha(if current { 0.75 } else { 0.3 })
+}
+
 /// A conversation. The chief of staff's messages are Markdown, drawn formatted; `replying` is
 /// the one still arriving, whose unfinished tail draws as what it is about to become. Everyone
-/// else's words show as written, and a tool use shows through its handler.
+/// else's words show as written, and a tool use shows through its handler. Messages kept from
+/// earlier sessions sit above a divider.
 fn transcript(
     s: &App,
     key: &str,
     messages: &[Message],
     replying: Option<usize>,
+    found: Found,
     t: Theme,
     dark: bool,
 ) -> El {
     let mut list = col().gap(space::S2);
     for (i, m) in messages.iter().enumerate() {
+        if found.earlier > 0 && i == found.earlier {
+            list = list.child(earlier_divider(t));
+        }
+        let hits = found.of(i);
         if let Some(tool) = &m.tool {
-            list = list.child(tool_use(s, i, tool, t, dark));
+            let mut card = tool_use(s, i, tool, t, dark);
+            if let Some(hits) = hits {
+                let current = hits.holds(found.current);
+                card = card.border(if current { 2.0 } else { 1.0 }, match_color(current, dark));
+            }
+            list = list.child(card);
             continue;
         }
         let who = match m.author {
@@ -1337,9 +1452,41 @@ fn transcript(
             Author::App => "Velvet Hammer",
         };
         let words = if m.author == Author::ChiefOfStaff {
-            markdown(&m.text, replying == Some(i), dark).key(format!("msg-{i}-text"))
+            let marks = hits.map(|h| {
+                h.numbered()
+                    .map(|(n, ranges)| {
+                        let current = n == found.current;
+                        let mark = Highlight::new()
+                            .current_match(current)
+                            .bg(match_color(current, dark))
+                            .key(find::match_key(n));
+                        (ranges.clone(), mark)
+                    })
+                    .collect::<Vec<_>>()
+            });
+            markdown(
+                &m.text,
+                replying == Some(i),
+                marks.unwrap_or_default(),
+                dark,
+            )
+            .key(format!("msg-{i}-text"))
         } else {
-            text(m.text.clone()).font(type_::BODY).color(t.text).wrap()
+            let marks = hits
+                .into_iter()
+                .flat_map(|h| h.numbered())
+                .flat_map(|(n, ranges)| {
+                    let current = n == found.current;
+                    ranges.iter().map(move |r| {
+                        TextHighlight::new(r.clone(), match_color(current, dark))
+                            .key(find::match_key(n))
+                    })
+                });
+            text(m.text.clone())
+                .font(type_::BODY)
+                .color(t.text)
+                .wrap()
+                .text_highlights(marks)
         };
         list = list.child(
             col()
@@ -1364,11 +1511,37 @@ fn transcript(
         .child(list)
 }
 
-/// Markdown from the chief of staff, formatted (see [`crate::markdown`]). Nothing in it runs:
-/// HTML shows as text. Links open in the default browser only when pressed, and only `http`,
-/// `https` and `mailto` links open at all ([`rune::Tx::open_url`] refuses the rest).
-fn markdown(source: &str, streaming: bool, dark: bool) -> El {
+/// The line between the messages kept from earlier sessions and this session's.
+fn earlier_divider(t: Theme) -> El {
+    row()
+        .key("earlier-divider")
+        .gap(space::S2)
+        .center_y()
+        .py(space::S2)
+        .child(el().h(1.0).grow(1.0).fill(t.card_border))
+        .child(
+            text(
+                "Earlier sessions above. Your chief of staff does not remember them unless you \
+                 link to one.",
+            )
+            .font(type_::LABEL)
+            .color(t.text_secondary),
+        )
+        .child(el().h(1.0).grow(1.0).fill(t.card_border))
+}
+
+/// Markdown from the chief of staff, formatted (see [`crate::markdown`]), with the find bar's
+/// matches marked. Nothing in it runs: HTML shows as text. Links open in the default browser
+/// only when pressed, and only `http`, `https` and `mailto` links open at all
+/// ([`rune::Tx::open_url`] refuses the rest).
+fn markdown(
+    source: &str,
+    streaming: bool,
+    marks: Vec<(Vec<std::ops::Range<usize>>, Highlight)>,
+    dark: bool,
+) -> El {
     Markdown::new(crate::markdown::prepare(source))
+        .highlights(marks)
         .streaming(streaming)
         .selectable(true)
         .on_link_tx(|_: &mut App, url: &str, tx: &mut rune::Tx| {
