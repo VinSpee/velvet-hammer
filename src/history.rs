@@ -316,6 +316,7 @@ fn from_json(value: &Value) -> Option<Message> {
         author: author_from(value["author"].as_str()?)?,
         text: value["text"].as_str()?.to_string(),
         tool,
+        while_working: false,
     })
 }
 

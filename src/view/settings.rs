@@ -21,6 +21,13 @@ pub fn settings_page(s: &App, t: Theme, dark: bool) -> El {
         .key("settings-sections")
         .gap(space::S2)
         .child(section_card(
+            "messages",
+            "Messages",
+            s.delivery.settings().summary().to_string(),
+            Showing::Messages,
+            t,
+        ))
+        .child(section_card(
             "approvals",
             "Tool approval",
             s.approvals.settings().mode.label().to_string(),
@@ -69,7 +76,8 @@ pub fn settings_page(s: &App, t: Theme, dark: bool) -> El {
             section("Your chief of staff", t)
                 .child(note(
                     "settings-help",
-                    "How your chief of staff's tool uses are decided, how its replies are shown, \
+                    "When your messages reach your chief of staff while it works, how its tool \
+                     uses are decided, how its replies are shown, \
                      the workers it can send on other providers, the firstmate rules its hook \
                      enforces, the firstmate clone it runs on, and the times your reminders' \
                      words stand for. Each opens its page.",

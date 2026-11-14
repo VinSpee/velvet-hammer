@@ -21,7 +21,10 @@ a tool call shows: a merge, a forced push, a teardown that discards work, a writ
 or a publish is denied or waits for your word (see
 [Firstmate's rules, enforced by hook](docs/firstmate-rules.md)). The chief of staff shows status
 digests, lists, choices and tables as views by default, and a reply of that kind that arrives as
-text is sent back once for a view (see [Visual replies](docs/visual-replies.md)). **For you to do** shows the notes Claude Code adds with the app's `app_note` tool. Telling
+text is sent back once for a view (see [Visual replies](docs/visual-replies.md)). A message you
+send while the chief of staff is working goes to it at once and is taken in at its next step;
+queueing such messages until it is done is a setting (see
+[Messages sent while the chief of staff works](docs/messages.md)). **For you to do** shows the notes Claude Code adds with the app's `app_note` tool. Telling
 the chief of staff "remind me in 20 minutes", "later today", "tomorrow morning", "in 3 days",
 "next week" or "later" sets a reminder with the app's `app_remind` tool; the app works out the
 time, and when it comes due it shows in a banner, at the top of For you to do and in Notification
@@ -66,6 +69,12 @@ The window has three columns, and every setting is in **Settings** (see
   message has a link, `velvet-hammer://message/<id>`, that **Copy link** copies; a link in any
   message shows as a chip that goes to the message, and the chief of staff gets each message
   you link to quoted with your words (see [Message links](docs/links.md)).
+  While the chief of staff works, a line over the message field says so. A message you send then
+  goes out at once, shows in the conversation in order, marked as sent while it was working, and
+  Claude Code takes it in at the turn's next step without stopping anything. With **Queue new
+  messages until the chief of staff is done** chosen in the **Messages** section of Settings, it
+  waits in a list under the field instead, where you can edit or delete it, and goes out when the
+  chief of staff is done, one at a time (see [docs/messages.md](docs/messages.md)).
   The chief of staff's messages are Markdown, shown formatted: bold, italic, strikethrough,
   inline code and code blocks, headings, lists, block quotes and links. A line break shows as
   written, HTML shows as text, and a reply still arriving never shows a half-written marker. A link
@@ -111,7 +120,7 @@ Configuration is out of the main window, behind the platform's Settings menu ite
   Velvet Hammer Help**. Text actions stay on the usual keys; the drawn Edit menu does not list
   them.
 
-**Settings** shows each section with its setting in a few words: **Tool approval**, **Visual
+**Settings** shows each section with its setting in a few words: **Messages**, **Tool approval**, **Visual
 replies**, **Firstmate rules** and **Firstmate** (the managed clone) each open their page, which
 works as before and has **All settings** to come back. **Conversation history** is set on the
 Settings page itself: **Keep the conversation** (recommended, the default) or **Do not keep the
@@ -155,6 +164,9 @@ input** and **For you to do**.
 - `src/visual.rs`: visual replies: the mode, the shapes of reply that read better as a view, the
   standing instruction and the stop check with its retry cap (see
   [docs/visual-replies.md](docs/visual-replies.md)).
+- `src/messages.rs`: the Messages setting, sending right away or queueing until the chief of
+  staff is done (see [docs/messages.md](docs/messages.md)). The queue lives in `App`; its page,
+  the working line and the queued list are in `src/view/messages.rs`.
 - `src/store.rs`: a settings file in the data directory, written whole and shared with the hooks;
   tool approval, visual replies, firstmate's rules and reminders each keep one, and the worker
   nicknames keep one in the firstmate home's `config/`.
@@ -216,8 +228,10 @@ talks to Anthropic:
   chat. You can also run `claude auth login` in a terminal yourself and choose **Check again**.
 - **Chatting.** The first message starts one long-lived
   `claude -p --input-format stream-json --output-format stream-json --verbose
-  --include-partial-messages --no-session-persistence` process. Each message is written to its
-  standard input, and the reply streams into the chat as Claude Code produces it. The process
+  --include-partial-messages --replay-user-messages --no-session-persistence` process. Each
+  message is written to its standard input as you send it, even mid-turn, and the reply streams
+  into the chat as Claude Code produces it. Claude Code echoes each message back as it takes it
+  in, which tells the app when the chief of staff is done. The process
   runs in the managed firstmate clone with `FM_HOME` set to the app's own firstmate home, so it
   starts as firstmate (see [The managed firstmate clone](docs/firstmate.md)).
 - **Message links.** Each message is sent with a line giving its link, and with any message it
@@ -419,6 +433,19 @@ It writes these files to `OUT_DIR`:
 | `rules-settings.png`, `rules-settings.json` | The Firstmate rules page after a forced push was denied and a merge was asked about and allowed |
 | `rules-merge-ask.png`, `rules-merge-ask.json` | A merge through firstmate's script waiting for you, naming the pull request |
 | `rules-project-ask.png`, `rules-project-ask.json` | A write into a project waiting for you, naming the file |
+| `send-while-working.png`, `send-while-working.json` | A message sent while the chief of staff works: sent at once, marked, with the working line |
+| `send-while-working-answered.png`, `send-while-working-answered.json` | The end of that turn, answering both messages |
+| `messages-settings.png`, `messages-settings.json` | The Messages page: Send right away recommended and chosen |
+| `queue-waiting.png`, `queue-waiting.json` | Queue mode: three messages waiting under the field, one being edited |
+| `queue-delivering.png`, `queue-delivering.json` | The turn ended: the first queued message went out, two still wait |
+| `queue-not-ready.png`, `queue-not-ready.json` | Queued messages kept while Claude Code is signed out |
+| `walk-end.png`, `walk-end.json` | The same script after answering an item, finishing the task and opening a peek |
+
+The first four scenes, `approval-settings`, the `formatted` scenes, the `view` scenes and
+`visuals-settings` use the stub, as do the `send-while-working`, `messages` and `queue` scenes, on a
+stub that keeps working until the scene ends its turn; the other `visuals` scenes have the fake `claude` call the prompt
+and stop hooks; the `rules` scenes run the fake `claude` as firstmate in a scratch clone under
+`/tmp/velvet-hammer`; the `tool`
 | `workers-fresh.png`, `workers-fresh.json` | The Workers page before anything is set up, with the example nickname |
 | `workers-settings.png`, `workers-settings.json` | pi installed from a stand-in release, the key found, firstmate pointed at the runtime, and a second nickname |
 | `workers-claude-refused.png`, `workers-claude-refused.json` | A Claude model refused for a pi nickname |

@@ -42,7 +42,8 @@ for scene in chat replied empty peek signed-out signing-in signed-in expired cli
   add-mate-scope add-mate-projects add-mate-name add-mate-runtime add-mate-confirm add-mate-created add-mate-refused \
   mate-retire-confirm mate-retire-refused mate-message mate-replied mate-escalation mate-escalation-answered \
   mate-routed mate-from-chat \
-  workers-fresh workers-settings workers-claude-refused workers-crew; do
+  workers-fresh workers-settings workers-claude-refused workers-crew \
+  send-while-working send-while-working-answered messages-settings queue-waiting queue-delivering queue-not-ready; do
   headless --scene "$scene" --snap "$out/$scene.png"
   headless --scene "$scene" --tree "$out/$scene.json"
 done
@@ -366,8 +367,30 @@ check choice-enforced.json yes 'with the option'
 check choice-enforced.json yes 'yolo-off'
 # Visual replies: the settings page, a list sent back once and shown as a view, and a reply that
 # ignored the feedback, sent back only once.
+# Messages sent while the chief of staff works: sent at once and marked, the setting with Send
+# right away recommended and chosen, the queue with one message being edited, the first queued
+# message going out when the turn ends, and the queue kept while Claude Code is not ready.
+check send-while-working.json yes '"text": "You · sent while your chief of staff was working"'
+check send-while-working.json yes '"key": "working"'
+check send-while-working.json no  '"key": "queue"'
+check send-while-working-answered.json yes 'I also took in'
+check send-while-working-answered.json no  '"key": "working"'
+check messages-settings.json yes '"key": "messages-page"'
+check messages-settings.json yes '"text": "● Send right away (Recommended)"'
+check messages-settings.json yes '"text": "○ Queue new messages until the chief of staff is done"'
+check queue-waiting.json yes '"key": "queued-0-edit"'
+check queue-waiting.json yes '"key": "queued-1-save"'
+check queue-waiting.json yes '"key": "queued-2-delete"'
+check queue-waiting.json yes 'Queued until your chief of staff is done'
+check queue-delivering.json yes '"text": "Then open the release PR."'
+check queue-delivering.json no  '"key": "queued-2"'
+check queue-delivering.json yes '"key": "queued-1"'
+check queue-not-ready.json yes '"key": "sign-in-queued"'
 check settings.json yes '"key": "visuals"'
 check settings.json yes '"text": "Enforce"'
+check settings.json yes '"key": "messages"'
+check settings.json yes '"key": "messages-summary"'
+check settings.json yes '"text": "Send right away"'
 check visuals-settings.json yes '"key": "visuals-page"'
 check visuals-settings.json yes '"text": "● Enforce (Recommended)"'
 check visuals-settings.json yes '"key": "visual-mode-nudge"'
