@@ -70,7 +70,7 @@ pub struct App {
     /// The chief of staff is working, as the agent layer last said.
     pub working: bool,
     /// Messages waiting until the chief of staff is done, oldest first. Kept in memory only:
-    /// quitting the app drops them, as it drops the conversation.
+    /// quitting the app drops them, and the kept conversation holds only messages that went out.
     pub queue: Vec<String>,
     /// The queued message being edited, by its place in `queue`, with its field.
     pub editing: Option<(usize, TextEdit)>,
@@ -5950,6 +5950,7 @@ mod tests {
         let dir = scratch("unused");
         let (chief, _finish) = Stub::slow();
         let mut rt = runtime_with(App::new(Box::new(chief), installed_firstmate(), &dir));
+        chord(&mut rt, ',', false);
         assert_eq!(texts_under(&rt, "messages-summary"), ["Send right away"]);
         tap(&mut rt, "messages");
         assert_eq!(rt.state.showing, Showing::Messages);
@@ -5959,8 +5960,9 @@ mod tests {
         );
         tap(&mut rt, "message-mode-queue");
         assert_eq!(*rt.state.delivery.settings(), messages::Delivery::Queue);
+        tap(&mut rt, "messages-all-settings");
         assert_eq!(texts_under(&rt, "messages-summary"), ["Queue until done"]);
-        tap(&mut rt, "messages-close");
+        tap(&mut rt, "settings-close");
         rt.state.draft.text = "Start.".into();
         tap(&mut rt, "send");
         rt.state.draft.text = "Waits.".into();

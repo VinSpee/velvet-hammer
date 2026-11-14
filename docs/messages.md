@@ -5,7 +5,7 @@ working, so the captain can steer it or add to what it is doing without waiting.
 shows in the conversation at once, in the order it was sent, marked "sent while your chief of
 staff was working". A line over the message field says when the chief of staff is working.
 
-The **Messages** card in the agents column opens the setting. Its other mode, **Queue new
+The **Messages** section of Settings opens the setting. Its other mode, **Queue new
 messages until the chief of staff is done**, is off by default.
 
 ## What Claude Code does with a message sent mid-turn
@@ -58,9 +58,12 @@ a time, in order. Reordering is not offered.
 - While Claude Code is not ready (not signed in, starting, or after it stopped), queued messages
   wait, and the sign-in screen says how many. They go out once it is ready again. If the session
   stops in the middle of a turn, the next queued message starts a new session.
-- Queued messages are kept in memory only, because the app keeps no conversation history yet.
-  Quitting drops them, as it drops the conversation. The setting itself is kept in
-  `messages.json` in the data directory.
+- Queued messages are kept in memory only. The kept conversation (see
+  [The conversation: find and history](conversation.md)) holds only messages that went out, so
+  quitting drops what is still queued; a message shows in the conversation, and is kept, once it
+  is sent. Whether a message went out while the chief of staff was working is not kept either, so
+  a restored message shows without that mark. The setting itself is kept in `messages.json` in
+  the data directory.
 - Each queued message leaves the queue as it is sent, so it cannot go out twice.
 
 ## Messages that are not ready to go

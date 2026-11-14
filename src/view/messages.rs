@@ -54,7 +54,7 @@ pub fn messages_page(s: &App, t: Theme, dark: bool) -> El {
                 "messages-queue-kept",
                 "Queued messages are kept in memory only. While Claude Code is not ready (not \
                  signed in, starting, or after it stopped), they wait and go out once it is. \
-                 Quitting Velvet Hammer drops them, as it drops the conversation.",
+                 Quitting Velvet Hammer drops them; the kept conversation holds only messages that went out.",
                 t,
             ))
             .child(note(
