@@ -94,10 +94,13 @@ alone; a `mimeType` a result claims for it is ignored.
 | Image | An `image` block, or a png, jpg, gif, webp or heic file the tool named | The image fitted to the column, enlarged on a press; a line with the path when it cannot be decoded |
 | Video | An mp4, m4v, mov or webm file the tool named or linked | An inline player with a poster frame, **Play** and **Pause**, and **Open in your video player** |
 | Audio | An `audio` block | The generic view, for now |
-| Diff | A tool of kind `edit` | The generic view, for now |
-| Terminal | A tool of kind `execute` | The generic view, for now |
+| Diff | A tool of kind `edit` | Each change as a diff: removed and added lines tinted, coloured as code for the file's language, with the changed words marked; a failed edit's error above it |
+| Terminal | A tool of kind `execute` | The command after a `$` prompt, coloured as shell and cut to one line until **Show all**, over its output as a terminal shows it |
+| File | A tool of kind `read` | The file's lines with their numbers, coloured as code for its language |
+| Search | A tool of kind `search` | The pattern and folder in the header with the count of what was found, and the matches |
+| Fetch | A tool of kind `fetch` | The address in the header, and the summary formatted as Markdown |
 | View | The app's own `app_ui` tool, from the moment it starts | The json-render view its input describes, filling in as the input streams (see [Views in the chat](json-render.md)) |
-| Generic | Anything else | The tool's name, its main argument on one line, and its result folded behind a button |
+| Generic | Anything else | The tool's name, its main argument on one line, and its result as text |
 
 A file is shown only when a tool use named it, it exists and it is a regular file; the app reads
 nothing else from the disk. An image file or image block larger than 32 MB is not read, and
@@ -108,13 +111,50 @@ showing the first frame as a poster until it plays, with no extra dependency. On
 Rune has no player, so the chat says so and keeps **Open in your video player**, which opens the
 file in the system's default player. Nothing opens or plays on its own.
 
+## The card
+
+Every tool use except a view is a card (`src/view/tool.rs`). Its header has a status dot, the
+tool's name, its main argument (a Bash call's `description`, a file's name before its folder, a
+search's pattern, an address), how long it took, its status in words (**Running…**, **Done**,
+**Failed**, or a command's **Exit code N**) and a **Copy** button for the command, path, pattern
+or address. Status is never colour alone: the word says it too. A failed tool's card has a red
+border, and so does a failed command's output.
+
+- **Time.** From the moment the call reached the app to the moment its result did, which
+  includes any wait for your approval. Under a tenth of a second is not shown.
+- **Exit code.** Claude Code starts a failed command's result with an `Exit code N` line; the
+  header shows it and the output leaves it out.
+- **Colours.** A command's output keeps the colours and weights its ANSI escape sequences ask
+  for (`src/ansi.rs`): the sixteen named colours at a lightness that reads in either theme,
+  the 256-colour cube, the greys and true colour as asked. Other escapes are dropped, a carriage
+  return draws its line again as a progress bar expects, and copying the output copies it
+  without escapes.
+- **Long results.** A result over 11 lines shows its first 8 and **Show N more lines**. Unfolded,
+  it scrolls past 360 points and shows at most 2,000 lines or 256 KB; the line under it says
+  when it stops short, and **Copy** still copies all of it. A diff folds the same way.
+- **Wrapping.** Output with a line over 72 characters offers **Don't wrap lines**, after which
+  it scrolls sideways. A file's code never wraps, so its lines stay beside their numbers.
+- **Theme and access.** The terminal block, code colours and diff tints follow the light and
+  dark themes; every control is a focusable button with a label, the fold buttons report
+  whether they are expanded, and all code and output is selectable.
+
+The same Bash call before and after (`tool-bash`, from `scripts/fixtures/tools-bash.json`):
+
+![Before: the command cut off in grey over unformatted output](screens/tool-calls/bash-before.png)
+
+![After: a card with the command coloured as shell, its time, status and the first lines of output](screens/tool-calls/bash-after.png)
+
+More in `docs/screens/tool-calls`: the run unfolded (`bash-open.png`), commands that failed with
+colours, printed nothing or still run (`terminal.png`), edits as diffs (`diff.png`), a read, two
+searches and a fetch (`files.png`), and light versions.
+
 ## The next handlers
 
 | Handler | Standard | What it would show |
 | --- | --- | --- |
 | Audio | [MCP audio content](https://modelcontextprotocol.io/specification/2025-06-18/server/tools#audio-content) | A player for the clip (`rune::Player::audio`) |
-| Diff | [ACP diff](https://agentclientprotocol.com/protocol/tool-calls) | The change as a diff, from an edit tool's input (`old_string`, `new_string`) or a Write's content |
-| Terminal | [ACP terminal](https://agentclientprotocol.com/protocol/tool-calls) | The command and its output as a terminal block |
+| Terminal output as it arrives | [ACP terminal](https://agentclientprotocol.com/protocol/tool-calls) | A command's output while it runs; the app now reads a command's result only once it ends |
 
-PDFs (Anthropic `document` blocks) are another candidate. To add a handler, give it a view in
-`src/view/tool.rs` in place of the generic one, and a scene and a test.
+PDFs (Anthropic `document` blocks) are another candidate. To add a handler, give it a body in
+`src/view/tool.rs` (the folding block in `src/view/tool/output.rs` fits most text), and a
+scene and a test.

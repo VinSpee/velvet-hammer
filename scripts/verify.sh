@@ -31,6 +31,7 @@ for scene in chat replied empty peek signed-out signing-in signed-in expired cli
   firstmate-modified firstmate-blocked firstmate-session firstmate-panels firstmate-answering firstmate-crew \
   projects-fresh projects-empty projects-adding projects-listed \
   formatted formatted-all formatted-streaming tool-image tool-image-broken tool-video tool-generic tool-picture \
+  tool-bash tool-bash-open tool-terminal tool-diff tool-files \
   view-static view-streaming view-state view-action view-unknown view-too-large \
   visuals-settings visuals-enforced visuals-capped rules-settings rules-merge-ask rules-project-ask; do
   headless --scene "$scene" --snap "$out/$scene.png"
@@ -253,7 +254,7 @@ check formatted-all.json no  '~~'
 check formatted-streaming.json yes '"text": "The fleet is empty: nothing"'
 check formatted-streaming.json no  '**'
 # Tool uses: an image inline, one that cannot be decoded, a video with its actions, a command's
-# output unfolded, and an image enlarged.
+# output, and an image enlarged.
 check tool-image.json yes '"key": "tool-2-image"'
 check tool-image.json yes '"text": "Read"'
 check tool-image.json no  '"key": "tool-2-placeholder"'
@@ -263,11 +264,33 @@ check tool-video.json yes '"key": "tool-2-video"'
 check tool-video.json yes '"key": "tool-2-play"'
 check tool-video.json yes '"text": "Open in your video player"'
 check tool-generic.json yes '"text": "Bash"'
-check tool-generic.json yes '"key": "tool-2-result"'
+check tool-generic.json yes '"key": "tool-2-output"'
+check tool-generic.json yes '"key": "tool-2-command"'
 check tool-generic.json yes '"text": "one\ntwo\nthree"'
 check tool-picture.json yes '"key": "picture"'
 check tool-picture.json yes '"key": "picture-close"'
 check tool-picture.json no  '"key": "chat-input"'
+# Tool calls as cards: the captain's long test run folded to its first lines and unfolded,
+# commands that failed with colours, printed nothing or still run, edits as diffs, and reads,
+# searches and a fetch.
+check tool-bash.json yes '"key": "tool-2-command"'
+check tool-bash.json yes '"text": "Run the test suite"'
+check tool-bash.json yes '"text": "42 s"'
+check tool-bash.json yes '"text": "Show 20 more lines"'
+check tool-bash.json no  'test result: ok'
+check tool-bash-open.json yes 'test result: ok. 112 passed'
+check tool-bash-open.json yes '"text": "Show fewer lines"'
+check tool-terminal.json yes '"text": "Exit code 101"'
+check tool-terminal.json yes 'error: unused variable'
+check tool-terminal.json no  '\u001b'
+check tool-terminal.json yes '"key": "tool-4-empty"'
+check tool-terminal.json yes '"text": "Running…"'
+check tool-diff.json yes '"key": "tool-2-diff"'
+check tool-diff.json yes '"text": "+5"'
+check tool-diff.json yes '"key": "tool-5-error"'
+check tool-files.json yes '"key": "tool-4-numbers"'
+check tool-files.json yes '"text": "Found 2 files"'
+check tool-files.json yes 'https://doc.rust-lang.org/book/ch08-02-strings.html'
 # json-render views: every component, a spec half streamed, state bound to inputs and a repeat,
 # a submit and its reply, an unknown component, and a spec over the limits.
 check view-static.json yes '"text": "Chief of staff'"'"'s view"'
