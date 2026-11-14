@@ -6,8 +6,9 @@ Velvet Hammer keeps its own git clone of it. This page explains where the clone 
 installed and updated, how to change it, and how to reset it.
 
 Velvet Hammer installs and updates the clone, runs the chief of staff inside it, fills the
-**Needs your input** panel, the agents list and the projects list from firstmate's records, lets
-you peek at a crewmate's terminal, and starts adding a project with the chief of staff. [Where the integration stands](#where-the-integration-stands) lists what
+**Needs your input** panel, the agents list, the projects list and the second mates from
+firstmate's records, lets you peek at a crewmate's terminal, starts adding a project with the
+chief of staff, and adds, manages and talks to second mates through firstmate's own scripts. [Where the integration stands](#where-the-integration-stands) lists what
 works end to end and what is not verified.
 
 ## Where it lives
@@ -16,6 +17,7 @@ works end to end and what is not verified.
 | --- | --- |
 | `~/.velvet-hammer/firstmate` | The clone: `AGENTS.md`, `bin/`, `.agents/skills/`, `docs/`. |
 | `~/.velvet-hammer/home` | Firstmate's operational home (`FM_HOME`): `state/`, `data/`, `config/`, `projects/`. |
+| `~/.velvet-hammer/secondmates/<name>` | The home of each [second mate](#second-mates) added from the app: firstmate's own clone with its own `state/`, `data/`, `config/` and `projects/`. |
 
 Set `VELVET_HAMMER_DATA` to use a directory other than `~/.velvet-hammer`. The default path has no
 spaces because firstmate's shell scripts run from inside it.
@@ -39,8 +41,9 @@ reports that. The app leaves the directory untouched; move it away and install a
 
 ## The Firstmate page
 
-The card at the bottom of the agents column shows the clone's state in a few words. Select it to
-open the Firstmate page, which shows one of these states:
+The **Firstmate** section in Settings (Cmd+, on macOS) shows the clone's state in a few words.
+Select it to open the Firstmate page, which shows one of these states (the chat shows it too
+while the clone is not installed):
 
 | State | Meaning | What you can do |
 | --- | --- | --- |
@@ -220,8 +223,11 @@ mode, the panel shows firstmate's own error above the last items it read.
 
 The agents column lists firstmate's tasks in flight, from `in_flight[]` in the same snapshot
 that fills the panel: each row shows the task's title, firstmate's word for its state (such as
-`working`, `parked` or `blocked`) and one line on what it is doing. The list changes when
-firstmate's records change. You never have to open a row.
+`working`, `parked` or `blocked`) and one line on what it is doing. Under that, a row shows what
+the worker runs on, such as `pi · opencode-go/deepseek-v4.1-flash`, read from the `harness=` and
+`model=` lines of firstmate's `state/<id>.meta`, because the snapshot does not carry them (see
+[Workers on other providers](worker-providers.md)). The list changes when firstmate's records
+change. You never have to open a row.
 
 Selecting a row opens a peek in place of the chat. While it is open, the app runs firstmate's
 `bin/fm-peek.sh <task-id> 40` every two seconds and shows the last 40 lines of that crewmate's
@@ -281,6 +287,211 @@ the chosen path into your message, which you then send. **Yes** and **No** send 
 the chief of staff has finished asking. **Done adding** hides the row. You can always type
 instead.
 
+**Choosing a GitHub repository.** Above those controls, a combobox lists your GitHub
+repositories, so you can pick one instead of typing its address. Type in its field to filter the
+list, or choose **Show repositories**. Choosing one puts its address, such as
+`https://github.com/acme/payments-api`, into your message, which you then send, exactly as a
+chosen folder's path is, and empties the field. The app does not clone anything: firstmate's procedure clones and
+registers the repository after your yes, as it does for any address.
+
+- **Where the list comes from.** The app runs the GitHub CLI you already signed in with:
+  `gh api user` for your login, then `gh api --paginate user/repos`, which lists every repository
+  you own, collaborate on or reach through an organization. It reads only each repository's
+  owner, name, visibility, description, last push and fork and archived flags. It never reads,
+  asks for or stores a token. The list is kept for the session and listed again each time it
+  opens; while that runs, the last list stays and a line says it is refreshing.
+- **Order.** Your own private repositories first, then the other private ones (an
+  organization's, or ones you collaborate on, with internal ones counted as private), then public
+  ones, and archived ones last, each group most recently pushed first. Each row shows a
+  **Private**, **Internal** or **Public** badge, **Fork** and **Archived** badges where they
+  apply, and the date of the last push.
+- **Filtering.** Each character you type, ignoring case and spaces, must appear in that order in
+  `owner/name` or in the description. A match in `owner/name` ranks above one only in the
+  description. Among those, runs of consecutive characters and characters at the start of a word
+  rank higher, and gaps rank lower; ties keep the order above, so your own private repositories
+  still lead. The matched characters are marked. The list shows the best 50 and says how many
+  more there are.
+- **Keyboard.** Focus stays in the field. Down opens the list and moves the highlight, Up moves
+  it back (both wrap), Return chooses the highlighted repository, and Escape closes the list, or
+  clears the field when the list is already closed. The element around the field has the
+  combobox role and the list has the listbox role, with each row an option; the field names the
+  highlighted row as its active descendant. Rune reports every text field to the platform as a
+  text input, which is why the combobox role sits on the element around it.
+- **When gh cannot list them.** If `gh` is not installed or not on the app's `PATH`, the list
+  says so and how to install it (https://cli.github.com, or `brew install gh`) and sign in
+  (`gh auth login`). If `gh` is not signed in, it says to run `gh auth login`. Any other failure
+  shows `gh`'s own words. Each has **Try again**. A refresh that fails keeps the list you are
+  looking at.
+
+| State | Screenshot |
+| --- | --- |
+| The list, your own private repositories first | [projects-repos.png](screens/projects/projects-repos.png) |
+| Filtered by `ham`: two name matches and a description match, marked | [projects-repos-filtered.png](screens/projects/projects-repos-filtered.png) |
+| A repository chosen: its address in the message | [projects-repos-chosen.png](screens/projects/projects-repos-chosen.png) |
+| `gh` not installed | [projects-repos-missing.png](screens/projects/projects-repos-missing.png) |
+| `gh` not signed in | [projects-repos-signed-out.png](screens/projects/projects-repos-signed-out.png) |
+
+## Second mates
+
+A second mate, in firstmate's terms, is a crewmate with its own persistent firstmate home, a
+charter (a scope in plain words), a project list, its own backlog and its own session. It is idle
+until the main firstmate routes work to it, and it reports back on its parent channel. Firstmate's
+`secondmate-provisioning` skill and the scripts it names define all of this. Velvet Hammer shows
+exactly what firstmate's records say and changes nothing by hand: every change runs one of
+firstmate's guarded scripts, from the managed clone, with `FM_HOME` set to the app's home.
+
+![Five second mates in the agents column, one in each state](screens/second-mates/mates-listed.png)
+
+### The list and each mate's page
+
+**Second mates** in the agents column lists the mates in firstmate's registry,
+`data/secondmates.md`, in its order. Each row shows the mate's name, whether its session is
+`running`, `stopped` or `not started`, and how its work stands: `idle`, `working`,
+`waiting on you`, `held` or `state unknown`. Selecting a row opens the mate's page:
+
+- its charter, scope, projects, home and the date it was added, from the registry;
+- **Working on now**: the tasks in flight in its own home, as firstmate's bearings snapshot reports
+  them (`in_flight[]` rows named `<mate>/<task>`);
+- **Waiting on you**: what it escalated to the captain, the captain holds in its own home
+  (`decisions_open[]` rows whose `owner` is the mate), each with **Answer**;
+- **Conversation**: the messages sent to it and its replies (see below);
+- **Last outcomes**: the newest lines on its parent channel that answer no message, such as a
+  decision it held for you or a child's result;
+- **Peek at its terminal**, which reads it with `bin/fm-peek.sh` as the agents list does for a
+  crewmate.
+
+Where the records come from:
+
+| What | Source |
+| --- | --- |
+| Who the mates are, their charter, scope, projects and home | The registry, `data/secondmates.md`, in the line format `bin/fm-secondmate-registry-lib.sh` owns. Firstmate publishes no document of it, so the app reads it and never writes it. |
+| How each one's work stands | `secondmates[]` in `bin/fm-bearings-snapshot.sh --json --all-secondmates`, which reads each mate's own published home summary. |
+| Whether its session is up | The endpoint of its task in the same snapshot, printed with `--fields endpoints`: `running` when the terminal exists and firstmate does not read the agent as dead, `stopped` otherwise, `not started` when firstmate has no task record for it. |
+| What was sent to it | Its steering inbox in the main home, `state/<mate>.inbox/` and `handled/`, in the record format `bin/fm-task-inbox-lib.sh` owns. |
+| What came back | Its parent channel, `state/<mate>.status` in the main home, which `docs/secondmate-parent-channel.md` describes. |
+
+The snapshot runs again when the main home's `state/` or `data/` changes, and also when a mate
+home's `state/` changes, because each mate publishes its summary there.
+
+![A working second mate with two tasks in flight](screens/second-mates/mate-working.png)
+
+**When the records disagree** the row says `records disagree` and the page says how, in
+firstmate's own words where firstmate gives them, instead of hiding it:
+
+- the registry lists the mate, but the snapshot does not report it, or the reverse;
+- the snapshot cannot read the mate's home, for example `invalid home: not a seeded secondmate
+  home` when the home lost its identity marker;
+- the snapshot reports a contradiction between what the mate said on the parent channel and its
+  own home's records.
+
+![A mate whose home does not match the registry](screens/second-mates/mate-mismatch.png)
+
+### Adding one
+
+**Add second mate** under the list opens a guided flow in the middle column. It asks one
+question at a time, in the order firstmate's `secondmate-provisioning` procedure needs them:
+
+1. **What it should be responsible for**, in one line. Firstmate keeps it as the mate's charter,
+   and as its routing scope, which is what `bin/fm-home-seed.sh` derives when no separate scope
+   is given.
+2. **Which projects it holds**, picked from the projects firstmate already has. A `local-only`
+   project stays with the main firstmate and a clone the registry does not list cannot be
+   seeded, so both are shown but cannot be picked. **No projects** is for a mate that works on
+   firstmate itself (`--no-projects`).
+3. **Its name**, which must follow the registry's rule (letters, digits, dots, hyphens and
+   underscores) and must not be taken. The flow suggests the first project's name.
+4. **Which runtime**, only when firstmate's configuration names more than one: the app asks
+   `bin/fm-harness.sh secondmate <name>` and `bin/fm-harness.sh crew`, and offers both when they
+   differ. A runtime chosen here is passed to this launch only; firstmate's configuration
+   decides later launches.
+
+The last page lists exactly what will run and what that creates, with every path, and waits for
+**Yes, create <name>**:
+
+![The confirmation before a second mate is created](screens/second-mates/add-mate-confirm.png)
+
+On yes, the app runs:
+
+1. `FM_SECONDMATE_CHARTER=<your words> bin/fm-home-seed.sh <name> ~/.velvet-hammer/secondmates/<name> <projects>`.
+   Firstmate scaffolds the charter brief in `data/<name>/brief.md`, makes the home a local git
+   clone of the managed clone, clones each project from the main home into it, initializes
+   no-mistakes where the project ships with it, and adds the registry line. Seeding is
+   transactional: a refusal undoes everything, and the page shows firstmate's words.
+2. `bin/fm-spawn.sh <name> --secondmate`, with `--harness` when you chose a runtime. If the
+   session does not start, the mate still exists, and its page says why and offers **Start**.
+3. A message to the chief of staff in the chat, in your name, saying what was created and asking
+   it to finish firstmate's procedure: the record intake for an existing or inherited domain, and
+   handing the new mate the queued backlog items that fit its scope with
+   `bin/fm-backlog-handoff.sh`. Both need firstmate's judgment, so the app leaves them to it.
+
+Nothing remote is created, pushed or published: every clone is made from copies on this computer.
+
+![A refused seed, in firstmate's words](screens/second-mates/add-mate-refused.png)
+
+**From the chat.** When you ask the chief of staff for a second mate, it can open the same flow
+with the app's `app_secondmate` tool, filling in the scope you described. The chat says that it
+opened, and nothing is created until you say yes in the flow. If the flow already has your
+answers, they are kept and the scope is filled in only when it is still empty. While an action is
+running the flow cannot open, and the chat says that firstmate is busy.
+
+### Managing one
+
+Each action is one of firstmate's scripts and waits for a yes in a confirmation that says what
+the script does:
+
+| Action | Shown when | Runs |
+| --- | --- | --- |
+| **Start** | The session is stopped or never started | `bin/fm-spawn.sh <name> --secondmate`, firstmate's recovery for a dead second mate |
+| **Interrupt** | The session is running | `bin/fm-control.sh <name> interrupt` |
+| **Relaunch** | The session is running | `bin/fm-control.sh <name> relaunch --note "Relaunched by the captain from Velvet Hammer."` |
+| **Retire** | Always | `bin/fm-teardown.sh <name>`, never with `--force` |
+
+Firstmate's teardown refuses while the mate has work in its home or owes a reply, and changes
+nothing. The page shows that refusal and says that Velvet Hammer never forces a retirement. A
+retirement that goes through removes the mate's session, registry line and home.
+
+![A refused retirement](screens/second-mates/mate-retire-refused.png)
+
+**Not offered:** changing a mate's charter or project list. Firstmate's
+`secondmate-provisioning` procedure has no step for editing either, so the page says so and
+offers none. To change them, retire the mate and add a new one. Interrupt and relaunch are not
+offered for a mate whose home is on another machine, because firstmate's control plane refuses
+them by name; the page says so.
+
+### Talking to one
+
+The message field on a mate's page sends your words with `bin/fm-send.sh <name> <words>`, which
+delivers them the way firstmate delivers a routed request: firstmate marks the message, records a
+reply expectation under `state/pending-replies/`, and writes it to the mate's inbox. The mate
+answers on its parent channel, normally with `bin/fm-secondmate-report.sh`, naming the request's
+correlation id, and the reply shows under your message. Replies are Markdown and are drawn like
+the chief of staff's. Messages show who sent them: **You** for those you sent from the app
+(recorded by correlation id in `secondmate-sent.jsonl` in the app's data directory), and
+**Firstmate** for those the chief of staff or firstmate's scripts sent.
+
+`bin/fm-send.sh` reads a message that starts with `--key`, `--resolve-key` or `--fire-and-forget`
+as an option, so the app does not send one. It keeps your draft and warns you; begin the message
+with other words.
+
+Firstmate's main home owns the reply expectation, so its watcher also notices the reply, and
+recovers or escalates a missing one the way it does for its own requests.
+
+![A message and the reply on the parent channel](screens/second-mates/mate-replied.png)
+
+**Answering what a mate escalated.** A captain hold in a mate's home also shows in **Needs your
+input**, marked with the mate's name. **Answer**, there or on the mate's page, turns your next
+message to that mate into "The captain's answer to your captain hold <key>: <your words>",
+delivered with `bin/fm-send.sh`. The hold belongs to the mate's home, so the mate records your
+answer with its own `bin/fm-captain-hold.sh`, and the hold leaves the panel when its records say
+it is closed.
+
+![An escalation answered](screens/second-mates/mate-escalation-answered.png)
+
+**Routing work through the chief of staff.** Ask the chief of staff "have <name> do X". When it
+routes the work with `bin/fm-send.sh <name>` or `bin/fm-backlog-handoff.sh <name>`, that tool use
+in the chat says **Routed to second mate <name>**, with **Open** for the mate's page, where the
+request appears in the conversation and its tasks under **Working on now**.
+
 ## Reset it
 
 Velvet Hammer has no reset button, because a reset discards your changes. To start again from
@@ -318,10 +529,24 @@ chief of staff an empty backlog and no task records, and loses nothing in the cl
 - Reading a crewmate's terminal through `bin/fm-peek.sh` from a real tmux pane. This one was run
   by hand against the scripts, not through the app's code.
 
+**Second mates, measured with the real scripts** (firstmate `427056c4`, scratch homes, no agent
+launched): `bin/fm-home-seed.sh` seeded a mate with the arguments the app passes, and refused a
+taken name and a missing project in one `error:` line each; the app read the registry line it
+wrote, and `bin/fm-bearings-snapshot.sh --json --fields endpoints --all-secondmates` reported the
+mate idle, stopped (a dead endpoint), with a home that no longer matched the registry, and with
+a captain hold, each of which the app read. Through the app's own code, the real
+`bin/fm-teardown.sh` refused to retire a mate with a task in flight, the real `bin/fm-send.sh`
+delivered a message whose correlation id the app found, and a reply from the real
+`bin/fm-secondmate-report.sh` paired with it.
+
 **Works against stand-ins only** (the fake `claude` and stand-in scripts in a scratch upstream):
 the answer flow, merge approvals, the agents list and the peek view. The projects list, its
 empty state and the add controls also run on the fake `claude`, with the test writing the
-registry that firstmate's procedure would write.
+registry that firstmate's procedure would write. So do the second mates' list, pages, guided
+add, actions, conversation and escalations, with stand-ins of `bin/fm-home-seed.sh`,
+`bin/fm-spawn.sh`, `bin/fm-control.sh`, `bin/fm-teardown.sh`, `bin/fm-send.sh` and
+`bin/fm-harness.sh` that print and write what the real scripts did, and a bearings snapshot
+shaped like the real one (`scripts/fixtures/bearings-mates.json`).
 
 **Not verified:**
 
@@ -335,6 +560,9 @@ registry that firstmate's procedure would write.
 - The folder dialog. Tests replace it; `osascript` and `zenity` were not run by a test.
 - Adding a project from a git URL, which clones over the network and may set up no-mistakes, and
   any refusal or failure in firstmate's procedure. Only the local-folder case above was run.
+- Starting a real second mate. The app's actions on mates run against stand-ins of firstmate's
+  scripts in tests (see below); a real `bin/fm-spawn.sh --secondmate`, `bin/fm-control.sh` and a
+  retirement that goes through were not run, because each starts or stops a real agent.
 - The app's real window. Everything above ran headless.
 
 **Decided: configurable, recommended run without asking.** The chief of staff's tool uses are
@@ -353,3 +581,14 @@ approves its own crew was not in scope and is unchanged.
    noticed before the captain's first message after reopening the app.
 4. The registered projects in the bearings snapshot (or a script that prints them), so the app
    renders firstmate's document instead of reading `data/projects.md` and `projects/` itself.
+5. Each second mate's charter, scope and projects in the bearings snapshot, so the app does not
+   read `data/secondmates.md` itself.
+6. A document of a mate's conversation (the requests in its inbox and the lines on its parent
+   channel), so the app does not read those records itself.
+7. `bin/fm-send.sh` printing the correlation id of a marked request, so the app does not read it
+   back from the inbox record.
+8. A step in `secondmate-provisioning` for changing a mate's charter or project list, which the
+   app would then offer.
+9. Remote second mates: the app lists one the registry records with a `host:`, and shows what the
+   snapshot reports, but does not read its inbox, which is on the other machine, and does not
+   offer interrupt or relaunch; supporting them is a follow-up.

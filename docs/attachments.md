@@ -43,8 +43,12 @@ can read. A pasted image is saved there as `Pasted image.png`. The copy is what 
 shown, so moving or deleting the original afterwards changes nothing. Removing a chip before
 sending deletes its copy; a sent attachment's copy is kept, so the message keeps showing it.
 
-The chat history is not yet saved across restarts on this branch, so after a restart the
-messages, with their attachments, are not shown again. The copies stay in `attachments/`.
+When the conversation is kept across restarts (see [The conversation](conversation.md)), each
+message keeps its attachments: `history.jsonl` records the path of each copy with its name, size
+and kind, never the file's bytes, and after a restart the message shows its chips again from the
+copies in `attachments/`. **Clear history** also deletes the copies attached to the messages it
+clears. A draft's attachments, like a queued message's, are not kept: after quitting, their
+copies stay in `attachments/` unused.
 
 ## What the chief of staff gets
 

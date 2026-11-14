@@ -118,6 +118,7 @@ it.
 | `Button` | `label`, `variant?: primary\|secondary\|danger`, `disabled?` | | `press` |
 | `Input` | `label`, `placeholder?`, `value?` | | `submit` (Return) |
 | `Checkbox` | `label`, `checked?` | | `change` |
+| `Choice` | `question`, `options: {value, label, hint?}[]`, `recommended?` (an option's value), `multiple?`, `other?` (true) | | (sends its answer itself) |
 
 | Action | Params | What it does |
 | --- | --- | --- |
@@ -140,6 +141,26 @@ The params are resolved against the state at the moment of the press, after any 
 the same list ran. The input values are the value of every path an `Input` or `Checkbox` binds.
 The stub agent layer answers with the params it got, so the round trip runs in headless scenes
 and tests.
+
+**A question with a fixed set of answers is a `Choice`.** It draws the question, one row per
+option with its hint, a **Recommended** mark on the option whose value is `recommended`, and an
+**Other** field for an answer of the captain's own (Return sends it) unless `other` is false. In a
+single choice a press on an option sends it at once; with `multiple`, presses pick and unpick and
+**Send** sends the picks (it is disabled until something is picked or typed). It needs no `on`
+binding: the answer goes back by itself, once. The chat shows it as the captain's own message
+("Chose “yolo off”.", "Answered “…”."), the `Choice` shows the answer and takes no more presses,
+and the chief of staff's session receives each option by its exact `value`, so an answer can never
+be an ambiguous "No":
+
+> In the view you showed with app_ui (tool use toolu_…), I answered your question “Merge
+> authority for velvet-hammer is yolo on. Do you want it off?” with the option "yolo-off"
+> (“yolo off”).
+
+Several picks are listed in the order the view shows them, and the Other text follows as "my own
+words, “…”". The tool's answer warns about an option without a string `value` and `label` (it is
+left out), a `Choice` with fewer than two options, and a `recommended` that is no option's value.
+What was answered lives in the running app; a restart shows the `Choice` unanswered again, while
+the captain's message about it stays in the chat.
 
 ## Safety
 
@@ -168,8 +189,8 @@ A spec is untrusted model output.
 - **`validateForm`** and the `checks` and `validateOn` validation props.
 - **`confirm`, `onSuccess` and `onError`** on bindings, and `preventDefault`.
 - **`repeat.key`**: copies are keyed by index, which is enough for a view redrawn from state.
-- **Components** beyond the catalog above, such as Grid, Tabs, Dialog, Select, Radio, Slider,
-  Avatar and Link.
+- **Components** beyond the catalog above, such as Grid, Tabs, Dialog, Select, Slider, Avatar
+  and Link. `Choice` covers what Radio and a multi-select would.
 - **Running json-render's React code** or a web view, code export, and a visual spec editor.
 
 ## Adding a component
@@ -188,5 +209,8 @@ Headless renders of the `view` scenes (see the README's verification section):
 | The same view with a little over half of its spec streamed | [view-streaming.png](screens/json-render/view-streaming.png) |
 | State bound to a checkbox and an input, and a repeat, after ticking, typing and adding | [view-state.png](screens/json-render/view-state.png) |
 | A submit and the stub's reply | [view-action.png](screens/json-render/view-action.png) |
+| The merge-authority question asked with a `Choice`, yolo off recommended | [choice-ask.png](screens/choice/choice-ask.png) |
+| The same after choosing yolo off, and the stub's reply to the exact value | [choice-answered.png](screens/choice/choice-answered.png) |
+| A `Choice` of several, two picked and an answer of the captain's own typed | [choice-multiple.png](screens/choice/choice-multiple.png) |
 | An unknown component | [view-unknown.png](screens/json-render/view-unknown.png) |
 | A spec over the element limit | [view-too-large.png](screens/json-render/view-too-large.png) |

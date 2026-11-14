@@ -20,12 +20,16 @@
 # about a Bash command far larger than the app will show, and "abandon: COMMAND" asks about
 # COMMAND but hangs up after a second, as Claude Code does when it stops waiting.
 #
+# A message "mate: SCOPE" calls the `app_secondmate` tool the same way, with SCOPE as the scope.
+#
 # A message "show: PATH" uses the Read tool on PATH, the way the real `claude` reports it: a
 # tool_use record, then a tool_result with the image as a base64 block for a .png, or a line of
 # text for anything else. "shell: COMMAND" uses Bash, whose result is three lines of text.
 #
 # Each message first goes to the UserPromptSubmit hook, as the real `claude` sends it. A message
-# "context?" is answered with whether that hook added the app's instruction about views.
+# "context?" is answered with whether that hook added the app's instruction about views, and
+# "links?" with whether it said how message links work. The line the app ends each message with,
+# giving its link, is dropped before the message is read; any other message is echoed whole.
 #
 # A message "list: A, B, C" is answered with a Markdown list of A, B and C, then the Stop hook is
 # asked about it with the list as `last_assistant_message`. If the hook sends the reply back with
@@ -35,12 +39,24 @@
 # stops again with the same list and `stop_hook_active` unset, then ends with "Left as text.", or
 # with "looped" if the hook sent it back a second time.
 #
+# A message "remind: WHEN | TEXT" calls the `app_remind` tool with TEXT and WHEN, where WHEN is
+# "in AMOUNT UNIT" or one of the keywords such as tomorrow_morning, and answers with the tool's
+# text. A message "reminders?" calls `app_reminders` and answers with its text.
+#
+# A message "ask: QUESTION" is answered with QUESTION as text, then the Stop hook is asked about
+# it the same way. If the hook sends it back, the fake asks it with a Choice view (yolo off,
+# recommended, or yolo on) as tool use toolu_fake_choice, and ends with "Pick one above.".
+#
 # A message with attachments (content blocks rather than a string) is answered with its words
 # and how many image blocks and listed files it carried.
 #
 # A message containing "whereami" is answered with the session's working directory and FM_HOME.
 # After a message "wake: TEXT" and its reply, a second turn nobody asked for says TEXT, the way
 # a firstmate Stop hook wakes an idle session.
+#
+# With --replay-user-messages, each message is echoed back as the turn that takes it in starts, as
+# the real `claude` does. A message "slow: TEXT" holds its turn open until the file "release" appears in
+# FAKE_CLAUDE_HOME (or 30 seconds pass), so a message sent meanwhile waits for the next turn, as the real `claude` holds one when the turn has no step left.
 set -eu
 home=${FAKE_CLAUDE_HOME:?FAKE_CLAUDE_HOME must name a scratch directory}
 state=$(cat "$home/state" 2>/dev/null || echo signed-out)
@@ -101,7 +117,7 @@ auth)
   ;;
 -p)
   # The app passes compact JSON; these pull out the one server and the one hook it names.
-  mcp_url='' hook_url='' hook_base='' mcp_auth='' hook_auth=''
+  mcp_url='' hook_url='' hook_base='' mcp_auth='' hook_auth='' replay=''
   while [ $# -gt 0 ]; do
     case $1 in
     --mcp-config)
@@ -109,6 +125,7 @@ auth)
       mcp_auth=$(printf '%s' "$2" | sed -E 's/.*"Authorization":"([^"]*)".*/\1/')
       shift
       ;;
+    --replay-user-messages) replay=1 ;;
     --settings)
       hook_base=$(printf '%s' "$2" | sed -E 's#.*"url":"(http://[^/"]*)/hooks/.*#\1#')
       hook_url=$hook_base/hooks/pre-tool-use
@@ -139,10 +156,16 @@ auth)
       images=$(printf '%s' "$line" | grep -o '"type":"image"' | wc -l | tr -d ' ')
       listed=$(printf '%s' "$words" | grep -o '\\n- ' | wc -l | tr -d ' ')
       said=${words%%Attached files*}
+      said=${said%%'\n\n[Velvet Hammer: this message'*}
       said=${said%\\n\\n}
       text="${said:-nothing} [image blocks: $images, files listed: $listed]"
       ;;
     esac
+    # The line the app adds giving the message's own link; the commands below ignore it.
+    text=${text%%'\n\n[Velvet Hammer: this message'*}
+    if [ -n "$replay" ] && [ "${text#swallow:}" = "$text" ]; then
+      printf '%s\n' "{\"type\":\"user\",\"isReplay\":true,\"message\":{\"role\":\"user\",\"content\":\"$text\"},\"parent_tool_use_id\":null}"
+    fi
     context=$(post "$hook_base/hooks/user-prompt-submit" "$hook_auth" "{\"hook_event_name\":\"UserPromptSubmit\",\"prompt\":\"\"}" 30 || true)
     case $text in
     'context?')
@@ -151,8 +174,18 @@ auth)
       *) text="context: none" ;;
       esac
       ;;
+    'links?')
+      case $context in
+      *velvet-hammer://message/*) text="links: told" ;;
+      *) text="links: not told" ;;
+      esac
+      ;;
     *envcheck*) text="api-key:${ANTHROPIC_API_KEY:+reached} token:${ANTHROPIC_AUTH_TOKEN:+reached}" ;;
     *whereami*) text="cwd=$(pwd -P) FM_HOME=${FM_HOME:-unset}" ;;
+    slow:*)
+      i=0
+      while [ ! -e "$home/release" ] && [ $i -lt 300 ]; do sleep 0.1; i=$((i + 1)); done
+      ;;
     stuck:*)
       # A turn that never finishes, and ignores its hooks and input, until it is signalled.
       i=0
@@ -165,6 +198,37 @@ auth)
         text="I noted it for you: $note"
       else
         text="the app_note tool did not answer"
+      fi
+      ;;
+    remind:* | 'reminders?')
+      case $text in
+      remind:*)
+        spec=${text#remind: }
+        what=${spec#* | }
+        # shellcheck disable=SC2086 # WHEN splits into its words on purpose.
+        set -- ${spec%% | *}
+        case $1 in
+        in) arguments="{\"text\":\"$what\",\"when\":\"in\",\"amount\":$2,\"unit\":\"$3\"}" ;;
+        *) arguments="{\"text\":\"$what\",\"when\":\"$1\"}" ;;
+        esac
+        call="{\"name\":\"app_remind\",\"arguments\":$arguments}"
+        ;;
+      *) call='{"name":"app_reminders","arguments":{}}' ;;
+      esac
+      answer=$(post "$mcp_url" "$mcp_auth" "{\"jsonrpc\":\"2.0\",\"id\":4,\"method\":\"tools/call\",\"params\":$call}" |
+        sed -E 's/.*"text":"(([^"\\]|\\.)*)".*/\1/')
+      echo '{"type":"system","subtype":"init","apiKeySource":"none","model":"fake"}'
+      # printf, not echo: the answer's \n escapes must reach the app as written.
+      printf '%s\n' "{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"result\":\"$answer\"}"
+      continue
+      ;;
+    mate:*)
+      scope=${text#mate: }
+      post "$mcp_url" "$mcp_auth" '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"fake-claude","version":"9.9.9"}}}' >/dev/null
+      if post "$mcp_url" "$mcp_auth" "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\"params\":{\"name\":\"app_secondmate\",\"arguments\":{\"scope\":\"$scope\"}}}" | grep -q '"content"'; then
+        text="I opened Add a second mate for you, with that scope filled in."
+      else
+        text="the app_secondmate tool did not answer"
       fi
       ;;
     run:* | abandon:* | big:* | write:* | read:*)
@@ -196,6 +260,24 @@ auth)
       continue
     fi
     case $text in
+    ask:*)
+      reply=${text#ask: }
+      final=$reply
+      echo '{"type":"stream_event","event":{"type":"message_start","message":{"role":"assistant","content":[]}}}'
+      echo "{\"type\":\"stream_event\",\"event\":{\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"$reply\"}}}"
+      if stop "$reply" false | grep -q additionalContext; then
+        spec="{\"root\":\"merge\",\"elements\":{\"merge\":{\"type\":\"Choice\",\"props\":{\"question\":\"$reply\",\"options\":[{\"value\":\"yolo-off\",\"label\":\"yolo off\",\"hint\":\"Every merge waits for your word.\"},{\"value\":\"yolo-on\",\"label\":\"yolo on\",\"hint\":\"I merge green pull requests on my own.\"}],\"recommended\":\"yolo-off\"},\"children\":[]}}}"
+        post "$mcp_url" "$mcp_auth" "{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"tools/call\",\"params\":{\"name\":\"app_ui\",\"arguments\":$spec}}" >/dev/null
+        echo "{\"type\":\"assistant\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"tool_use\",\"id\":\"toolu_fake_choice\",\"name\":\"mcp__velvet-hammer__app_ui\",\"input\":$spec}]},\"parent_tool_use_id\":null}"
+        echo '{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_fake_choice","content":"The view is shown."}]},"parent_tool_use_id":null}'
+        final="Pick one above."
+        echo '{"type":"stream_event","event":{"type":"message_start","message":{"role":"assistant","content":[]}}}'
+        echo '{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Pick one above."}}}'
+        stop "$final" true >/dev/null
+      fi
+      printf '%s\n' "{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"result\":\"$final\"}"
+      continue
+      ;;
     list:* | stubborn:*)
       # The reply as Markdown, and as JSON with its line breaks escaped.
       items=${text#*: }
@@ -258,9 +340,11 @@ auth)
     esac
     echo '{"type":"stream_event","event":{"type":"message_start","message":{"role":"assistant","content":[]}}}'
     echo '{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"You said: "}}}'
-    echo "{\"type\":\"stream_event\",\"event\":{\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"$text\"}}}"
-    echo "{\"type\":\"assistant\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"You said: $text\"}]}}"
-    echo "{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"result\":\"You said: $text\"}"
+    # printf, not echo: a message's \n escapes, such as a quoted linked message's, must reach the
+    # app as written.
+    printf '%s\n' "{\"type\":\"stream_event\",\"event\":{\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"$text\"}}}"
+    printf '%s\n' "{\"type\":\"assistant\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"You said: $text\"}]}}"
+    printf '%s\n' "{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"result\":\"You said: $text\"}"
     case $text in
     wake:*)
       sleep 0.3

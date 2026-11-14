@@ -91,8 +91,8 @@ impl Kind {
     }
 }
 
-/// How the chat draws a tool use. Image and video have their own views; audio, diff and terminal
-/// are registered for the next handlers and draw as [`Handler::Generic`] until they have theirs.
+/// How the chat draws a tool use. Audio is registered for the next handler and draws as
+/// [`Handler::Generic`] until it has its own view.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Handler {
     /// An image to show inline: a result's image block, or an image file the tool named.
@@ -103,8 +103,14 @@ pub enum Handler {
     Audio,
     /// An ACP `diff`: an edit tool's change.
     Diff,
-    /// An ACP `terminal`: a command's output.
+    /// An ACP `terminal`: a command and its output.
     Terminal,
+    /// A file a tool of kind `read` returned, as its lines.
+    File,
+    /// What a tool of kind `search` found.
+    Search,
+    /// What a tool of kind `fetch` brought back.
+    Fetch,
     /// A json-render view the chief of staff showed with the app's own `app_ui` tool (see
     /// [`crate::ui`]). It draws while its input is still streaming.
     Ui,
@@ -126,13 +132,13 @@ pub enum Picture {
 
 /// The registry: picks the handler for `tool` by its result's content types, the media type of
 /// a file it named, and its kind, in that order. The app's view tool is a view from the start;
-/// any other tool use still running is generic.
+/// any other tool use still running is drawn by its kind.
 pub fn handler(tool: &ToolUse) -> Handler {
     if tool.name == crate::ui::tool_name() {
         return Handler::Ui;
     }
     let Some(result) = &tool.result else {
-        return Handler::Generic;
+        return kind_handler(&tool.name);
     };
     for block in &result.content {
         match block {
@@ -154,10 +160,17 @@ pub fn handler(tool: &ToolUse) -> Handler {
     if let Some(handler) = named_path(&tool.input).and_then(media_file) {
         return handler;
     }
-    match Kind::of(&tool.name) {
+    kind_handler(&tool.name)
+}
+
+fn kind_handler(tool: &str) -> Handler {
+    match Kind::of(tool) {
         Kind::Edit => Handler::Diff,
         Kind::Execute => Handler::Terminal,
-        _ => Handler::Generic,
+        Kind::Read => Handler::File,
+        Kind::Search => Handler::Search,
+        Kind::Fetch => Handler::Fetch,
+        Kind::Think | Kind::SwitchMode | Kind::Other => Handler::Generic,
     }
 }
 
@@ -282,6 +295,100 @@ pub fn result_text(result: &ToolResult) -> String {
         })
         .collect();
     lines.join("\n")
+}
+
+/// A command's result split as Claude Code reports it: a failed command's text starts with an
+/// `Exit code N` line, which becomes `code`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Output {
+    pub code: Option<i32>,
+    pub text: String,
+}
+
+/// The output of a command, from its result.
+pub fn output(result: &ToolResult) -> Output {
+    let text = result_text(result);
+    let parsed = text.strip_prefix("Exit code ").and_then(|rest| {
+        let (code, after) = rest.split_once('\n').unwrap_or((rest, ""));
+        Some((code.trim().parse().ok()?, after.to_string()))
+    });
+    match parsed {
+        Some((code, text)) => Output {
+            code: Some(code),
+            text,
+        },
+        None => Output {
+            code: None,
+            text: error_text(&text),
+        },
+    }
+}
+
+/// A tool's error without the `<tool_use_error>` tags Claude Code wraps it in.
+pub fn error_text(text: &str) -> String {
+    let inner = text
+        .trim()
+        .strip_prefix("<tool_use_error>")
+        .and_then(|t| t.strip_suffix("</tool_use_error>"));
+    inner.map_or_else(|| text.to_string(), str::to_string)
+}
+
+/// A file as Claude Code's Read returns it, `cat -n` style: each line its number, a tab or an
+/// arrow, and the line. The number of the first line and the lines without their numbers, when
+/// every line has that shape.
+pub fn numbered(text: &str) -> Option<(u32, String)> {
+    let mut first = None;
+    let mut code = String::with_capacity(text.len());
+    for (i, line) in text.lines().enumerate() {
+        let (number, rest) = line
+            .trim_start_matches(' ')
+            .split_once(['\t', '\u{2192}'])?;
+        let number: u32 = number.parse().ok()?;
+        first.get_or_insert(number);
+        if i > 0 {
+            code.push('\n');
+        }
+        code.push_str(rest);
+    }
+    Some((first?, code))
+}
+
+/// One change an edit tool makes: the text it replaces (empty for a new file's content) and the
+/// text that takes its place.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Change {
+    pub old: String,
+    pub new: String,
+}
+
+/// The changes an edit tool's input asks for: Edit's one, each of MultiEdit's, a Write's whole
+/// content and a notebook cell's new source.
+pub fn changes(tool: &ToolUse) -> Vec<Change> {
+    let field = |value: &Value, name: &str| value[name].as_str().unwrap_or_default().to_string();
+    let input = &tool.input;
+    match tool.name.as_str() {
+        "Write" => vec![Change {
+            old: String::new(),
+            new: field(input, "content"),
+        }],
+        "NotebookEdit" => vec![Change {
+            old: String::new(),
+            new: field(input, "new_source"),
+        }],
+        "MultiEdit" => input["edits"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .map(|edit| Change {
+                old: field(edit, "old_string"),
+                new: field(edit, "new_string"),
+            })
+            .collect(),
+        _ => vec![Change {
+            old: field(input, "old_string"),
+            new: field(input, "new_string"),
+        }],
+    }
 }
 
 /// The `tool_use` blocks of an `assistant` message's content.
@@ -469,15 +576,15 @@ mod tests {
             json!({"file_path": "/nonexistent/a.png"}),
             json!("no"),
         );
-        assert_eq!(handler(&missing), Handler::Generic);
+        assert_eq!(handler(&missing), Handler::File);
         let relative = used("Read", json!({"file_path": "a.png"}), json!("ok"));
-        assert_eq!(handler(&relative), Handler::Generic);
+        assert_eq!(handler(&relative), Handler::File);
         let text = used(
             "Read",
             json!({"file_path": scratch("notes.txt", b"hi")}),
             json!("hi"),
         );
-        assert_eq!(handler(&text), Handler::Generic);
+        assert_eq!(handler(&text), Handler::File);
     }
 
     #[test]
@@ -506,8 +613,85 @@ mod tests {
             ..odd
         };
         assert_eq!(handler(&running), Handler::Generic);
+        let running = ToolUse {
+            name: "Bash".into(),
+            ..running
+        };
+        assert_eq!(handler(&running), Handler::Terminal);
+        assert_eq!(
+            handler(&used("Read", json!({"file_path": "/a.rs"}), json!("1\tx"))),
+            Handler::File
+        );
+        assert_eq!(
+            handler(&used("Grep", json!({}), json!("x"))),
+            Handler::Search
+        );
+        assert_eq!(
+            handler(&used("WebFetch", json!({}), json!("x"))),
+            Handler::Fetch
+        );
         assert_eq!(Kind::of("Grep"), Kind::Search);
         assert_eq!(Kind::of("mcp__velvet-hammer__app_note"), Kind::Other);
+    }
+
+    #[test]
+    fn a_failed_commands_exit_code_is_read_from_its_first_line() {
+        let failed = used(
+            "Bash",
+            json!({"command": "false"}),
+            json!("Exit code 101\nerror: no"),
+        );
+        assert_eq!(
+            output(failed.result.as_ref().unwrap()),
+            Output {
+                code: Some(101),
+                text: "error: no".into()
+            }
+        );
+        let ok = used(
+            "Bash",
+            json!({"command": "echo"}),
+            json!("Exit code is fine"),
+        );
+        assert_eq!(output(ok.result.as_ref().unwrap()).code, None);
+        let refused = used(
+            "Bash",
+            json!({}),
+            json!("<tool_use_error>Denied.</tool_use_error>"),
+        );
+        assert_eq!(output(refused.result.as_ref().unwrap()).text, "Denied.");
+    }
+
+    #[test]
+    fn a_read_files_numbers_are_split_from_its_lines() {
+        assert_eq!(
+            numbered("    41\tfn a() {\n    42\u{2192}}"),
+            Some((41, "fn a() {\n}".to_string()))
+        );
+        assert_eq!(numbered("not a listing"), None);
+        assert_eq!(numbered(""), None);
+    }
+
+    #[test]
+    fn edit_tools_name_their_changes() {
+        let edit = used(
+            "Edit",
+            json!({"file_path": "/a", "old_string": "x", "new_string": "y"}),
+            json!("ok"),
+        );
+        let change = |old: &str, new: &str| Change {
+            old: old.into(),
+            new: new.into(),
+        };
+        assert_eq!(changes(&edit), vec![change("x", "y")]);
+        let multi = used(
+            "MultiEdit",
+            json!({"edits": [{"old_string": "a", "new_string": "b"}, {"old_string": "c", "new_string": "d"}]}),
+            json!("ok"),
+        );
+        assert_eq!(changes(&multi), vec![change("a", "b"), change("c", "d")]);
+        let write = used("Write", json!({"content": "hi"}), json!("ok"));
+        assert_eq!(changes(&write), vec![change("", "hi")]);
     }
 
     #[test]

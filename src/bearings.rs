@@ -6,6 +6,10 @@
 //! requests whose checks are green and which wait for a merge approval. It also reads the tasks
 //! in flight, which are the crewmates the chief of staff manages. Nothing is written.
 //!
+//! For second mates (see [`crate::secondmates`]) it reads how each one stands, from
+//! `secondmates[]`, which `--all-secondmates` keeps whole, and whether its session is up, from
+//! the endpoint of each task, which the script prints with `--fields endpoints`.
+//!
 //! A [`Peek`] shows one crewmate's terminal, read with firstmate's `bin/fm-peek.sh`. It is
 //! read-only too: steering a crewmate is the chief of staff's job.
 
@@ -28,9 +32,39 @@ const RETRY: Duration = Duration::from_secs(30);
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Bearings {
+    /// A snapshot was read: until then the rest is empty because nothing is known yet.
+    pub read: bool,
     pub holds: Vec<Hold>,
     pub merges: Vec<Merge>,
     pub crew: Vec<Crew>,
+    /// How each second mate stands, by firstmate's own reading of its home.
+    pub mates: Vec<MateState>,
+    /// The endpoint of each task in this home, a second mate's session among them.
+    pub endpoints: Vec<Endpoint>,
+}
+
+/// How a second mate stands: `secondmates[]` in the snapshot.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MateState {
+    pub id: String,
+    /// Firstmate's word: `no_active_work`, `active_child_work`, `captain_decision`,
+    /// `externally_held` or `unknown`.
+    pub state: String,
+    /// One line on what it is doing, or why its state is unknown.
+    pub doing: String,
+    /// The mate's reports on the parent channel contradict its own home's records.
+    pub contradiction: bool,
+    /// Why the state is unknown, in firstmate's words; `-` when there is no reason.
+    pub reason: String,
+}
+
+/// A task's terminal endpoint: whether it exists and whether its agent runs.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Endpoint {
+    pub id: String,
+    pub exists: bool,
+    /// Firstmate's word for the agent: `alive`, `dead`, `unknown` or `not_checked`.
+    pub agent: String,
 }
 
 /// A task in flight: a crewmate (or a secondmate's child) the chief of staff manages.
@@ -44,6 +78,10 @@ pub struct Crew {
     pub state: String,
     /// One line on what it is doing now.
     pub doing: String,
+    /// What the worker runs on, such as "pi · opencode-go/deepseek-v4.1-flash", from the
+    /// `harness=` and `model=` lines of firstmate's `state/<id>.meta`. The snapshot does not
+    /// carry it.
+    pub runs: Option<String>,
 }
 
 /// A task held for the captain: firstmate's one record of a captain call.
@@ -53,6 +91,8 @@ pub struct Hold {
     pub key: String,
     /// The task's title and the whole hold reason, as firstmate wrote them.
     pub question: String,
+    /// The second mate whose home holds it, or `None` for this home.
+    pub owner: Option<String>,
 }
 
 /// A pull request firstmate reports as green and waiting for the captain to approve the merge.
@@ -78,11 +118,16 @@ impl Bearings {
         let rows = |value: &Value| value.as_array().cloned().unwrap_or_default();
         let word = |row: &Value, field: &str| row[field].as_str().unwrap_or_default().to_string();
         Ok(Bearings {
+            read: true,
             holds: rows(&doc["decisions_open"])
                 .iter()
                 .map(|row| Hold {
                     key: word(row, "key"),
                     question: word(row, "question"),
+                    owner: row["owner"]
+                        .as_str()
+                        .filter(|owner| *owner != "(main)")
+                        .map(str::to_string),
                 })
                 .collect(),
             // A row with a hold is the same captain call as that hold, already listed above.
@@ -102,6 +147,25 @@ impl Bearings {
                     name: word(row, "name"),
                     state: word(row, "state"),
                     doing: word(row, "doing"),
+                    runs: None,
+                })
+                .collect(),
+            mates: rows(&doc["secondmates"])
+                .iter()
+                .map(|row| MateState {
+                    id: word(row, "id"),
+                    state: word(row, "state"),
+                    doing: word(row, "doing"),
+                    contradiction: row["contradiction"] == true,
+                    reason: word(row, "reason"),
+                })
+                .collect(),
+            endpoints: rows(&doc["endpoints"])
+                .iter()
+                .map(|row| Endpoint {
+                    id: word(row, "id"),
+                    exists: row["exists"] == true,
+                    agent: word(row, "agent"),
                 })
                 .collect(),
         })
@@ -109,6 +173,14 @@ impl Bearings {
 
     pub fn is_empty(&self) -> bool {
         self.holds.is_empty() && self.merges.is_empty()
+    }
+
+    pub fn mate(&self, id: &str) -> Option<&MateState> {
+        self.mates.iter().find(|m| m.id == id)
+    }
+
+    pub fn endpoint(&self, id: &str) -> Option<&Endpoint> {
+        self.endpoints.iter().find(|e| e.id == id)
     }
 }
 
@@ -267,10 +339,16 @@ fn peek(task: &str, clone: &Path, home: &Path) -> Result<String, String> {
 }
 
 /// When anything in the home's `state/` or `data/` last changed. Firstmate appends to status
-/// logs and rewrites its backlog there, so a newer time means the snapshot may differ.
+/// logs and rewrites its backlog there, so a newer time means the snapshot may differ. A second
+/// mate's home publishes its own summary in its `state/`, so those count too.
 fn stamp(home: &Path) -> SystemTime {
     let mut newest = SystemTime::UNIX_EPOCH;
-    for dir in [home.join("state"), home.join("data")] {
+    let mates = crate::secondmates::registry(home).unwrap_or_default();
+    let mate_states = mates.iter().map(|m| Path::new(&m.home).join("state"));
+    for dir in [home.join("state"), home.join("data")]
+        .into_iter()
+        .chain(mate_states)
+    {
         let entries = std::fs::read_dir(&dir).into_iter().flatten().flatten();
         let paths = entries.map(|e| e.path()).chain([dir.clone()]);
         for modified in paths.filter_map(|p| p.metadata().ok()?.modified().ok()) {
@@ -284,7 +362,7 @@ fn snapshot(script: &PathBuf, clone: &Path, home: &Path) -> Result<Bearings, Str
     crate::firstmate::prepare_home(home)
         .map_err(|e| format!("Could not create {}: {e}", home.display()))?;
     let output = Command::new(script)
-        .arg("--json")
+        .args(["--json", "--fields", "endpoints", "--all-secondmates"])
         .current_dir(clone)
         .env("FM_HOME", home)
         // Firstmate's own switch for a snapshot that reads no forge.
@@ -300,7 +378,32 @@ fn snapshot(script: &PathBuf, clone: &Path, home: &Path) -> Result<Bearings, Str
             said
         });
     }
-    Bearings::parse(&output.stdout)
+    let mut bearings = Bearings::parse(&output.stdout)?;
+    for crew in &mut bearings.crew {
+        crew.runs = runs(home, &crew.id);
+    }
+    Ok(bearings)
+}
+
+/// What task `id` runs on, from its `state/<id>.meta`: the harness, and the model when firstmate
+/// recorded one other than `default`.
+pub fn runs(home: &Path, id: &str) -> Option<String> {
+    if id.is_empty() || id.contains('/') || id.starts_with('.') {
+        return None;
+    }
+    let meta = std::fs::read_to_string(home.join("state").join(format!("{id}.meta"))).ok()?;
+    let field = |key: &str| {
+        meta.lines()
+            .rev()
+            .find_map(|l| l.strip_prefix(key))
+            .map(str::trim)
+            .filter(|v| !v.is_empty() && *v != "default" && *v != "-")
+    };
+    let harness = field("harness=")?;
+    Some(match field("model=") {
+        Some(model) => format!("{harness} \u{b7} {model}"),
+        None => harness.to_string(),
+    })
 }
 
 /// What `bin/fm-bearings-snapshot.sh --json` printed for a lab home with two captain holds
@@ -309,6 +412,16 @@ fn snapshot(script: &PathBuf, clone: &Path, home: &Path) -> Result<Bearings, Str
 /// hold. The two `in_flight` rows are also added by hand, in the shape the same script printed
 /// for a lab task. Tests and headless scenes use it.
 pub const SNAPSHOT: &str = include_str!("../scripts/fixtures/bearings.json");
+
+/// A snapshot with five second mates, one in each state the app shows: working with two child
+/// tasks, idle, stopped, a home that does not match the registry, and waiting on the captain.
+/// Its shape is what `bin/fm-bearings-snapshot.sh --json --fields endpoints` printed for a
+/// scratch home with a second mate seeded by `bin/fm-home-seed.sh` (firstmate 427056c4): the
+/// idle, stopped, mismatch and escalation rows were each printed by the real script, then
+/// renamed. The working mate's rows and the `alive` agents are written by hand in the same
+/// shape, because firstmate reads a child as working, and an agent as alive, only with a real
+/// agent in the terminal.
+pub const MATES: &str = include_str!("../scripts/fixtures/bearings-mates.json");
 
 #[cfg(test)]
 mod tests {
@@ -325,12 +438,14 @@ mod tests {
                     question: "Default window size: Pick the default window size: 1100x720 \
                                (fits small laptops) or 1280x800 (shows more chat)."
                         .into(),
+                    owner: None,
                 },
                 Hold {
                     key: "lab-gh-login".into(),
                     question: "Sign in to GitHub: Run gh auth login in a terminal; agents \
                                cannot sign in for you."
                         .into(),
+                    owner: None,
                 },
             ]
         );
@@ -341,6 +456,7 @@ mod tests {
                 name: "Render every state headlessly".into(),
                 state: "working".into(),
                 doing: "rendering chat, empty and peek scenes".into(),
+                runs: None,
             }
         );
         assert_eq!(bearings.crew.len(), 2);
@@ -353,6 +469,42 @@ mod tests {
                 reason: "checks green; merge approval needed".into(),
             }]
         );
+    }
+
+    #[test]
+    fn what_a_worker_runs_on_is_read_from_its_meta_record() {
+        let home = std::env::temp_dir().join(format!("vh-bearings-runs-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        std::fs::create_dir_all(home.join("state")).unwrap();
+        let meta = |id: &str, text: &str| {
+            std::fs::write(home.join(format!("state/{id}.meta")), text).unwrap()
+        };
+        meta(
+            "hack",
+            "harness=pi\nmodel=opencode-go/deepseek-v4.1-flash\neffort=default\n",
+        );
+        meta("plain", "harness=claude\nmodel=default\n");
+        assert_eq!(
+            runs(&home, "hack").as_deref(),
+            Some("pi \u{b7} opencode-go/deepseek-v4.1-flash")
+        );
+        assert_eq!(runs(&home, "plain").as_deref(), Some("claude"));
+        assert_eq!(runs(&home, "gone"), None);
+        assert_eq!(runs(&home, "../state/hack"), None);
+    }
+
+    #[test]
+    fn second_mates_their_sessions_and_escalations_are_read() {
+        let bearings = Bearings::parse(MATES.as_bytes()).unwrap();
+        assert_eq!(bearings.mates.len(), 5);
+        let web = bearings.mate("web").unwrap();
+        assert_eq!(web.state, "unknown");
+        assert_eq!(web.reason, "invalid home: not a seeded secondmate home");
+        assert!(bearings.endpoint("docs").is_some_and(|e| e.exists));
+        assert!(bearings.endpoint("infra").is_some_and(|e| !e.exists));
+        assert_eq!(bearings.holds[0].owner.as_deref(), Some("support"));
+        assert_eq!(bearings.holds[0].key, "refund-window");
+        assert_eq!(bearings.crew[0].id, "billing/invoice-retries");
     }
 
     #[test]

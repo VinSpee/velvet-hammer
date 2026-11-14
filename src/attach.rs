@@ -11,7 +11,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use crate::approval::create_private_dir;
+use crate::store::create_private_dir;
 use crate::tools;
 
 /// The folder in the data directory that holds the copies.
@@ -32,6 +32,26 @@ pub enum Kind {
     Image,
     Video,
     File,
+}
+
+impl Kind {
+    /// How the kind is written in the kept history.
+    pub fn key(self) -> &'static str {
+        match self {
+            Kind::Image => "image",
+            Kind::Video => "video",
+            Kind::File => "file",
+        }
+    }
+
+    pub fn from_key(key: &str) -> Option<Kind> {
+        Some(match key {
+            "image" => Kind::Image,
+            "video" => Kind::Video,
+            "file" => Kind::File,
+            _ => return None,
+        })
+    }
 }
 
 /// One attached file: the app's own copy of it.

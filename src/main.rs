@@ -3,31 +3,44 @@
 //! `cargo run -- --snap chat.png` renders it headless (see the README for every scene).
 
 mod agent;
+mod ansi;
 mod approval;
 mod attach;
 mod bearings;
 mod bridge;
 mod claude;
+mod crew;
+mod find;
 mod firstmate;
 mod guard;
+mod history;
+mod links;
 mod markdown;
+mod menus;
+mod messages;
 mod model;
+mod pi;
 mod projects;
+mod reminders;
+mod repos;
+mod secondmates;
 mod store;
 mod tools;
 mod ui;
 mod view;
 mod visual;
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, Sender, channel};
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
-use rune::{AppSpec, ClipboardContent, Image, ImageCache, Player, TextEdit, Tx, Waker};
+use rune::{
+    AppSpec, ClipboardContent, Image, ImageCache, Key, KeyEvent, Player, TextEdit, Tx, Waker,
+};
 
-use agent::{ChiefOfStaff, Event, Stub};
+use agent::{ChiefOfStaff, Event, Finish, Stub};
 use approval::{Activity, Mode, Store};
 use attach::Attachment;
 use bearings::Bearings;
@@ -35,6 +48,8 @@ use claude::Claude;
 use firstmate::{Checkout, Distro, Firstmate, Work, lab::Lab};
 use model::{Action, Author, Id, Message, Status, Workspace};
 use projects::Project;
+use reminders::{Reminder, Reminders, Unit, When};
+use secondmates::Step;
 use tools::{Handler, Picture};
 
 /// All app state: the workspace the agent layer fills, plus what only the UI needs.
@@ -55,6 +70,46 @@ pub struct App {
     pub visual_example: TextEdit,
     /// Which of firstmate's rules the hook enforces.
     pub rules: store::Store<guard::Settings>,
+    /// Whether a message sent while the chief of staff works goes out at once or waits.
+    pub delivery: store::Store<messages::Delivery>,
+    /// The chief of staff is working, as the agent layer last said.
+    pub working: bool,
+    /// Messages waiting until the chief of staff is done, oldest first. Kept in memory only:
+    /// quitting the app drops them, and the kept conversation holds only messages that went out.
+    pub queue: Vec<Queued>,
+    /// The queued message being edited, by its place in `queue`, with its field.
+    pub editing: Option<(usize, TextEdit)>,
+    /// The captain's worker nicknames, in the firstmate home's `config/`.
+    pub nicknames: store::Store<crew::Nicknames>,
+    /// The Workers page's nickname editor.
+    pub crew_form: crew::Form,
+    /// The pi runtime the app installs for workers on other providers.
+    pub runtime: pi::Runtime,
+    /// Whether the opencode Go key is in the keychain, as last checked; None before the
+    /// Workers page first opens.
+    pub key: Option<pi::Key>,
+    /// How the key is checked: [`pi::key_state`], or a stand-in in tests.
+    pub key_check: fn() -> pi::Key,
+    /// Why firstmate's pi account setting could not be written.
+    pub pin_problem: Option<String>,
+    /// Whether the conversation is kept across restarts.
+    pub keeping: store::Store<history::Keeping>,
+    /// The conversation as kept across restarts.
+    pub history: history::History,
+    /// The find bar over the conversation.
+    pub find: find::Find,
+    /// The captain's reminders, which the chief of staff's reminder tools set and list.
+    pub reminders: Reminders,
+    /// The times the reminder keywords stand for.
+    pub reminder_settings: store::Store<reminders::Settings>,
+    /// The reminders' change count when the window last showed them.
+    reminders_seen: u64,
+    /// The reminder whose snooze menu is open, and where: "banner", "panel" or "list".
+    pub snoozing: Option<(&'static str, u64)>,
+    /// The number typed into the open snooze menu.
+    pub snooze_amount: TextEdit,
+    /// Why the last snooze was not made.
+    pub snooze_problem: Option<String>,
     /// Keeps `captain` current from firstmate's records, when the chief of staff is firstmate.
     watcher: Option<bearings::Watcher>,
     /// What firstmate's records say waits on the captain.
@@ -77,6 +132,10 @@ pub struct App {
     picking: Option<Receiver<Result<Option<PathBuf>, String>>>,
     /// Why the folder dialog could not open.
     pub pick_problem: Option<String>,
+    /// The GitHub repository combobox, the other way to answer which repository to add.
+    pub repos: repos::Chooser,
+    /// Firstmate's second mates: their records, the flow that adds one, and the actions on them.
+    pub mates: secondmates::Mates,
     wake: Option<Waker>,
     /// The captain hold the next message answers, by its key.
     pub answering: Option<String>,
@@ -87,14 +146,35 @@ pub struct App {
     pub pending: Vec<attach::Pending>,
     next_pending: u64,
     /// Sends each finished copy, by its pending id, from the thread that made it.
-    copied_tx: Sender<(u64, Result<Attachment, String>)>,
-    copied: Receiver<(u64, Result<Attachment, String>)>,
+    copies_tx: Sender<(u64, Result<Attachment, String>)>,
+    copies: Receiver<(u64, Result<Attachment, String>)>,
     /// Why the last file pasted or dropped was not attached.
     pub attach_problem: Option<String>,
     /// A file drag is over the chat.
     pub drop_over: bool,
     /// The app's data directory, where attachments are copied.
     data: PathBuf,
+    /// The chat message under the pointer, whose link button shows.
+    pub hovered: Option<usize>,
+    /// The element that has focus, as of the last frame.
+    pub focused: Option<String>,
+    /// The message whose link was just copied, by its id.
+    pub copied: Option<String>,
+    /// The message a link just went to, highlighted until the time given, or the id of one that
+    /// is not in the chat.
+    pub flash: Option<(Result<String, String>, f64)>,
+    /// Seconds since the app started, as of the last frame.
+    pub now: f64,
+    /// An element to scroll to on the next frame, once the view shows it.
+    pub scroll_to: Option<String>,
+    /// Whose menu conventions the app follows.
+    pub platform: menus::Platform,
+    /// The window draws its own menu bar, as where Rune has no native one.
+    pub in_window_menus: bool,
+    /// The in-window menu that is open, by its title.
+    pub open_menu: Option<&'static str>,
+    /// Clear history was pressed and waits for the captain to confirm.
+    pub confirm_clear: bool,
     pub showing: Showing,
     /// The chat message the chief of staff is still writing.
     pub replying: Option<usize>,
@@ -102,8 +182,12 @@ pub struct App {
     pub media: HashMap<String, Media>,
     /// The thumbnail or poster frame of each attached image or video, by its saved copy.
     pub attachment_media: HashMap<PathBuf, Media>,
-    /// The tool uses whose results the captain unfolded, by id.
-    pub unfolded: HashSet<String>,
+    /// How the captain set out each tool use's card, by its id.
+    pub cards: HashMap<String, Card>,
+    /// When each tool use started, or how long it took once its result arrived, by its id.
+    pub clock: HashMap<String, Clock>,
+    /// The copy button pressed last, by its key, which says it copied.
+    pub copy_pressed: Option<String>,
     /// The state of each view the chief of staff showed, by its tool use's id.
     pub ui: HashMap<String, ui::Live>,
     /// The images views show, by the path a view gave, or why one is not shown.
@@ -116,6 +200,13 @@ pub struct App {
     media_wake: Waker,
 }
 
+/// A message waiting in the queue: the captain's words and the files attached to them.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Queued {
+    pub text: String,
+    pub attachments: Vec<Attachment>,
+}
+
 /// What a finished tool use shows, chosen by [`tools::handler`] when its result arrives.
 pub struct Media {
     pub handler: Handler,
@@ -123,6 +214,25 @@ pub struct Media {
     pub image: Option<Result<Image, String>>,
     /// The player of a video handler.
     pub video: Option<Player>,
+}
+
+/// What the captain opened in a tool use's card. Everything starts closed.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Card {
+    /// Every line of the result, not only its first few.
+    pub all_lines: bool,
+    /// The whole command, not only its first line.
+    pub full_input: bool,
+    /// Long lines run on and scroll sideways instead of wrapping.
+    pub no_wrap: bool,
+}
+
+/// A tool use's time: from the moment its call arrived to the moment its result did, which
+/// includes any wait for the captain's approval.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Clock {
+    Started(Instant),
+    Took(Duration),
 }
 
 /// What the middle column shows.
@@ -134,6 +244,10 @@ pub enum Showing {
     Peek(Id),
     /// A firstmate crewmate's terminal, by its task id.
     Crew(String),
+    /// A second mate's page, by its id.
+    Mate(String),
+    /// The guided flow for adding a second mate.
+    AddMate,
     /// The managed firstmate clone: its state, and installing and updating it.
     Firstmate,
     /// The tool-approval settings.
@@ -144,26 +258,59 @@ pub enum Showing {
     Visuals,
     /// Firstmate's rules the hook enforces, and what each did lately.
     Rules,
+    /// When messages reach the chief of staff while it works.
+    Messages,
+    /// Workers on other providers: the pi runtime, the key, and the worker nicknames.
+    Workers,
+    /// Every setting, by section.
+    Settings,
+    /// The captain's reminders: due, coming up, and the Later list.
+    Reminders,
+    /// The times the reminder keywords stand for.
+    ReminderSettings,
     /// One image from the chat, enlarged, by its tool use's id.
     Picture(String),
 }
 
 impl App {
-    /// The app on `chief`, keeping its tool-approval settings and activity log in `data`.
-    pub fn new(mut chief: Box<dyn ChiefOfStaff>, firstmate: Firstmate, data: &Path) -> Self {
+    /// The app on `chief`, keeping its settings, activity log and reminders in `data`.
+    pub fn new(chief: Box<dyn ChiefOfStaff>, firstmate: Firstmate, data: &Path) -> Self {
+        App::with_clock(chief, firstmate, data, reminders::system_clock())
+    }
+
+    /// The app with reminders on `clock`, a fixed one in scenes and tests.
+    pub fn with_clock(
+        mut chief: Box<dyn ChiefOfStaff>,
+        firstmate: Firstmate,
+        data: &Path,
+        clock: reminders::Clock,
+    ) -> Self {
         let watcher = chief
             .workplace()
             .map(|clone| bearings::Watcher::start(clone, &firstmate.home_dir()));
         let project_watcher = chief
             .workplace()
             .map(|_| projects::Watcher::start(&firstmate.home_dir()));
+        let home = firstmate.home_dir();
+        let mates = secondmates::Mates::new(chief.workplace().map(|_| home.as_path()), data);
         let approvals = Store::open(data);
         let visuals = store::Store::<visual::Mode>::open(data);
         let rules = store::Store::<guard::Settings>::open(data);
+        let home = firstmate.home_dir();
+        let nicknames = store::Store::<crew::Nicknames>::open(&home.join("config"));
+        let mut runtime = pi::Runtime::open(data, pi::Release::official());
+        runtime.list_models();
+        let keeping = store::Store::<history::Keeping>::open(data);
+        let mut history = history::History::new(data);
+        let reminder_settings = store::Store::<reminders::Settings>::open(data);
+        let reminders = Reminders::open(data, reminder_settings.shared(), clock);
         chief.approve_with(bridge::Policies {
             approval: approvals.shared(),
             visual: visuals.shared(),
             rules: rules.shared(),
+            nicknames: nicknames.shared(),
+            models: runtime.models(),
+            reminders: reminders.clone(),
         });
         let window_wake: Arc<OnceLock<Waker>> = Arc::new(OnceLock::new());
         let media_wake: Waker = Arc::new({
@@ -174,9 +321,15 @@ impl App {
                 }
             }
         });
-        let (copied_tx, copied) = channel();
+        let (copies_tx, copies) = channel();
+        let mut ws = chief.open();
+        if keeping.settings().0 {
+            let earlier = history.load();
+            ws.earlier = earlier.len();
+            ws.chat.splice(0..0, earlier);
+        }
         let mut app = App {
-            ws: chief.open(),
+            ws,
             chief,
             status: Status::Checking,
             firstmate,
@@ -186,6 +339,25 @@ impl App {
             visuals,
             visual_example: TextEdit::new(visual::EXAMPLE),
             rules,
+            delivery: store::Store::open(data),
+            working: false,
+            queue: Vec::new(),
+            editing: None,
+            nicknames,
+            crew_form: crew::Form::default(),
+            runtime,
+            key: None,
+            key_check: pi::key_state,
+            pin_problem: None,
+            keeping,
+            history,
+            find: find::Find::default(),
+            reminders,
+            reminder_settings,
+            reminders_seen: 0,
+            snoozing: None,
+            snooze_amount: TextEdit::default(),
+            snooze_problem: None,
             watcher,
             captain: Bearings::default(),
             captain_problem: None,
@@ -196,37 +368,103 @@ impl App {
             picker: projects::pick_folder,
             picking: None,
             pick_problem: None,
+            repos: repos::Chooser::default(),
+            mates,
             wake: None,
             answering: None,
             draft: TextEdit::default(),
             attached: Vec::new(),
             pending: Vec::new(),
             next_pending: 0,
-            copied_tx,
-            copied,
+            copies_tx,
+            copies,
             attach_problem: None,
             drop_over: false,
             data: data.to_path_buf(),
+            attachment_media: HashMap::new(),
+            hovered: None,
+            focused: None,
+            copied: None,
+            flash: None,
+            now: 0.0,
+            scroll_to: None,
+            platform: menus::Platform::current(),
+            in_window_menus: menus::Platform::current() != menus::Platform::Mac,
+            open_menu: None,
+            confirm_clear: false,
             showing: Showing::Chat,
             replying: None,
             media: HashMap::new(),
-            attachment_media: HashMap::new(),
-            unfolded: HashSet::new(),
+            cards: HashMap::new(),
+            clock: HashMap::new(),
+            copy_pressed: None,
             ui: HashMap::new(),
             ui_images: HashMap::new(),
             images: ImageCache::new(media_wake.clone()),
             window_wake,
             media_wake,
         };
+        // A tool use kept from an earlier session shows as it did, but for its image bytes.
+        for i in 0..app.ws.earlier {
+            if let Some(tool) = app.ws.chat[i].tool.clone()
+                && tool.result.is_some()
+            {
+                let media = app.media_for(&tools::handler(&tool));
+                app.media.insert(tool.id, media);
+            }
+        }
+        // The thumbnails of attachments on messages kept from an earlier session.
+        let kept: Vec<PathBuf> = app
+            .ws
+            .chat
+            .iter()
+            .flat_map(|m| &m.attachments)
+            .map(|a| a.path.clone())
+            .collect();
+        for path in kept {
+            if let Some(handler) = tools::handler_for_file(&path) {
+                let media = app.media_for(&handler);
+                app.attachment_media.insert(path, media);
+            }
+        }
         app.drain();
         app
+    }
+
+    /// Deletes the kept conversation and takes the earlier sessions off the chat. This
+    /// session's messages stay until the app quits.
+    pub fn clear_history(&mut self) {
+        self.confirm_clear = false;
+        self.history.clear();
+        let earlier = std::mem::take(&mut self.ws.earlier);
+        // The cleared messages' attachments go with them; this session's stay on their messages.
+        for gone in self.ws.chat.drain(..earlier) {
+            for a in &gone.attachments {
+                self.attachment_media.remove(&a.path);
+                attach::discard(a);
+            }
+        }
+        self.replying = self.replying.map(|i| i - earlier);
+        self.find.current = 0;
+        self.hovered = None;
+    }
+
+    /// Writes the finished chat message `i` to the history, if the captain keeps it.
+    fn keep(&mut self, i: usize) {
+        if self.keeping.settings().0
+            && let Some(message) = self.ws.chat.get(i)
+        {
+            self.history.record(message);
+        }
     }
 
     /// Applies what the agent layer reported; true when anything changed.
     pub fn drain(&mut self) -> bool {
         let events = self.chief.events();
         let mut changed = self.firstmate.poll() | !events.is_empty();
+        changed |= self.runtime.poll();
         changed |= self.follow_peek();
+        changed |= self.drain_mates();
         if let Some(projects) = self.project_watcher.as_mut().and_then(|w| w.poll()) {
             self.projects = Some(projects);
             changed = true;
@@ -241,10 +479,11 @@ impl App {
             }
             changed = true;
         }
-        while let Ok((id, copy)) = self.copied.try_recv() {
+        while let Ok((id, copy)) = self.copies.try_recv() {
             self.take_copy(id, copy);
             changed = true;
         }
+        changed |= self.repos.poll();
         if let Some(snapshot) = self.watcher.as_mut().and_then(|w| w.poll()) {
             match snapshot {
                 Ok(captain) => {
@@ -264,13 +503,62 @@ impl App {
         for event in events {
             self.take(event);
         }
+        changed | self.remind()
+    }
+
+    /// Shows the reminders that came due, posting each as a system notification where the app
+    /// may; true when the reminders changed since the window last showed them.
+    fn remind(&mut self) -> bool {
+        for reminder in self.reminders.fire_due() {
+            notify(&reminder);
+        }
+        let version = self.reminders.version();
+        let changed = version != self.reminders_seen;
+        self.reminders_seen = version;
         changed
+    }
+
+    /// The captain dealt with the reminder.
+    pub fn reminder_done(&mut self, id: u64) {
+        self.reminders.done(id);
+        self.dealt_with(id);
+    }
+
+    pub fn delete_reminder(&mut self, id: u64) {
+        self.reminders.delete(id);
+        self.dealt_with(id);
+    }
+
+    /// Sets the reminder again for `when`, from now.
+    pub fn snooze(&mut self, id: u64, when: When) {
+        match self.reminders.snooze(id, when) {
+            Ok(_) => self.dealt_with(id),
+            Err(problem) => self.snooze_problem = Some(problem),
+        }
+    }
+
+    /// Snoozes for the number typed in the snooze menu, in `unit`.
+    pub fn snooze_for(&mut self, id: u64, unit: reminders::Unit) {
+        match self.snooze_amount.text.trim().parse() {
+            Ok(amount) => self.snooze(id, When::In(amount, unit)),
+            Err(_) => self.snooze_problem = Some("Type a whole number first.".into()),
+        }
+    }
+
+    /// Closes the snooze menu and takes the reminder's system notification back.
+    fn dealt_with(&mut self, id: u64) {
+        self.snoozing = None;
+        self.snooze_amount.clear();
+        self.snooze_problem = None;
+        rune_notify::remove(&[&notification_id(id)]);
+        self.remind();
     }
 
     /// Applies one thing the agent layer reported.
     pub fn take(&mut self, event: Event) {
         match event {
             Event::Status(status) => self.status = status,
+            Event::Working(working) => self.working = working,
             Event::Reply { text, done } => {
                 match self.replying {
                     Some(i) => self.ws.chat[i].text = text,
@@ -279,24 +567,46 @@ impl App {
                         self.replying = Some(self.ws.chat.len() - 1);
                     }
                 }
-                if done {
-                    self.replying = None;
+                if done && let Some(i) = self.replying.take() {
+                    self.keep(i);
                 }
             }
             Event::Problem(text) => {
-                self.replying = None;
+                // A reply cut short is kept as far as it got.
+                if let Some(i) = self.replying.take() {
+                    self.keep(i);
+                }
                 self.ws.chat.push(Message::new(Author::Problem, text));
+                self.keep(self.ws.chat.len() - 1);
             }
             Event::Item(item) => self.ws.items.push(item),
             Event::Withdrawn(id) => self.ws.items.retain(|i| i.id != id),
             Event::Activity(entry) => self.activity.record(entry),
-            Event::Notice(text) => self.ws.chat.push(Message::new(Author::App, text)),
+            Event::Notice(text) => {
+                self.ws.chat.push(Message::new(Author::App, text));
+                self.keep(self.ws.chat.len() - 1);
+            }
+            Event::AddMate(scope) => {
+                let words = if self.add_mate(Some(scope)) {
+                    "Your chief of staff opened Add a second mate. Answer its questions there; \
+                     nothing is created until you say yes."
+                } else {
+                    "Your chief of staff tried to open Add a second mate, but firstmate is busy. \
+                     Try again when it finishes."
+                };
+                self.ws.chat.push(Message::new(Author::App, words));
+                self.keep(self.ws.chat.len() - 1);
+            }
             // A view tool use arrives first as it starts streaming, then whole.
             Event::Tool(tool) => {
                 let id = tool.id.clone();
                 match self.tool_mut(&id) {
                     Some(shown) => shown.input = tool.input,
-                    None => self.ws.chat.push(Message::tool(tool)),
+                    None => {
+                        self.clock
+                            .insert(id.clone(), Clock::Started(Instant::now()));
+                        self.ws.chat.push(Message::tool(tool));
+                    }
                 }
                 self.load_view_images(&id);
             }
@@ -312,8 +622,19 @@ impl App {
                 };
                 tool.result = Some(result);
                 let handler = tools::handler(tool);
+                if let Some(Clock::Started(at)) = self.clock.get(&id) {
+                    self.clock.insert(id.clone(), Clock::Took(at.elapsed()));
+                }
                 let media = self.media_for(&handler);
-                self.media.insert(id, media);
+                self.media.insert(id.clone(), media);
+                if let Some(i) = self
+                    .ws
+                    .chat
+                    .iter()
+                    .position(|m| m.tool.as_ref().is_some_and(|t| t.id == id))
+                {
+                    self.keep(i);
+                }
             }
         }
     }
@@ -400,10 +721,87 @@ impl App {
             self.act(Action::Ui(ui::UiAction {
                 tool: id.to_string(),
                 did: did.clone(),
-                params,
-                inputs: inputs.clone(),
+                sent: ui::Sent::Submit {
+                    params,
+                    inputs: inputs.clone(),
+                },
             }));
         }
+    }
+
+    /// Picks or unpicks `value` in the view's `Choice` drawn as `node`, one that takes several
+    /// options and is sent with its Send button.
+    pub fn pick(&mut self, id: &str, node: &str, value: &str) {
+        let picks = self
+            .ui
+            .entry(id.to_string())
+            .or_default()
+            .picks
+            .entry(node.to_string())
+            .or_default();
+        match picks.iter().position(|v| v == value) {
+            Some(at) => {
+                picks.remove(at);
+            }
+            None => picks.push(value.to_string()),
+        }
+    }
+
+    /// Sends the captain's answer to the view's `Choice` drawn as `node`: `picked` are option
+    /// values, and the Other field's text, if any, goes with them. A `Choice` is answered once.
+    pub fn answer(&mut self, id: &str, node: &str, picked: &[String]) {
+        let Some(question) = self.view_choice(id, node) else {
+            return;
+        };
+        let ui::What::Choice {
+            question, options, ..
+        } = question
+        else {
+            return;
+        };
+        if !self.chat_ready() {
+            return;
+        }
+        let live = self.ui.entry(id.to_string()).or_default();
+        if live.answered.contains_key(node) {
+            return;
+        }
+        let other = live
+            .edits
+            .get(&ui::other_field(node))
+            .map(|e| e.text.trim().to_string())
+            .unwrap_or_default();
+        let answer = ui::Answer {
+            // In the order the view lists them, whatever order they were picked in.
+            picked: options
+                .into_iter()
+                .filter(|o| picked.contains(&o.value))
+                .collect(),
+            other,
+        };
+        live.answered.insert(node.to_string(), answer.clone());
+        live.picks.remove(node);
+        self.act(Action::Ui(ui::UiAction {
+            tool: id.to_string(),
+            did: answer.did(),
+            sent: ui::Sent::Answer { question, answer },
+        }));
+    }
+
+    /// The `Choice` a view draws as `node`, as the captain sees it now.
+    fn view_choice(&self, id: &str, node: &str) -> Option<ui::What> {
+        let spec = self.view_spec(id).ok()?;
+        let state = self
+            .ui
+            .get(id)
+            .map_or_else(|| spec.state.clone(), |live| live.state(&spec));
+        fn find(n: &ui::Node, key: &str) -> Option<ui::What> {
+            if n.key == key && matches!(n.what, ui::What::Choice { .. }) {
+                return Some(n.what.clone());
+            }
+            n.children.iter().find_map(|c| find(c, key))
+        }
+        find(ui::tree(&spec, &state).root.as_ref()?, node)
     }
 
     /// Checks or unchecks a view's checkbox, writing its bound path, then fires its actions.
@@ -481,9 +879,94 @@ impl App {
     }
 
     pub fn act(&mut self, action: Action) {
+        let before = self.ws.chat.len();
         self.ws.apply(&action);
+        if self.working {
+            for m in &mut self.ws.chat[before..] {
+                m.while_working = true;
+            }
+        }
+        if matches!(action, Action::Say { .. } | Action::Ui(_)) {
+            self.keep(self.ws.chat.len() - 1);
+            // A reminder the chief of staff sets in this turn links back to this message.
+            self.reminders
+                .said_in(&self.ws.chat[self.ws.chat.len() - 1].id);
+        }
         self.chief.act(&self.ws, &action);
         self.drain();
+    }
+
+    /// Takes in what the agent layer reported, then sends the next queued message if it can go
+    /// out; true when anything changed. The window calls this each time it wakes.
+    pub fn step(&mut self) -> bool {
+        self.drain() | self.deliver()
+    }
+
+    /// Sends the first queued message once the chief of staff is done and the chat can run; true
+    /// when one went out. One at a time: the chief of staff is working again until it answers
+    /// it. A message being edited holds the ones after it, so they keep their order.
+    fn deliver(&mut self) -> bool {
+        let editing_first = matches!(self.editing, Some((0, _)));
+        if self.working || self.queue.is_empty() || editing_first || !self.chat_ready() {
+            return false;
+        }
+        let Queued { text, attachments } = self.queue.remove(0);
+        if let Some((i, _)) = &mut self.editing {
+            *i -= 1;
+        }
+        self.act(Action::Say { text, attachments });
+        true
+    }
+
+    /// Sends what the captain said, or queues it: in queue mode while the chief of staff works,
+    /// and in either mode behind messages already queued, so nothing goes out of order.
+    fn say(&mut self, text: String, attachments: Vec<Attachment>) {
+        let queue = self.working && *self.delivery.settings() == messages::Delivery::Queue;
+        if queue || !self.queue.is_empty() {
+            self.queue.push(Queued { text, attachments });
+            self.deliver();
+        } else {
+            self.act(Action::Say { text, attachments });
+        }
+    }
+
+    /// Starts editing the queued message at `i`.
+    pub fn edit_queued(&mut self, i: usize) {
+        if let Some(queued) = self.queue.get(i) {
+            self.editing = Some((i, TextEdit::new(&queued.text)));
+        }
+    }
+
+    /// Keeps the edit; a message emptied of words and attachments leaves the queue.
+    pub fn save_queued(&mut self) {
+        let Some((i, edit)) = self.editing.take() else {
+            return;
+        };
+        let text = edit.text.trim().to_string();
+        if text.is_empty() && self.queue[i].attachments.is_empty() {
+            self.queue.remove(i);
+        } else {
+            self.queue[i].text = text;
+        }
+        self.deliver();
+    }
+
+    pub fn cancel_edit(&mut self) {
+        self.editing = None;
+        self.deliver();
+    }
+
+    pub fn delete_queued(&mut self, i: usize) {
+        if i >= self.queue.len() {
+            return;
+        }
+        self.queue.remove(i);
+        self.editing = match self.editing.take() {
+            Some((at, _)) if at == i => None,
+            Some((at, edit)) if at > i => Some((at - 1, edit)),
+            other => other,
+        };
+        self.deliver();
     }
 
     /// Starts, switches or stops the read of a crewmate's terminal to match what the middle
@@ -519,6 +1002,7 @@ impl App {
         {
             return;
         }
+        // Cleared before anything else, so a second Enter in the same moment sends nothing.
         self.draft.clear();
         self.attach_problem = None;
         self.pending.clear();
@@ -529,7 +1013,7 @@ impl App {
             None => text,
         };
         let attachments = std::mem::take(&mut self.attached);
-        self.act(Action::Say { text, attachments });
+        self.say(text, attachments);
     }
 
     /// Attaches files dropped on the chat or pasted from the clipboard, each copied into the
@@ -628,7 +1112,7 @@ impl App {
         }
         let (data, done, wake) = (
             self.data.clone(),
-            self.copied_tx.clone(),
+            self.copies_tx.clone(),
             self.media_wake.clone(),
         );
         std::thread::spawn(move || {
@@ -686,19 +1170,47 @@ impl App {
         self.adding = true;
         self.answering = None;
         self.showing = Showing::Chat;
-        self.act(Action::say(ADD_PROJECT));
+        self.say(ADD_PROJECT.into(), Vec::new());
     }
 
     /// Sends one of the add flow's quick replies, such as the captain's yes.
     pub fn reply(&mut self, words: &str) {
         if self.chat_ready() {
-            self.act(Action::say(words));
+            self.say(words.into(), Vec::new());
         }
     }
 
     pub fn finish_adding(&mut self) {
         self.adding = false;
         self.pick_problem = None;
+        self.repos.query.text.clear();
+        self.repos.hide();
+    }
+
+    /// Opens the repository list, listing the repositories again.
+    pub fn show_repos(&mut self) {
+        self.repos.show(self.wake.clone());
+    }
+
+    /// The repository query changed: the list opens on its best match.
+    pub fn repos_edited(&mut self) {
+        self.repos.edited(self.wake.clone());
+    }
+
+    /// Lists the repositories again after a problem the captain fixed.
+    pub fn retry_repos(&mut self) {
+        self.repos.refresh(self.wake.clone());
+    }
+
+    /// Chooses the repository at `index` in the list: its address lands in the draft, as a
+    /// chosen folder's path does, for the captain to send. Firstmate clones it.
+    pub fn choose_repo(&mut self, index: usize) {
+        let Some(repo) = self.repos.repo(index).cloned() else {
+            return;
+        };
+        self.repos.query.text.clear();
+        self.repos.hide();
+        self.draft.text = repo.url();
     }
 
     /// Opens the folder dialog on a background thread; the chosen path lands in the draft.
@@ -722,12 +1234,30 @@ impl App {
         self.picking.is_some()
     }
 
+    /// Opens the Workers page, checking the keychain for the provider key on the way.
+    pub fn open_workers(&mut self) {
+        self.showing = Showing::Workers;
+        self.check_key();
+    }
+
+    pub fn check_key(&mut self) {
+        self.key = Some((self.key_check)());
+    }
+
+    /// Points firstmate's pi workers at the app's pi directory (see [`pi::connect`]), on the
+    /// captain's press of the Workers page's button, then lists the models pi can use.
+    pub fn connect_workers(&mut self) {
+        self.pin_problem = pi::connect(&self.runtime, &self.firstmate.home_dir()).err();
+        self.runtime.list_models();
+    }
+
     /// Tells the chief of staff, in the chat, that the captain approves merging `url`.
     pub fn approve_merge(&mut self, task: &str, url: &str) {
         if self.chat_ready() {
-            self.act(Action::say(format!(
-                "I approve merging {url} (task {task})."
-            )));
+            self.say(
+                format!("I approve merging {url} (task {task})."),
+                Vec::new(),
+            );
         }
     }
 
@@ -765,7 +1295,7 @@ impl App {
         while !done(self) {
             assert!(Instant::now() < deadline, "the agent layer never settled");
             std::thread::sleep(Duration::from_millis(20));
-            self.drain();
+            self.step();
         }
     }
 }
@@ -799,7 +1329,12 @@ pub const ADD_PROJECT: &str = "I want to add a project. Follow your project-mana
 fn init() -> App {
     let mut firstmate = Firstmate::open(&firstmate::data_dir(), firstmate::UPSTREAM);
     firstmate.start();
-    let claude = Claude::new("claude").in_firstmate(firstmate.clone_dir(), firstmate.home_dir());
+    // The pi runtime goes first on the chief of staff's PATH, where firstmate's spawn finds it
+    // for pi workers. Claude Code itself is found and signed in as before.
+    let path = pi::Runtime::open(&firstmate::data_dir(), None).path_env(std::env::var_os("PATH"));
+    let claude = Claude::new("claude")
+        .env("PATH", path.to_string_lossy())
+        .in_firstmate(firstmate.clone_dir(), firstmate.home_dir());
     App::new(Box::new(claude), firstmate, &firstmate::data_dir())
 }
 
@@ -923,8 +1458,102 @@ fn replied(s: &App) -> bool {
             .is_some_and(|m| m.author != Author::Captain)
 }
 
-fn poll(s: &mut App, _: f64, _: &mut Tx) -> bool {
-    s.drain()
+/// The longest the app waits before looking at the reminders again: a timer may not count the
+/// time the computer slept.
+const RECHECK: Duration = Duration::from_secs(30);
+
+fn poll(s: &mut App, now: f64, tx: &mut Tx) -> bool {
+    s.now = now;
+    let mut changed = s.step() | s.follow_find(tx);
+    if let Some(key) = s.scroll_to.take() {
+        tx.scroll_center(key);
+    }
+    if s.flash.as_ref().is_some_and(|(_, until)| *until <= now) {
+        s.flash = None;
+        changed = true;
+    }
+    let focused = tx.focused().map(str::to_string);
+    if focused != s.focused {
+        s.focused = focused;
+        changed = true;
+    }
+    if let Some(due) = s.reminders.next_due() {
+        let left = due.duration_since(s.reminders.now().timestamp());
+        tx.wake_after(Duration::try_from(left).unwrap_or_default().min(RECHECK));
+    }
+    changed
+}
+
+/// How long a message a link went to stays highlighted, in seconds.
+const FLASH: f64 = 2.5;
+
+impl App {
+    /// Goes to the message a message link names: shows the chat, scrolls to the message and
+    /// highlights it briefly, or says the message is not in the chat. Any other link opens in the
+    /// browser. `url` may come from outside the app (a link the system opened), so it is parsed
+    /// and nothing else is done with it.
+    pub fn open_link(&mut self, url: &str, tx: &mut Tx) {
+        match links::parse(url.trim()) {
+            Some(id) => {
+                let id = id.to_string();
+                self.go_to(&id);
+                tx.wake_after(Duration::from_secs_f64(FLASH));
+            }
+            None => {
+                let _ = tx.open_url(url);
+            }
+        }
+    }
+
+    pub fn go_to(&mut self, id: &str) {
+        self.showing = Showing::Chat;
+        let target = match self.ws.message(id) {
+            Some((i, m)) => {
+                self.scroll_to = Some(view::message_key(i, m));
+                Ok(id.to_string())
+            }
+            None => Err(id.to_string()),
+        };
+        self.flash = Some((target, self.now + FLASH));
+    }
+}
+
+/// The app's keyboard shortcuts, heard when the focused control does not take the key. Cmd is
+/// Ctrl off macOS.
+fn on_key(s: &mut App, key: &KeyEvent, tx: &mut Tx) -> bool {
+    if key.is_command('f') {
+        s.command(menus::Command::Find, tx);
+    } else if key.is_command('g') && key.mods.shift {
+        s.command(menus::Command::FindPrevious, tx);
+    } else if key.is_command('g') {
+        s.command(menus::Command::FindNext, tx);
+    } else if key.is_command(',') {
+        s.command(menus::Command::Settings, tx);
+    } else if key.key == Key::Escape && s.open_menu.is_some() {
+        s.open_menu = None;
+    } else if key.key == Key::Escape && s.find.open {
+        s.close_find(tx);
+    } else {
+        return false;
+    }
+    true
+}
+
+fn notification_id(id: u64) -> String {
+    format!("reminder-{id}")
+}
+
+/// Posts a reminder that came due to the system's notifications, unless the window is in
+/// front, where the banner shows it. Only a bundled app may post on macOS, which asks the
+/// captain's permission the first time; otherwise, or if they refused, the window alone shows
+/// it.
+fn notify(reminder: &Reminder) {
+    if rune_notify::available() && !rune_notify::app_focused() {
+        rune_notify::post(
+            &rune_notify::Notification::new(notification_id(reminder.id), "Reminder")
+                .body(reminder.text.clone()),
+        );
+    }
 }
 
 fn setup(s: &mut App, wake: Waker) {
@@ -935,13 +1564,15 @@ fn setup(s: &mut App, wake: Waker) {
     if let Some(watcher) = &mut s.project_watcher {
         watcher.connect(wake.clone());
     }
+    s.runtime.connect(wake.clone());
+    s.mates.connect(wake.clone());
     s.wake = Some(wake.clone());
     let _ = s.window_wake.set(wake.clone());
     s.chief.connect(wake);
 }
 
 fn main() {
-    rune::run(AppSpec::<App> {
+    let mut app = rune::App::new(AppSpec::<App> {
         scenes: &[
             ("chat", |s| *s = stub()),
             ("replied", |s| {
@@ -1127,6 +1758,33 @@ fn main() {
                     s.projects.as_ref().is_some_and(|p| p.is_ok()) && !s.has_no_projects()
                 });
             }),
+            // The GitHub repository combobox while adding a project: the list, a query with its
+            // matches marked, a chosen repository, and gh missing or signed out.
+            ("projects-repos", |s| {
+                *s = choosing_repo("projects-repos", repos::sample)
+            }),
+            ("projects-repos-filtered", |s| {
+                *s = choosing_repo("projects-repos-filtered", repos::sample);
+                s.repos.query.text = "ham".into();
+                s.repos_edited();
+            }),
+            ("projects-repos-chosen", |s| {
+                *s = choosing_repo("projects-repos-chosen", repos::sample);
+                s.repos.query.text = "pay".into();
+                s.repos_edited();
+                let (matches, _) = s.repos.matches();
+                s.choose_repo(matches[0].index);
+            }),
+            ("projects-repos-missing", |s| {
+                *s = choosing_repo("projects-repos-missing", || {
+                    repos::list(Path::new("/nonexistent/velvet-hammer/gh"))
+                });
+            }),
+            ("projects-repos-signed-out", |s| {
+                *s = choosing_repo("projects-repos-signed-out", || {
+                    Err(repos::Problem::SignedOut)
+                });
+            }),
             // The managed firstmate clone. All but the first two run git on a scratch upstream.
             ("firstmate-missing", |s| {
                 *s = on_firstmate(Lab::new().firstmate());
@@ -1181,7 +1839,10 @@ fn main() {
             ("tool-generic", |s| {
                 *s = fake_in(Mode::Run);
                 say(s, "shell: ls");
-                s.unfolded.insert("toolu_fake_Bash".into());
+                s.cards
+                    .entry("toolu_fake_Bash".into())
+                    .or_default()
+                    .all_lines = true;
             }),
             // Files attached to a message: pasted or dropped, in the draft as chips (a picture,
             // a video's poster frame, a file's name and size, a file still being added or that failed to be), sent with their paths and the
@@ -1229,6 +1890,19 @@ fn main() {
                 *s = shown(&fixture("chart.png"));
                 s.showing = Showing::Picture("toolu_fake_Read".into());
             }),
+            // Tool calls as cards: the captain's Bash example of a long test run, the same
+            // run unfolded, commands that failed, ran, printed colours or nothing, edits as
+            // diffs, and reads, searches and a fetch.
+            ("tool-bash", |s| *s = ran("tools-bash.json")),
+            ("tool-bash-open", |s| {
+                *s = ran("tools-bash.json");
+                let card = s.cards.entry("toolu_bash".into()).or_default();
+                card.all_lines = true;
+                card.full_input = true;
+            }),
+            ("tool-terminal", |s| *s = ran("tools-terminal.json")),
+            ("tool-diff", |s| *s = ran("tools-diff.json")),
+            ("tool-files", |s| *s = ran("tools-files.json")),
             // Views the chief of staff showed with `app_ui` (json-render specs): every kind of
             // component, the same view half streamed, state bound to inputs and a repeat after
             // the captain ticked, typed and added, a submit and the reply to it, a component the
@@ -1255,6 +1929,28 @@ fn main() {
                 *s = viewing(spec("ui-unknown.json"), true)
             }),
             ("view-too-large", |s| *s = viewing(too_large(), true)),
+            // A question with a fixed set of answers, asked with a Choice: the merge-authority
+            // question with yolo off recommended, the same after the captain chose yolo off, a
+            // Choice that takes several picks with two picked and an answer of the captain's own
+            // typed, and on the fake `claude` the question asked in prose, sent back by the stop
+            // hook, asked again with a Choice and answered.
+            ("choice-ask", |s| *s = viewing(spec("ui-choice.json"), true)),
+            ("choice-answered", |s| {
+                *s = viewing(spec("ui-choice.json"), true);
+                s.answer(VIEW, "merge", &["yolo-off".into()]);
+            }),
+            ("choice-multiple", |s| {
+                *s = viewing(spec("ui-choice-multiple.json"), true);
+                s.pick(VIEW, "checks", "tests");
+                s.pick(VIEW, "checks", "screens");
+                s.view_edit(VIEW, &ui::other_field("checks"), "").text = "A changelog entry".into();
+            }),
+            ("choice-enforced", |s| {
+                *s = fake_in(Mode::Run);
+                say_until(s, ASK, "Pick one above.");
+                s.answer(FAKE_CHOICE, "merge", &["yolo-off".into()]);
+                s.settle(replied);
+            }),
             // Visual replies: the settings page, a list the fake sent as text that was sent back
             // once and shown as a view, and a reply that ignored the feedback, sent back once.
             ("visuals-settings", |s| {
@@ -1296,6 +1992,128 @@ fn main() {
                 s.send();
                 s.settle(|s| s.ws.needs_input().next().is_some());
             }),
+            // Workers on other providers: the page before anything is set up, the page with pi
+            // installed from a stand-in release, the key found and firstmate pointed at it, a
+            // Claude model refused for pi, and the agents list showing what each worker runs on.
+            ("workers-fresh", |s| {
+                *s = workers_lab("workers-fresh", false);
+                s.key_check = || pi::Key::Missing;
+                s.open_workers();
+            }),
+            ("workers-settings", |s| {
+                *s = workers_lab("workers-settings", true);
+                s.open_workers();
+            }),
+            ("workers-claude-refused", |s| {
+                *s = workers_lab("workers-claude-refused", true);
+                s.open_workers();
+                s.crew_form.nickname.text = "poet".into();
+                s.crew_form.model.text = "opencode-go/claude-haiku-5-5".into();
+                s.crew_form.save(&mut s.nicknames);
+            }),
+            ("workers-crew", |s| {
+                let lab = Lab::at(Path::new("/tmp/velvet-hammer/workers-crew"));
+                lab.bearings(bearings::SNAPSHOT);
+                lab.meta(
+                    "lab-verify",
+                    "harness=pi\nmodel=opencode-go/deepseek-v4.1-flash\neffort=default\n",
+                );
+                lab.meta("lab-layout", "harness=claude\nmodel=claude-sonnet-5-5\n");
+                *s = fake_in_firstmate(&lab, true);
+                s.settle(|s| s.captain.crew.iter().any(|c| c.runs.is_some()));
+            }),
+            // Find in the conversation: a long chat for scripts/find.json, matches with the first
+            // current, the third current after stepping, a query with none, and the history kept
+            // from an earlier session.
+            ("long-chat", |s| *s = long_chat(40)),
+            ("find", |s| *s = finding("release", 0)),
+            ("find-stepped", |s| *s = finding("release", 2)),
+            ("find-none", |s| *s = finding("zebra", 0)),
+            ("history", |s| {
+                *s = reopened("history");
+                s.find.open = true;
+                s.find.query.text = "zeppelin".into();
+            }),
+            // Message links: a link copied, one opened scrolling to its message, a link in the
+            // captain's message quoted to the chief of staff, and one to a missing message.
+            ("link-copied", |s| {
+                *s = stub();
+                s.hovered = Some(1);
+                s.copied = Some(s.ws.chat[1].id.clone());
+            }),
+            ("link-opened", |s| {
+                *s = long_chat(40);
+                s.ws.items.clear();
+                s.go_to("000000000005");
+            }),
+            ("link-context", |s| {
+                *s = fake_in(Mode::Run);
+                say(s, "Plan: merge the docs PR first, then tag the release.");
+                let answer = links::url(&s.ws.chat[s.ws.chat.len() - 1].id);
+                say(s, &format!("do what this answer says: {answer}"));
+            }),
+            ("link-missing", |s| {
+                *s = fake_in(Mode::Run);
+                say(s, &format!("what did {} say?", links::url("0000deadbeef")));
+            }),
+            // Settings: every section, the confirmation before clearing the kept conversation,
+            // and the menus the window draws where Rune has no native menu bar (Windows' File
+            // menu, Linux's Edit menu).
+            ("settings", |s| {
+                *s = App::new(
+                    Box::new(Stub::default()),
+                    installed_firstmate(),
+                    &shown_dir("settings"),
+                );
+                s.showing = Showing::Settings;
+            }),
+            ("settings-clear", |s| {
+                *s = reopened("settings-clear");
+                s.showing = Showing::Settings;
+                s.confirm_clear = true;
+            }),
+            ("menu-windows", |s| {
+                *s = stub();
+                s.in_window_menus = true;
+                s.platform = menus::Platform::Windows;
+                s.open_menu = Some("File");
+            }),
+            ("menu-linux", |s| {
+                *s = stub();
+                s.in_window_menus = true;
+                s.platform = menus::Platform::Linux;
+                s.open_menu = Some("Edit");
+            }),
+            // Messages sent while the chief of staff works: sent right away and marked, the
+            // turn's answer to both, the setting, three queued with one being edited, the first
+            // of them going out when the turn ends, and the queue kept while Claude Code is not
+            // ready.
+            ("send-while-working", |s| *s = sent_while_working().0),
+            ("send-while-working-answered", |s| {
+                let (app, finish) = sent_while_working();
+                *s = app;
+                finish.finish();
+                s.step();
+            }),
+            ("messages-settings", |s| {
+                *s = stub();
+                s.showing = Showing::Messages;
+            }),
+            ("queue-waiting", |s| {
+                *s = queued_while_working().0;
+                s.edit_queued(1);
+                s.editing.as_mut().unwrap().1.text = "Tag it v0.2.0 once CI is green.".into();
+            }),
+            ("queue-delivering", |s| {
+                let (app, finish) = queued_while_working();
+                *s = app;
+                finish.finish();
+                s.step();
+            }),
+            ("queue-not-ready", |s| {
+                *s = queued_while_working().0;
+                s.take(Event::Status(Status::SignedOut { problem: None }));
+            }),
             ("rules-project-ask", |s| {
                 *s = rules_lab("rules-project-ask");
                 let file = s.firstmate.home_dir().join("projects/site/README.md");
@@ -1303,19 +2121,426 @@ fn main() {
                 s.send();
                 s.settle(|s| s.ws.needs_input().next().is_some());
             }),
+            // Reminders on a fixed clock, Friday 2:30 PM: the Reminders page, two that came due
+            // (one overdue) with the banner and For you to do, the snooze menu, and the settings.
+            ("reminders-list", |s| *s = reminders_set().0),
+            ("reminder-fired", |s| *s = reminders_due().0),
+            ("reminder-snooze", |s| {
+                let (app, stretch) = reminders_due();
+                *s = app;
+                s.snoozing = Some(("banner", stretch));
+            }),
+            ("reminder-settings", |s| {
+                *s = on_clock(&scratch("unused"), friday(14, 30)).0;
+                s.showing = Showing::ReminderSettings;
+            }),
+            // A due reminder's "Set in this message", pressed: the chat at the captain's message,
+            // highlighted.
+            ("reminder-link-opened", |s| {
+                *s = reminders_due().0;
+                let message = s.ws.chat[0].id.clone();
+                s.go_to(&message);
+            }),
+            // Second mates, on the fake `claude` running as firstmate in a lab home whose
+            // stand-in scripts behave as firstmate's did in a scratch home: none yet, five in
+            // each state, each one's page, a peek at one's terminal, the guided add at each
+            // step, its outcome and a refusal, a refused retirement, a message and its reply,
+            // an escalation answered, work the chief of staff routed, and the add opened from
+            // the chat.
+            ("mates-none", |s| {
+                let lab = Lab::at(&Path::new("/tmp/velvet-hammer").join("mates-none"));
+                *s = fake_in_firstmate(&lab, true);
+                s.settle(|s| s.mates.records.is_some() && s.projects.is_some());
+            }),
+            ("mates-listed", |s| *s = mates_lab("mates-listed").0),
+            ("mate-idle", |s| {
+                *s = mates_lab("mate-idle").0;
+                s.open_mate("docs");
+            }),
+            ("mate-working", |s| {
+                *s = mates_lab("mate-working").0;
+                s.open_mate("billing");
+            }),
+            ("mate-stopped", |s| {
+                *s = mates_lab("mate-stopped").0;
+                s.open_mate("infra");
+            }),
+            ("mate-mismatch", |s| {
+                *s = mates_lab("mate-mismatch").0;
+                s.open_mate("web");
+            }),
+            ("mate-peek", |s| {
+                let (app, lab) = mates_lab("mate-peek");
+                lab.pane("docs", "$ bin/fm-watch.sh\nno routed work; waiting quietly");
+                *s = app;
+                s.showing = Showing::Crew("docs".into());
+                s.settle(|s| s.peek.as_ref().is_some_and(|p| p.pane.is_some()));
+            }),
+            ("add-mate-scope", |s| {
+                *s = adding_mate("add-mate-scope", Step::Scope).0
+            }),
+            ("add-mate-projects", |s| {
+                *s = adding_mate("add-mate-projects", Step::Projects).0
+            }),
+            ("add-mate-name", |s| {
+                *s = adding_mate("add-mate-name", Step::Name).0
+            }),
+            ("add-mate-runtime", |s| {
+                *s = adding_mate("add-mate-runtime", Step::Runtime).0
+            }),
+            ("add-mate-confirm", |s| {
+                *s = adding_mate("add-mate-confirm", Step::Confirm).0
+            }),
+            ("add-mate-created", |s| {
+                let (app, lab) = adding_mate("add-mate-created", Step::Confirm);
+                *s = app;
+                s.create_mate();
+                s.settle_mates();
+                // Firstmate's snapshot now reports the new mate, idle in its new session.
+                lab.bearings(&with_mate(bearings::MATES, "payments"));
+                s.settle(|s| s.captain.mate("payments").is_some() && replied(s));
+            }),
+            ("add-mate-refused", |s| {
+                let (app, lab) = adding_mate("add-mate-refused", Step::Confirm);
+                lab.refuse("fm-home-seed.sh", SEED_REFUSAL);
+                *s = app;
+                s.create_mate();
+                s.settle_mates();
+            }),
+            ("mate-retire-confirm", |s| {
+                *s = mates_lab("mate-retire-confirm").0;
+                s.open_mate("billing");
+                s.confirm_mate(secondmates::Op::Retire("billing".into()));
+            }),
+            ("mate-retire-refused", |s| {
+                let (app, lab) = mates_lab("mate-retire-refused");
+                lab.mate_child("billing", "invoice-retries");
+                *s = app;
+                s.open_mate("billing");
+                s.confirm_mate(secondmates::Op::Retire("billing".into()));
+                s.confirmed_mate();
+                s.settle_mates();
+            }),
+            ("mate-message", |s| {
+                *s = mates_lab("mate-message").0;
+                message_docs(s);
+            }),
+            ("mate-replied", |s| {
+                let (app, lab) = mates_lab("mate-replied");
+                *s = app;
+                message_docs(s);
+                lab.mate_says("docs", &docs_reply());
+                s.settle(|s| {
+                    s.mates
+                        .channel("docs")
+                        .is_some_and(|c| c.conversation().len() == 4)
+                });
+            }),
+            ("mate-escalation", |s| {
+                *s = mates_lab("mate-escalation").0;
+                s.answer_mate_hold("support", "refund-window");
+            }),
+            ("mate-escalation-answered", |s| {
+                *s = mates_lab("mate-escalation-answered").0;
+                s.answer_mate_hold("support", "refund-window");
+                s.mates.draft("support").text = "30 days, counted from delivery.".into();
+                s.send_to_mate("support");
+                s.settle_mates();
+                s.settle(|s| {
+                    s.mates
+                        .channel("support")
+                        .is_some_and(|c| !c.sent.is_empty())
+                });
+            }),
+            ("mate-routed", |s| {
+                *s = mates_lab("mate-routed").0;
+                say(
+                    s,
+                    "shell: bin/fm-send.sh docs Add a search page to the docs",
+                );
+            }),
+            ("mate-from-chat", |s| {
+                *s = mates_lab("mate-from-chat").0;
+                s.draft.text = "mate: the billing service, its invoices and payment retries".into();
+                s.send();
+                s.settle(|s| s.showing == Showing::AddMate);
+            }),
         ],
         min_size: Some((900.0, 560.0)),
         setup: Some(setup),
         poll: Some(poll),
+        on_key: Some(on_key),
         ..AppSpec::new("Velvet Hammer", (1100.0, 720.0), init, view::view)
-    });
+    })
+    // A message link the system opened with the app; macOS needs the app bundle to declare the
+    // scheme first (see docs/links.md).
+    .on_open_url(|s: &mut App, url: &str, tx: &mut Tx| s.open_link(url, tx))
+    // The Mac's Edit and Window menus, with Settings, Find and Help added. Rune has no native
+    // menu bar elsewhere, where the window draws its own (see menus.rs); headless runs keep the
+    // native items so scripts can pick them.
+    .standard_menus();
+    if cfg!(target_os = "macos") || rune::is_headless() {
+        for item in menus::native() {
+            app = app.menu_item(item);
+        }
+    }
+    app.run();
+}
+
+/// Friday, 2026-11-13, at `hour:minute` in US Eastern time, for the reminder scenes and tests.
+fn friday(hour: i8, minute: i8) -> jiff::Zoned {
+    let eastern = jiff::tz::TimeZone::posix("EST5EDT,M3.2.0,M11.1.0").expect("a POSIX zone");
+    jiff::civil::date(2026, 11, 13)
+        .at(hour, minute, 0, 0)
+        .to_zoned(eastern)
+        .expect("a time in the zone")
+}
+
+/// The hands of a clock the reminder scenes and tests move themselves.
+type Hands = Arc<Mutex<jiff::Zoned>>;
+
+fn clock(hands: &Hands) -> reminders::Clock {
+    let hands = hands.clone();
+    Arc::new(move || hands.lock().unwrap_or_else(|e| e.into_inner()).clone())
+}
+
+/// The stub app keeping its data in `data`, its reminders on a clock set to `now`.
+fn on_clock(data: &Path, now: jiff::Zoned) -> (App, Hands) {
+    let hands = Arc::new(Mutex::new(now));
+    let app = App::with_clock(
+        Box::new(Stub::default()),
+        installed_firstmate(),
+        data,
+        clock(&hands),
+    );
+    (app, hands)
+}
+
+/// Reminders set at 2:30 PM on Friday for each form, shown on the Reminders page.
+fn reminders_set() -> (App, Hands) {
+    let (mut app, hands) = on_clock(&scratch("unused"), friday(14, 30));
+    for (text, when) in [
+        ("Check the deploy", When::In(20, Unit::Minutes)),
+        ("Reply to the design review", When::LaterToday),
+        ("The standup", When::TomorrowMorning),
+        ("Send the invoice", When::In(3, Unit::Days)),
+        ("Plan the week", When::NextWeek),
+        ("Renew the velvet-hammer.dev domain", When::Later),
+        ("Read the Rune changelog", When::Later),
+    ] {
+        app.reminders.set(text, when).expect("a reminder");
+    }
+    app.showing = Showing::Reminders;
+    app.drain();
+    (app, hands)
+}
+
+/// Two reminders that came due at 2:32 PM: one set at 9:00 AM for 10:00 AM, which the app
+/// shows as overdue because it fired late, and one set at 2:30 PM for two minutes on, with the
+/// id of the second. Two more wait.
+fn reminders_due() -> (App, u64) {
+    let (mut app, hands) = on_clock(&scratch("unused"), friday(9, 0));
+    // Set in reply to the stub's first message, which the reminders link back to.
+    app.reminders.said_in(&app.ws.chat[0].id);
+    app.reminders
+        .set("Call the bank about the wire", When::In(1, Unit::Hours))
+        .expect("a reminder");
+    *hands.lock().unwrap() = friday(14, 30);
+    for (text, when) in [
+        ("Stretch", When::In(2, Unit::Minutes)),
+        ("Check the deploy", When::LaterToday),
+        ("Renew the velvet-hammer.dev domain", When::Later),
+    ] {
+        app.reminders.set(text, when).expect("a reminder");
+    }
+    *hands.lock().unwrap() = friday(14, 32);
+    app.drain();
+    let stretch = app
+        .reminders
+        .list()
+        .iter()
+        .find(|r| r.text == "Stretch")
+        .map(|r| r.id)
+        .expect("set above");
+    (app, stretch)
+}
+
+/// The projects in the second-mate scenes: the sample registry and one local-only project.
+const MATE_PROJECTS: &str = "# Projects\n\n\
+    - velvet-hammer [no-mistakes-prod-only] - The desktop app (added 2026-11-13)\n\
+    - site [direct-PR +yolo branch=web/] - The marketing site (added 2026-11-02)\n\
+    - scratch [local-only] - Experiments (added 2026-11-10)\n";
+
+/// A refusal `bin/fm-home-seed.sh` prints, in its own words.
+const SEED_REFUSAL: &str = "error: seeded project site at /tmp/velvet-hammer/add-mate-refused/\
+    data/secondmates/payments/projects/site is not initialized for no-mistakes; refusing to \
+    mutate preexisting clone";
+
+/// The reply the docs mate appends to its parent channel, as `bin/fm-secondmate-report.sh`
+/// appends one, answering the message `message_docs` sends a moment before.
+fn docs_reply() -> String {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs());
+    format!(
+        "done [corr=0000000000000002] [at={}]: Not yet. The search page is **built** and \
+         waits for its pull request to merge. (via-helper)",
+        now + 60
+    )
+}
+
+/// [`mates_app`] in a lab at `/tmp/velvet-hammer/<name>`, a short path for screenshots.
+fn mates_lab(name: &str) -> (App, Lab) {
+    let lab = Lab::at(&Path::new("/tmp/velvet-hammer").join(name));
+    (mates_app(&lab), lab)
+}
+
+/// The app on the fake `claude` running as firstmate in `lab`, with five second mates, one in
+/// each state the bearings fixture reports, a conversation with `docs` and a hold `support`
+/// escalated.
+fn mates_app(lab: &Lab) -> App {
+    lab.registry(MATE_PROJECTS);
+    lab.bearings(bearings::MATES);
+    for (id, charter, scope, projects) in [
+        (
+            "billing",
+            "Owns the billing service: invoices, payment retries and dashboards.",
+            "billing service work",
+            &["site"][..],
+        ),
+        (
+            "docs",
+            "Keeps the documentation site accurate and current.",
+            "documentation site work: pages, examples and the docs build",
+            &["velvet-hammer"][..],
+        ),
+        (
+            "infra",
+            "Looks after deploys and the build machines.",
+            "deploy and CI infrastructure",
+            &["site"][..],
+        ),
+        (
+            "web",
+            "Runs the marketing site.",
+            "marketing site pages and copy",
+            &["site"][..],
+        ),
+        (
+            "support",
+            "Handles customer support tooling and refunds.",
+            "support tooling and refund policy",
+            &[][..],
+        ),
+    ] {
+        lab.second_mate(id, charter, scope, projects);
+    }
+    lab.mate_inbox(
+        "docs",
+        1,
+        "2026-11-14T00:58:32Z",
+        "ebbe292e407ab6f6",
+        "Please check whether the docs build passes on main.",
+        true,
+    );
+    lab.mate_says(
+        "docs",
+        "done [corr=ebbe292e407ab6f6] [at=1794617925]: The docs build passes on main; the last \
+         run took 41 seconds. (via-helper)",
+    );
+    lab.mate_says(
+        "support",
+        "needs-decision [key=captain-hold-refund-window-1] [at=1794617854]: captain hold \
+         refund-window: Refund within 14 days or 30 days of purchase?",
+    );
+    let mut app = fake_in_firstmate(lab, true);
+    app.settle(|s| s.mates.list().len() == 5 && s.captain.mates.len() == 5 && s.projects.is_some());
+    app
+}
+
+/// The add flow in `mates_lab`, answered up to `step`.
+fn adding_mate(name: &str, step: Step) -> (App, Lab) {
+    let (app, lab) = mates_lab(name);
+    (answered(app, &lab, step), lab)
+}
+
+/// The add flow in `app`, answered up to `step`. The lab's firstmate names two runtimes, so the
+/// flow asks which one.
+fn answered(mut app: App, lab: &Lab, step: Step) -> App {
+    lab.harness("secondmate", "codex");
+    app.add_mate(None);
+    let answers: [&dyn Fn(&mut App); 4] = [
+        &|s| s.mates.adding.charter.text = "Payments: card retries, refunds and payouts.".into(),
+        &|s| s.toggle_mate_project("site"),
+        &|s| s.mates.adding.name.text = "payments".into(),
+        &|s| s.mates.adding.runtime = 1,
+    ];
+    for answer in answers {
+        if app.mates.adding.step() == step {
+            break;
+        }
+        answer(&mut app);
+        app.add_mate_next();
+    }
+    app
+}
+
+/// The bearings snapshot `json` with one more second mate, idle in a running session.
+fn with_mate(json: &str, id: &str) -> String {
+    let mut doc: serde_json::Value = serde_json::from_str(json).expect("a bearings snapshot");
+    doc["secondmates"]
+        .as_array_mut()
+        .expect("secondmates")
+        .push(serde_json::json!({
+            "id": id, "state": "no_active_work", "doing": "No active child work",
+            "provenance": "structured-home", "freshness": "fresh", "age_seconds": 0,
+            "contradiction": false, "reason": "-"
+        }));
+    doc["endpoints"]
+        .as_array_mut()
+        .expect("endpoints")
+        .push(serde_json::json!({
+            "id": id, "backend": "tmux", "target": format!("firstmate:fm-{id}"),
+            "exists": true, "agent": "alive"
+        }));
+    doc.to_string()
+}
+
+/// The captain writes to the docs mate from its page and the message is delivered.
+fn message_docs(s: &mut App) {
+    s.open_mate("docs");
+    s.mates.draft("docs").text = "Is the search page live yet?".into();
+    s.send_to_mate("docs");
+    s.settle_mates();
+    s.settle(|s| s.mates.channel("docs").is_some_and(|c| c.sent.len() == 2));
 }
 
 /// The list the visual-replies scenes and tests have the fake send as text.
+/// The merge-authority question the fake `claude` asks in prose, then with a Choice.
+const ASK: &str = "ask: Merge authority for velvet-hammer is yolo on. Recommended: yolo off. Do \
+                   you want it off?";
+
+/// The tool use the fake `claude` asks [`ASK`] with.
+const FAKE_CHOICE: &str = "toolu_fake_choice";
+
 const LIST: &str = "list: Merge the docs PR, Renew the domain, Answer the window-size question";
 
 /// A merge through firstmate's script, which its rules ask the captain about.
 const MERGE: &str = "bin/fm-pr-merge.sh site-docs https://github.com/captain/site/pull/7";
+
+/// Adding a project with the fake `claude` as firstmate in a lab under
+/// `/tmp/velvet-hammer/NAME`, so the screenshots name no one's home directory, with the
+/// repository list open on what `lister` listed.
+fn choosing_repo(name: &str, lister: fn() -> Result<Vec<repos::Repo>, repos::Problem>) -> App {
+    let mut app = fake_in_firstmate(&Lab::at(&Path::new("/tmp/velvet-hammer").join(name)), true);
+    app.settle(|s| s.projects.is_some());
+    app.add_project();
+    app.settle(replied);
+    app.repos.lister = lister;
+    app.show_repos();
+    app.settle(|s| !s.repos.loading());
+    app
+}
 
 /// The fake `claude` running as firstmate in a lab under `/tmp/velvet-hammer/NAME`, so the
 /// screenshots show a short path that names no one's home directory, with three projects
@@ -1325,6 +2550,30 @@ fn rules_lab(name: &str) -> App {
     lab.registry(projects::SAMPLE_REGISTRY);
     let mut app = fake_in_firstmate(&lab, true);
     app.settle(|s| s.projects.as_ref().is_some_and(|p| p.is_ok()) && !s.has_no_projects());
+    app
+}
+
+/// The fake `claude` running as firstmate in a lab under `/tmp/velvet-hammer/NAME`, with the pi
+/// runtime installable from a stand-in release. When `ready`, pi is installed, firstmate is
+/// pointed at it, the keychain stand-in has the key, and a second nickname is added.
+fn workers_lab(name: &str, ready: bool) -> App {
+    let root = Path::new("/tmp/velvet-hammer").join(name);
+    let lab = Lab::at(&root);
+    let mut app = fake_in_firstmate(&lab, true);
+    app.runtime
+        .set_release(pi::lab::release(&root.join("pi-release"), false));
+    app.key_check = || pi::Key::Present;
+    if ready {
+        app.runtime.install();
+        app.runtime.settle();
+        app.connect_workers();
+        app.runtime.settle();
+        app.crew_form.nickname.text = "night-owl".into();
+        app.crew_form.harness = crew::Harness::Claude;
+        app.crew_form.model.text = "opus".into();
+        app.crew_form.effort.text = "high".into();
+        app.crew_form.save(&mut app.nicknames);
+    }
     app
 }
 
@@ -1445,6 +2694,44 @@ fn settle_attachments(app: &mut App) {
     }
 }
 
+/// The stub app after the turn a `scripts/fixtures` file describes: the captain's question, the
+/// chief of staff's first words, its tool uses with their results and how long each took (none
+/// for one still running), and its reply.
+fn ran(name: &str) -> App {
+    let turn: serde_json::Value = serde_json::from_str(&fixture_text(name)).expect("fixture JSON");
+    let words = |field: &str| turn[field].as_str().unwrap_or_default().to_string();
+    let mut app = stub();
+    app.ws.chat = vec![
+        Message::new(Author::Captain, words("ask")),
+        Message::new(Author::ChiefOfStaff, words("lead")),
+    ];
+    for tool in turn["tools"].as_array().into_iter().flatten() {
+        let id = tool["id"].as_str().unwrap_or_default().to_string();
+        app.take(Event::Tool(tools::ToolUse {
+            id: id.clone(),
+            name: tool["name"].as_str().unwrap_or_default().into(),
+            input: tool["input"].clone(),
+            result: None,
+        }));
+        let Some(text) = tool["result"].as_str() else {
+            continue;
+        };
+        app.take(Event::ToolResult {
+            id: id.clone(),
+            result: tools::ToolResult {
+                is_error: tool["is_error"] == true,
+                content: vec![tools::Content::Text(text.into())],
+            },
+        });
+        let took = Duration::from_secs_f64(tool["took"].as_f64().unwrap_or_default());
+        app.clock.insert(id, Clock::Took(took));
+    }
+    app.ws
+        .chat
+        .push(Message::new(Author::ChiefOfStaff, words("reply")));
+    app
+}
+
 /// A file in `scripts/fixtures`, as written.
 fn fixture_text(name: &str) -> String {
     let path = Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -1541,6 +2828,90 @@ fn press(s: &mut App, id: &str) {
     s.fire(VIEW, &trigger, did);
 }
 
+/// The stub app on a chief of staff that keeps working until `Finish` ends its turn.
+fn working_stub() -> (App, Finish) {
+    let (chief, finish) = Stub::slow();
+    let mut app = App::new(Box::new(chief), installed_firstmate(), &scratch("unused"));
+    app.ws.items.clear();
+    app.ws.chat.clear();
+    (app, finish)
+}
+
+/// The captain asked for release notes, then added to it while the chief of staff worked.
+fn sent_while_working() -> (App, Finish) {
+    let (mut app, finish) = working_stub();
+    app.draft.text = "Draft the release notes for 0.2.".into();
+    app.send();
+    app.draft.text = "Also mention the new Messages setting.".into();
+    app.send();
+    (app, finish)
+}
+
+/// In queue mode, three messages sent while the chief of staff works on a first.
+fn queued_while_working() -> (App, Finish) {
+    let (mut app, finish) = working_stub();
+    app.delivery.change(|d| *d = messages::Delivery::Queue);
+    for text in [
+        "Draft the release notes for 0.2.",
+        "Then open the release PR.",
+        "Tag it once CI is green.",
+        "Tell me when it is out.",
+    ] {
+        app.draft.text = text.into();
+        app.send();
+    }
+    (app, finish)
+}
+
+/// The stub's chat with `n` more messages from the chief of staff, every tenth naming the
+/// release, so the matches are far apart.
+fn long_chat(n: usize) -> App {
+    let mut app = stub();
+    for i in 0..n {
+        let words = if i % 10 == 0 {
+            format!("Reply {i}: the **release** is on track.")
+        } else {
+            format!("Reply {i}: nothing new.")
+        };
+        let mut reply = Message::new(Author::ChiefOfStaff, words);
+        // Fixed ids, so scripts can link to them (scripts/open-link.json).
+        reply.id = format!("{i:012x}");
+        app.ws.chat.push(reply);
+    }
+    app
+}
+
+/// The stub's chat with the find bar open on `query`, at match `current`.
+fn finding(query: &str, current: usize) -> App {
+    let mut app = long_chat(40);
+    app.ws.items.clear();
+    app.find.open = true;
+    app.find.query.text = query.into();
+    app.find.searched = query.into();
+    app.find.current = current;
+    app.find.reveal = true;
+    app
+}
+
+/// The stub on a data directory where an earlier session asked about the zeppelin plan.
+fn reopened(name: &str) -> App {
+    let data = shown_dir(name);
+    let mut first = App::new(Box::new(Stub::default()), installed_firstmate(), &data);
+    first.draft.text = "Remember the zeppelin plan for the launch.".into();
+    first.send();
+    drop(first);
+    App::new(Box::new(Stub::default()), installed_firstmate(), &data)
+}
+
+/// An empty data directory at `/tmp/velvet-hammer/NAME`, for scenes whose screenshots show where
+/// a file is kept, so they name no one's home directory.
+fn shown_dir(name: &str) -> PathBuf {
+    let dir = Path::new("/tmp/velvet-hammer").join(name);
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("scene directory");
+    dir
+}
+
 /// Sends `text` and waits for the reply, for scenes.
 fn say(s: &mut App, text: &str) {
     s.draft.text = text.into();
@@ -1567,6 +2938,16 @@ mod tests {
     use crate::model::Item;
     use rune::{Env, Runtime};
 
+    /// Lets the fake `claude` finish the turn a "slow:" message holds open.
+    fn release_slow_turn(home: &std::path::Path) {
+        std::fs::write(home.join("release"), "").expect("release file");
+    }
+
+    /// The words of each queued message, oldest first.
+    fn queued_texts(app: &App) -> Vec<&str> {
+        app.queue.iter().map(|q| q.text.as_str()).collect()
+    }
+
     fn runtime() -> Runtime<App> {
         runtime_with(stub())
     }
@@ -1578,6 +2959,7 @@ mod tests {
         };
         let mut rt = Runtime::new(app, view::view, (1100.0, 720.0), env);
         rt.poll = Some(poll);
+        rt.on_key = Some(on_key);
         rt.frame(0.0);
         rt
     }
@@ -1595,6 +2977,25 @@ mod tests {
         for _ in 0..30 {
             rt.frame(1.0 / 60.0);
         }
+    }
+
+    #[test]
+    fn opening_the_app_writes_nothing_into_the_firstmate_home() {
+        let root = scratch("quiet-home");
+        let firstmate = Firstmate::showing(
+            root.join("clone"),
+            firstmate::UPSTREAM,
+            Distro::Installed(Checkout::default()),
+            None,
+        );
+        let home = firstmate.home_dir();
+        std::fs::create_dir_all(&home).unwrap();
+        let claude = Claude::new(FAKE_CLAUDE)
+            .env("FAKE_CLAUDE_HOME", scratch("signed-in").to_string_lossy())
+            .in_firstmate(firstmate.clone_dir(), home.clone());
+        let app = App::new(Box::new(claude), firstmate, &root.join("data"));
+        assert_eq!(std::fs::read_dir(&home).unwrap().count(), 0);
+        assert_eq!(app.nicknames.settings().presets.len(), 1);
     }
 
     #[test]
@@ -2237,6 +3638,113 @@ mod tests {
         assert!(rt.find("add-pick-problem").is_some());
     }
 
+    fn key(rt: &mut Runtime<App>, key: rune::Key) {
+        rt.key(rune::KeyEvent {
+            key,
+            mods: rune::Mods::default(),
+        });
+        rt.frame(1.0 / 60.0);
+    }
+
+    /// Adding a project, with the repository combobox listing `lister`'s repositories.
+    fn adding_with_repos(lister: fn() -> Result<Vec<repos::Repo>, repos::Problem>) -> Runtime<App> {
+        let mut rt = runtime_with(fake_in_firstmate(&Lab::new(), true));
+        wait(&mut rt, projects_read);
+        tap(&mut rt, "add-project");
+        wait(&mut rt, replied);
+        rt.state.repos.lister = lister;
+        rt
+    }
+
+    #[test]
+    fn the_repository_combobox_filters_and_chooses_with_the_keyboard() {
+        let mut rt = adding_with_repos(repos::sample);
+        let sent = rt.state.ws.chat.len();
+        assert!(rt.find("repo-search").is_some());
+        assert!(rt.find("repo-list").is_none(), "closed until opened");
+        tap(&mut rt, "repo-search");
+        key(&mut rt, rune::Key::Down);
+        assert!(rt.state.repos.open);
+        wait(&mut rt, |s| !s.repos.loading());
+        assert!(rt.find("repo-list").is_some());
+        // The captain's own private repositories lead, the first highlighted.
+        let (matches, _) = rt.state.repos.matches();
+        assert_eq!(rt.state.repos.active(&matches), Some(0));
+        assert_eq!(
+            rt.state.repos.repo(0).unwrap().full_name(),
+            "captain/dotfiles"
+        );
+        key(&mut rt, rune::Key::Down);
+        assert_eq!(rt.state.repos.active(&matches), Some(1));
+        key(&mut rt, rune::Key::Up);
+        key(&mut rt, rune::Key::Up);
+        assert_eq!(
+            rt.state.repos.active(&matches),
+            Some(7),
+            "Up wraps to the last"
+        );
+        // Typing filters and highlights the best match again.
+        for c in ["p", "a", "y"] {
+            key(&mut rt, rune::Key::Text(c.into()));
+        }
+        assert_eq!(rt.state.repos.query.text, "pay");
+        assert!(rt.find("repo-option-acme:payments-api").is_some());
+        assert!(rt.find("repo-option-captain:dotfiles").is_none());
+        // Escape closes the list; Down opens it again on the same query.
+        key(&mut rt, rune::Key::Escape);
+        assert!(!rt.state.repos.open);
+        assert!(rt.find("repo-list").is_none());
+        key(&mut rt, rune::Key::Down);
+        wait(&mut rt, |s| !s.repos.loading());
+        // Return chooses: the address goes into the message, and nothing is sent.
+        key(&mut rt, rune::Key::Enter);
+        assert_eq!(rt.state.draft.text, "https://github.com/acme/payments-api");
+        assert!(!rt.state.repos.open);
+        assert!(rt.state.repos.query.text.is_empty());
+        assert_eq!(rt.state.ws.chat.len(), sent);
+    }
+
+    #[test]
+    fn a_repository_can_be_chosen_with_the_pointer() {
+        let mut rt = adding_with_repos(repos::sample);
+        tap(&mut rt, "repo-toggle");
+        wait(&mut rt, |s| !s.repos.loading());
+        tap(&mut rt, "repo-option-captain:notes");
+        assert_eq!(rt.state.draft.text, "https://github.com/captain/notes");
+        assert!(rt.find("repo-list").is_none());
+    }
+
+    #[test]
+    fn a_missing_gh_says_how_to_fix_it_and_try_again_lists_once_it_is_fixed() {
+        let mut rt = adding_with_repos(|| repos::list(Path::new("/nonexistent/velvet-hammer/gh")));
+        tap(&mut rt, "repo-toggle");
+        wait(&mut rt, |s| !s.repos.loading());
+        assert!(rt.find("repo-problem").is_some());
+        assert!(rt.find("repo-list").is_none());
+        // The captain installed and signed in to gh.
+        rt.state.repos.lister = repos::sample;
+        tap(&mut rt, "repo-retry");
+        wait(&mut rt, |s| !s.repos.loading());
+        assert!(rt.find("repo-problem").is_none());
+        assert!(rt.find("repo-list").is_some());
+    }
+
+    #[test]
+    fn each_opening_lists_the_repositories_again() {
+        let mut rt = adding_with_repos(|| Err(repos::Problem::SignedOut));
+        tap(&mut rt, "repo-toggle");
+        wait(&mut rt, |s| !s.repos.loading());
+        assert!(rt.find("repo-problem").is_some());
+        tap(&mut rt, "repo-toggle");
+        rt.state.repos.lister = repos::sample;
+        tap(&mut rt, "repo-toggle");
+        wait(&mut rt, |s| !s.repos.loading());
+        assert!(rt.find("repo-list").is_some());
+        // Done adding closes it.
+        tap(&mut rt, "add-finish");
+        assert!(!rt.state.repos.open);
+    }
+
     #[test]
     fn a_registry_that_cannot_be_read_says_why_instead_of_prompting() {
         let lab = Lab::new();
@@ -2363,7 +3871,7 @@ mod tests {
     fn the_firstmate_card_opens_its_page_until_closed() {
         let mut rt = runtime();
         assert!(rt.find("firstmate-page").is_none());
-        tap(&mut rt, "firstmate");
+        open_setting(&mut rt, "firstmate");
         assert_eq!(rt.state.showing, Showing::Firstmate);
         assert!(rt.find("firstmate-page").is_some());
         assert!(rt.find("firstmate-check").is_some());
@@ -2921,16 +4429,16 @@ mod tests {
         let home = scratch("signed-in");
         let mut rt = runtime_with(on_fake(FAKE_CLAUDE, &home, &[]));
         wait(&mut rt, settled);
-        tap(&mut rt, "approvals");
+        open_setting(&mut rt, "approvals");
         assert_eq!(rt.state.showing, Showing::Approvals);
         assert!(rt.find("mode-run-without-asking").is_some());
         assert!(rt.find("rules-empty").is_some());
-        tap(&mut rt, "mode-ask-every-time");
+        tap_scrolled(&mut rt, "mode-ask-every-time");
         assert_eq!(rt.state.approvals.settings().mode, Mode::Ask);
-        tap(&mut rt, "rule-effect-deny");
+        tap_scrolled(&mut rt, "rule-effect-deny");
         rt.state.form.tool.text = "Bash".into();
         rt.state.form.pattern.text = "git push".into();
-        tap(&mut rt, "rule-save");
+        tap_scrolled(&mut rt, "rule-save");
         assert!(rt.find("rule-0").is_some());
         assert_eq!(
             rt.state.approvals.settings().rules[0].describe(),
@@ -2958,7 +4466,7 @@ mod tests {
     fn reset_asks_first_then_restores_the_recommended_default() {
         let mut rt = runtime_with(fake_in(Mode::Ask));
         rt.state.approvals.change(|s| s.rules = sample_rules());
-        tap(&mut rt, "approvals");
+        open_setting(&mut rt, "approvals");
         assert!(rt.find("rule-2").is_some());
         tap(&mut rt, "rule-2-up");
         assert_eq!(rt.state.approvals.settings().rules[1].tool, "Edit");
@@ -2984,7 +4492,7 @@ mod tests {
         let mut rt = runtime_with(on_fake(FAKE_CLAUDE, &home, &[]));
         wait(&mut rt, settled);
         assert_eq!(rt.state.approvals.settings().mode, Mode::Ask);
-        tap(&mut rt, "approvals");
+        open_setting(&mut rt, "approvals");
         assert!(rt.find("approvals-problem").is_some());
         tap(&mut rt, "approvals-close");
         rt.state.draft.text = "run: ls".into();
@@ -2999,13 +4507,13 @@ mod tests {
     fn the_activity_page_lists_tool_uses_newest_first() {
         let mut rt = runtime_with(fake_in(Mode::Run));
         wait(&mut rt, settled);
-        tap(&mut rt, "approvals");
+        open_setting(&mut rt, "approvals");
         tap(&mut rt, "approvals-activity");
         assert!(rt.find("activity-empty").is_some());
         tap(&mut rt, "activity-close");
         send_and_wait(&mut rt, "run: cargo test");
         send_and_wait(&mut rt, "write: /tmp/notes.txt hello");
-        tap(&mut rt, "approvals");
+        open_setting(&mut rt, "approvals");
         tap(&mut rt, "approvals-activity");
         assert!(rt.find("activity-0").is_some());
         assert!(rt.find("activity-1").is_some());
@@ -3087,6 +4595,73 @@ mod tests {
         }
         eprintln!("notices: {:?}", notices(&rt));
         eprintln!("chat: {:?}", rt.state.ws.chat);
+    }
+
+    /// The real `claude` on the Haiku model, told "remind me in 2 minutes to stretch": it calls
+    /// `app_remind` with the "in" form, and the reminder fires two minutes later, on a clock
+    /// moved forward rather than waited for. Run it with `cargo test real_claude -- --ignored`.
+    #[test]
+    #[ignore = "uses the real Claude account"]
+    fn real_claude_sets_a_reminder_that_fires() {
+        let ahead = Arc::new(Mutex::new(jiff::SignedDuration::ZERO));
+        let clock: reminders::Clock = {
+            let ahead = ahead.clone();
+            Arc::new(move || {
+                let now = jiff::Zoned::now();
+                now.checked_add(*ahead.lock().unwrap()).unwrap_or(now)
+            })
+        };
+        let claude = Claude::new("claude").env("ANTHROPIC_MODEL", "haiku");
+        let mut rt = runtime_with(App::with_clock(
+            Box::new(claude),
+            installed_firstmate(),
+            &scratch("unused"),
+            clock,
+        ));
+        wait(&mut rt, settled);
+        assert!(matches!(rt.state.status, Status::Ready(_)), "not signed in");
+        rt.state.draft.text = "remind me in 2 minutes to stretch".into();
+        tap(&mut rt, "send");
+        // A turn may load the deferred tool and say something first; it ends with words.
+        wait_for(&mut rt, Duration::from_secs(120), |s| {
+            !s.reminders.list().is_empty()
+                && replied(s)
+                && s.ws
+                    .chat
+                    .last()
+                    .is_some_and(|m| m.author == Author::ChiefOfStaff)
+        });
+        eprintln!("chat: {:?}", rt.state.ws.chat);
+        let call = rt
+            .state
+            .ws
+            .chat
+            .iter()
+            .filter_map(|m| m.tool.as_ref())
+            .find(|t| t.name == "mcp__velvet-hammer__app_remind")
+            .expect("app_remind was called")
+            .input
+            .clone();
+        assert_eq!(
+            (&call["when"], &call["amount"], &call["unit"]),
+            (
+                &serde_json::json!("in"),
+                &serde_json::json!(2),
+                &serde_json::json!("minutes")
+            )
+        );
+        assert!(
+            call["text"]
+                .as_str()
+                .unwrap()
+                .to_lowercase()
+                .contains("stretch")
+        );
+        let reminder = rt.state.reminders.list().pop().expect("a reminder");
+        assert!(reminder.fired.is_none());
+        *ahead.lock().unwrap() = jiff::SignedDuration::from_secs(121);
+        rt.frame(1.0 / 60.0);
+        assert!(rt.find("reminder-banner").is_some(), "the reminder fired");
     }
 
     #[test]
@@ -3290,16 +4865,37 @@ mod tests {
     }
 
     #[test]
-    fn any_other_tool_shows_compactly_with_its_result_folded() {
+    fn a_command_from_claude_shows_as_a_terminal_card_and_any_other_tool_as_text() {
         let mut app = fake_in(Mode::Run);
         say(&mut app, "shell: ls");
+        // An MCP tool the registry does not know draws its result as text.
+        app.take(Event::Tool(tools::ToolUse {
+            id: "toolu_mcp".into(),
+            name: "mcp__weather__forecast".into(),
+            input: serde_json::json!({"city": "Lisbon"}),
+            result: None,
+        }));
+        app.take(Event::ToolResult {
+            id: "toolu_mcp".into(),
+            result: tools::ToolResult {
+                is_error: false,
+                content: vec![tools::Content::Text("Sunny, 24 °C".into())],
+            },
+        });
         let mut rt = runtime_with(app);
+        rt.frame(1.0 / 60.0);
         assert!(texts(&rt).iter().any(|t| t == "Bash"));
-        assert!(rt.find("tool-2-result").is_none());
-        tap(&mut rt, "tool-2-toggle");
-        assert!(texts(&rt).iter().any(|t| t == "one\ntwo\nthree"));
-        tap(&mut rt, "tool-2-toggle");
-        assert!(rt.find("tool-2-result").is_none());
+        assert_eq!(texts_under(&rt, "tool-2-command"), ["ls"]);
+        // Three lines fit the preview, so they show whole with nothing to unfold.
+        assert!(texts_under(&rt, "tool-2-output").contains(&"one\ntwo\nthree".to_string()));
+        assert!(rt.find("tool-2-more").is_none());
+        assert!(matches!(
+            rt.state.clock.get("toolu_fake_Bash"),
+            Some(Clock::Took(_))
+        ));
+        let generic = texts_under(&rt, "tool-4");
+        assert!(generic.contains(&"mcp__weather__forecast".to_string()));
+        assert!(generic.contains(&"Sunny, 24 °C".to_string()));
     }
 
     fn view_runtime(input: serde_json::Value) -> Runtime<App> {
@@ -3377,6 +4973,55 @@ mod tests {
             rt.state.ws.chat.len(),
             2,
             "the whole input replaced the streamed one"
+        );
+    }
+
+    #[test]
+    fn a_choice_sends_the_exact_value_once_and_shows_it_as_the_captains_choice() {
+        let mut rt = view_runtime(spec("ui-choice.json"));
+        assert!(rt.find("tool-1-ui-merge-recommended").is_some());
+        assert!(
+            texts(&rt)
+                .iter()
+                .any(|t| t == "Every merge waits for your word.")
+        );
+        tap(&mut rt, "tool-1-ui-merge-option-0");
+        let chat = rt.state.ws.chat.clone();
+        assert_eq!(chat[2].author, Author::Captain);
+        assert_eq!(chat[2].text, "Chose \u{201c}yolo off\u{201d}.");
+        assert_eq!(
+            chat[3].text,
+            "Thanks. I got the values [\"yolo-off\"] and the words \u{201c}\u{201d}."
+        );
+        assert!(rt.find("tool-1-ui-merge-sent").is_some());
+        assert!(rt.find("tool-1-ui-merge-other").is_none());
+        // The answered Choice takes no more presses.
+        tap(&mut rt, "tool-1-ui-merge-option-1");
+        assert_eq!(rt.state.ws.chat.len(), chat.len());
+    }
+
+    #[test]
+    fn a_choice_of_several_sends_the_picks_in_order_with_the_captains_own_words() {
+        let mut rt = view_runtime(spec("ui-choice-multiple.json"));
+        tap(&mut rt, "tool-1-ui-checks-option-2");
+        tap(&mut rt, "tool-1-ui-checks-option-0");
+        tap(&mut rt, "tool-1-ui-checks-option-3");
+        tap(&mut rt, "tool-1-ui-checks-option-3");
+        assert_eq!(rt.state.ws.chat.len(), 2, "picking sends nothing");
+        rt.update(|s, _| {
+            s.view_edit(VIEW, &ui::other_field("checks"), "").text = "A changelog entry".into()
+        });
+        tap(&mut rt, "tool-1-ui-checks-send");
+        let chat = &rt.state.ws.chat;
+        assert_eq!(
+            chat[2].text,
+            "Chose \u{201c}Tests\u{201d} and \u{201c}Screenshots\u{201d}, and answered \
+             \u{201c}A changelog entry\u{201d}."
+        );
+        assert_eq!(
+            chat[3].text,
+            "Thanks. I got the values [\"tests\", \"screens\"] and the words \u{201c}A changelog \
+             entry\u{201d}."
         );
     }
 
@@ -3556,6 +5201,48 @@ mod tests {
     }
 
     #[test]
+    fn a_question_asked_in_prose_is_asked_again_with_a_choice_and_its_value_comes_back() {
+        let mut rt = runtime_with(fake_in(Mode::Run));
+        send_until(&mut rt, ASK, "Pick one above.");
+        assert_eq!(
+            notices(&rt),
+            [
+                "Velvet Hammer asked the chief of staff to show this as a view: the reply asks a \
+                 question with a fixed set of answers."
+            ]
+        );
+        let key = rt
+            .elements()
+            .iter()
+            .filter_map(|e| e.key.clone())
+            .find(|k| k.ends_with("-ui-merge-option-0"))
+            .expect("the Choice's first option");
+        tap(&mut rt, &key);
+        wait(&mut rt, |s| {
+            replied(s)
+                && s.ws
+                    .chat
+                    .last()
+                    .is_some_and(|m| m.text.starts_with("You said:"))
+        });
+        let chat = &rt.state.ws.chat;
+        let chose = &chat[chat.len() - 2];
+        assert_eq!(chose.author, Author::Captain);
+        assert_eq!(chose.text, "Chose \u{201c}yolo off\u{201d}.");
+        // The fake echoes what it received: the option's exact value, never a bare "No".
+        let echoed = &chat[chat.len() - 1].text;
+        assert!(
+            echoed.contains("with the option \"yolo-off\" (\u{201c}yolo off\u{201d})"),
+            "{echoed}"
+        );
+        // Answered once: a second press sends nothing.
+        let len = rt.state.ws.chat.len();
+        rt.update(|s, _| s.answer(FAKE_CHOICE, "merge", &["yolo-on".into()]));
+        rt.frame(1.0 / 60.0);
+        assert_eq!(rt.state.ws.chat.len(), len);
+    }
+
+    #[test]
     fn a_reply_that_ignores_the_feedback_is_not_sent_back_again() {
         let mut rt = runtime_with(fake_in(Mode::Run));
         send_until(&mut rt, "stubborn: a, b, c", "Left as text.");
@@ -3572,7 +5259,7 @@ mod tests {
             send_and_wait(&mut rt, "context?"),
             "You said: context: the app asked for views"
         );
-        tap(&mut rt, "visuals");
+        open_setting(&mut rt, "visuals");
         assert_eq!(rt.state.showing, Showing::Visuals);
         tap(&mut rt, "visual-mode-off");
         assert_eq!(*rt.state.visuals.settings(), visual::Mode::Off);
@@ -3597,7 +5284,7 @@ mod tests {
     #[test]
     fn the_visuals_page_tries_a_reply_and_keeps_its_mode() {
         let mut rt = runtime();
-        tap(&mut rt, "visuals");
+        open_setting(&mut rt, "visuals");
         assert!(
             texts(&rt)
                 .iter()
@@ -3622,7 +5309,8 @@ mod tests {
             *store::Store::<visual::Mode>::open(&dir).settings(),
             visual::Mode::Nudge
         );
-        assert!(texts(&rt).iter().any(|t| t == "Nudge only"));
+        tap(&mut rt, "visuals-all-settings");
+        assert_eq!(texts_under(&rt, "visuals-summary"), ["Nudge only"]);
     }
 
     // Firstmate's rules, on the fake `claude` running as firstmate.
@@ -3657,7 +5345,7 @@ mod tests {
             format!("You said: Bash was allowed to run {MERGE}")
         );
         // The page shows what each rule did.
-        tap(&mut rt, "rules");
+        open_setting(&mut rt, "rules");
         assert_eq!(rt.state.showing, Showing::Rules);
         assert!(rt.find("guard-no-force-push-recent-0").is_some());
         assert!(rt.find("guard-merge-asks-captain-recent-0").is_some());
@@ -3713,6 +5401,351 @@ mod tests {
         );
     }
 
+    fn calls(lab: &Lab, script: &str) -> Vec<String> {
+        lab.calls()
+            .lines()
+            .filter(|l| l.starts_with(script))
+            .map(str::to_string)
+            .collect()
+    }
+
+    fn mates_idle(s: &App) -> bool {
+        s.mates.running().is_none()
+    }
+
+    #[test]
+    fn with_no_second_mates_the_list_says_so_and_offers_to_add_one() {
+        let lab = Lab::new();
+        let mut rt = runtime_with(fake_in_firstmate(&lab, true));
+        wait(&mut rt, |s| s.mates.records.is_some());
+        assert!(rt.find("mates-none").is_some());
+        tap_scrolled(&mut rt, "add-mate");
+        assert_eq!(rt.state.showing, Showing::AddMate);
+        assert!(rt.find("add-mate-scope").is_some());
+        // A chief of staff that is not firstmate has no second mates to show.
+        let rt = runtime();
+        assert!(rt.find("mates").is_none());
+    }
+
+    #[test]
+    fn each_mate_shows_its_session_its_work_and_where_the_records_disagree() {
+        let lab = Lab::new();
+        let mut rt = runtime_with(mates_app(&lab));
+        let standing =
+            |rt: &Runtime<App>, id: &str| texts_under(rt, &format!("mate-{id}-standing"));
+        assert_eq!(standing(&rt, "docs"), ["running \u{b7} idle"]);
+        assert_eq!(standing(&rt, "billing"), ["running \u{b7} working"]);
+        assert_eq!(standing(&rt, "infra"), ["stopped \u{b7} idle"]);
+        assert_eq!(standing(&rt, "support"), ["running \u{b7} waiting on you"]);
+        assert!(rt.find("mate-web-mismatch").is_some());
+        assert!(rt.find("mate-docs-mismatch").is_none());
+
+        tap(&mut rt, "mate-billing");
+        assert_eq!(rt.state.showing, Showing::Mate("billing".into()));
+        assert!(rt.find("mate-child-invoice-retries").is_some());
+        assert!(rt.find("mate-child-billing-dashboard").is_some());
+        assert!(rt.find("mate-interrupt").is_some());
+        assert!(rt.find("mate-start").is_none());
+
+        tap(&mut rt, "mate-infra");
+        assert!(rt.find("mate-start").is_some());
+        assert!(rt.find("mate-interrupt").is_none());
+        assert!(rt.find("mate-children-none").is_some());
+
+        tap(&mut rt, "mate-web");
+        let mismatch = texts_under(&rt, "mate-mismatch").join(" ");
+        assert!(
+            mismatch.contains("invalid home: not a seeded secondmate home"),
+            "{mismatch}"
+        );
+        assert!(rt.find("mate-edit-note").is_some());
+    }
+
+    #[test]
+    fn the_guided_add_asks_one_question_at_a_time_and_creates_nothing_before_the_yes() {
+        let lab = Lab::new();
+        lab.harness("secondmate", "codex");
+        let mut rt = runtime_with(mates_app(&lab));
+        tap_scrolled(&mut rt, "add-mate");
+        tap_scrolled(&mut rt, "add-mate-next");
+        assert!(rt.find("add-mate-problem").is_some(), "a scope is required");
+        rt.state.mates.adding.charter.text = "Payments: card retries and refunds.".into();
+        tap_scrolled(&mut rt, "add-mate-next");
+        assert_eq!(rt.state.mates.adding.step(), Step::Projects);
+        // A local-only project stays with the main firstmate.
+        tap_scrolled(&mut rt, "add-mate-project-scratch");
+        assert!(rt.state.mates.adding.projects.is_empty());
+        tap_scrolled(&mut rt, "add-mate-project-site");
+        tap_scrolled(&mut rt, "add-mate-next");
+        assert_eq!(rt.state.mates.adding.step(), Step::Name);
+        assert_eq!(rt.state.mates.adding.name.text, "site");
+        rt.state.mates.adding.name.text = "docs".into();
+        tap_scrolled(&mut rt, "add-mate-next");
+        assert!(texts_under(&rt, "add-mate-problem")[0].contains("already a second mate"));
+        rt.state.mates.adding.name.text = "payments".into();
+        tap_scrolled(&mut rt, "add-mate-next");
+        assert_eq!(rt.state.mates.adding.step(), Step::Runtime);
+        tap_scrolled(&mut rt, "add-mate-runtime-1");
+        tap_scrolled(&mut rt, "add-mate-next");
+        assert_eq!(rt.state.mates.adding.step(), Step::Confirm);
+        let plan = texts_under(&rt, "add-mate-plan").join("\n");
+        assert!(plan.contains("bin/fm-home-seed.sh payments"), "{plan}");
+        assert!(plan.contains("--harness claude"), "{plan}");
+        assert!(plan.contains("Nothing remote is created"), "{plan}");
+        assert!(calls(&lab, "fm-home-seed.sh").is_empty());
+        assert!(calls(&lab, "fm-spawn.sh").is_empty());
+
+        tap_scrolled(&mut rt, "add-mate-yes");
+        wait(&mut rt, |s| s.showing == Showing::Mate("payments".into()));
+        let home = lab.data.join("secondmates/payments");
+        assert_eq!(
+            calls(&lab, "fm-home-seed.sh"),
+            [format!("fm-home-seed.sh payments {} site", home.display())]
+        );
+        assert_eq!(
+            calls(&lab, "fm-spawn.sh"),
+            ["fm-spawn.sh payments --secondmate --harness claude"]
+        );
+        // The chief of staff is asked to do the rest of firstmate's procedure.
+        let asked = rt
+            .state
+            .ws
+            .chat
+            .iter()
+            .find(|m| m.author == Author::Captain);
+        assert!(
+            asked.is_some_and(|m| m.text.contains("I added the second mate payments")
+                && m.text.contains("bin/fm-backlog-handoff.sh")),
+            "{:?}",
+            rt.state.ws.chat
+        );
+        wait(&mut rt, |s| s.mates.get("payments").is_some());
+        assert!(texts_under(&rt, "mate-outcome")[0].contains("created payments"));
+    }
+
+    #[test]
+    fn a_refused_seed_is_shown_in_firstmates_words_and_starts_nothing() {
+        let lab = Lab::new();
+        let app = answered(mates_app(&lab), &lab, Step::Confirm);
+        lab.refuse(
+            "fm-home-seed.sh",
+            "error: project site not found at /h/projects/site",
+        );
+        let mut rt = runtime_with(app);
+        tap_scrolled(&mut rt, "add-mate-yes");
+        wait(&mut rt, mates_idle);
+        let problem = texts_under(&rt, "add-mate-problem").join(" ");
+        assert!(
+            problem.contains("Firstmate refused to create payments"),
+            "{problem}"
+        );
+        assert!(
+            problem.contains("error: project site not found"),
+            "{problem}"
+        );
+        assert!(calls(&lab, "fm-spawn.sh").is_empty());
+        assert_eq!(rt.state.showing, Showing::AddMate);
+    }
+
+    #[test]
+    fn the_chief_of_staff_opens_the_guided_add_from_the_chat() {
+        let lab = Lab::new();
+        let mut rt = runtime_with(mates_app(&lab));
+        rt.state.draft.text = "mate: the billing service and its refunds".into();
+        rt.state.send();
+        wait(&mut rt, |s| s.showing == Showing::AddMate);
+        assert_eq!(
+            rt.state.mates.adding.charter.text,
+            "the billing service and its refunds"
+        );
+        assert!(notices(&rt)[0].contains("opened Add a second mate"));
+        assert!(calls(&lab, "fm-home-seed.sh").is_empty());
+    }
+
+    #[test]
+    fn the_chief_of_staff_keeps_answers_already_given_and_only_fills_an_empty_scope() {
+        let lab = Lab::new();
+        let mut app = mates_app(&lab);
+        app.add_mate(None);
+        assert!(app.add_mate(Some("billing".into())));
+        assert_eq!(app.mates.adding.charter.text, "billing");
+        assert!(app.add_mate(Some("something else".into())));
+        assert_eq!(app.mates.adding.charter.text, "billing");
+    }
+
+    #[test]
+    fn the_chief_of_staff_says_so_when_firstmate_is_busy_and_nothing_opens() {
+        let lab = Lab::new();
+        let mut app = mates_app(&lab);
+        app.confirm_mate(secondmates::Op::Start("docs".into()));
+        app.confirmed_mate();
+        assert!(app.mates.running().is_some());
+        app.take(Event::AddMate("billing".into()));
+        assert_ne!(app.showing, Showing::AddMate);
+        let note = &app.ws.chat.last().unwrap().text;
+        assert!(note.contains("busy"), "{note}");
+        assert!(!note.contains("opened"), "{note}");
+        app.settle_mates();
+    }
+
+    #[test]
+    fn a_message_firstmate_would_read_as_an_option_is_kept_and_not_sent() {
+        let lab = Lab::new();
+        let mut app = mates_app(&lab);
+        app.open_mate("docs");
+        for text in [
+            "--key abc hello",
+            "--fire-and-forget now",
+            "--resolve-key=k go",
+        ] {
+            app.mates.draft("docs").text = text.into();
+            app.send_to_mate("docs");
+            assert_eq!(app.mates.draft("docs").text, text);
+            assert!(app.mates.outcomes["docs"].words.contains("option"));
+        }
+        assert!(calls(&lab, "fm-send.sh").is_empty());
+    }
+
+    #[test]
+    fn actions_run_firstmates_scripts_only_after_a_yes_and_never_force() {
+        let lab = Lab::new();
+        let mut rt = runtime_with(mates_app(&lab));
+        tap(&mut rt, "mate-docs");
+        tap_scrolled(&mut rt, "mate-interrupt");
+        assert!(rt.find("mate-confirm").is_some());
+        tap_scrolled(&mut rt, "mate-confirm-cancel");
+        assert!(calls(&lab, "fm-control.sh").is_empty());
+        tap_scrolled(&mut rt, "mate-interrupt");
+        tap_scrolled(&mut rt, "mate-confirm-yes");
+        wait(&mut rt, mates_idle);
+        tap_scrolled(&mut rt, "mate-relaunch");
+        tap_scrolled(&mut rt, "mate-confirm-yes");
+        wait(&mut rt, mates_idle);
+        assert_eq!(
+            calls(&lab, "fm-control.sh"),
+            [
+                "fm-control.sh docs interrupt",
+                "fm-control.sh docs relaunch --note Relaunched by the captain from Velvet Hammer."
+            ]
+        );
+        tap(&mut rt, "mate-infra");
+        tap_scrolled(&mut rt, "mate-start");
+        tap_scrolled(&mut rt, "mate-confirm-yes");
+        wait(&mut rt, mates_idle);
+        assert_eq!(
+            calls(&lab, "fm-spawn.sh"),
+            ["fm-spawn.sh infra --secondmate"]
+        );
+
+        // Retiring a mate with work in its home is refused, and the app never forces it.
+        lab.mate_child("billing", "invoice-retries");
+        tap(&mut rt, "mate-billing");
+        tap_scrolled(&mut rt, "mate-retire");
+        tap_scrolled(&mut rt, "mate-confirm-yes");
+        wait(&mut rt, mates_idle);
+        let refused = texts_under(&rt, "mate-outcome").join(" ");
+        assert!(
+            refused.contains("REFUSED: secondmate billing still has in-flight work"),
+            "{refused}"
+        );
+        assert!(!refused.contains("WARNING"), "{refused}");
+        assert!(rt.state.mates.get("billing").is_some());
+        // An idle mate retires, and leaves firstmate's registry.
+        tap(&mut rt, "mate-infra");
+        tap_scrolled(&mut rt, "mate-retire");
+        tap_scrolled(&mut rt, "mate-confirm-yes");
+        wait(&mut rt, |s| s.mates.get("infra").is_none());
+        let retired = calls(&lab, "fm-teardown.sh");
+        assert_eq!(retired, ["fm-teardown.sh billing", "fm-teardown.sh infra"]);
+        assert!(retired.iter().all(|c| !c.contains("--force")));
+    }
+
+    #[test]
+    fn a_message_goes_through_firstmates_send_and_its_reply_comes_back_on_the_parent_channel() {
+        let lab = Lab::new();
+        let mut rt = runtime_with(mates_app(&lab));
+        tap(&mut rt, "mate-docs");
+        assert_eq!(
+            texts_under(&rt, "mate-msg-0")[0].split(' ').next(),
+            Some("Firstmate")
+        );
+        rt.state.mates.draft("docs").text = "Is the search page live yet?".into();
+        tap_scrolled(&mut rt, "mate-send");
+        wait(&mut rt, |s| {
+            s.mates.channel("docs").is_some_and(|c| c.sent.len() == 2)
+        });
+        assert_eq!(
+            calls(&lab, "fm-send.sh"),
+            ["fm-send.sh docs Is the search page live yet?"]
+        );
+        assert!(texts_under(&rt, "mate-msg-2")[0].starts_with("You"));
+        lab.mate_says("docs", &docs_reply());
+        wait(&mut rt, |s| {
+            s.mates
+                .channel("docs")
+                .is_some_and(|c| c.conversation().len() == 4)
+        });
+        let reply = texts_under(&rt, "mate-msg-3").join(" ");
+        assert!(reply.contains("waits for its pull request"), "{reply}");
+        // The reply is Markdown, drawn like the chief of staff's.
+        assert!(!reply.contains("**"), "{reply}");
+    }
+
+    #[test]
+    fn an_escalation_is_answered_to_the_mate_that_holds_it() {
+        let lab = Lab::new();
+        let mut rt = runtime_with(mates_app(&lab));
+        assert!(rt.find("hold-support-refund-window").is_some());
+        tap(&mut rt, "answer-support-refund-window");
+        assert_eq!(rt.state.showing, Showing::Mate("support".into()));
+        assert!(rt.find("mate-answering").is_some());
+        rt.state.mates.draft("support").text = "30 days.".into();
+        tap_scrolled(&mut rt, "mate-send");
+        wait(&mut rt, |s| s.mates.answering.is_none() && mates_idle(s));
+        assert_eq!(
+            calls(&lab, "fm-send.sh"),
+            [
+                "fm-send.sh support The captain's answer to your captain hold refund-window: 30 days."
+            ]
+        );
+        // The chief of staff was not asked: the hold is the mate's own.
+        assert!(rt.state.ws.chat.is_empty());
+    }
+
+    #[test]
+    fn work_the_chief_of_staff_routes_shows_which_mate_took_it() {
+        let lab = Lab::new();
+        let mut rt = runtime_with(mates_app(&lab));
+        send_and_wait(
+            &mut rt,
+            "shell: bin/fm-send.sh docs Add a search page to the docs",
+        );
+        let routed = rt
+            .elements()
+            .iter()
+            .filter_map(|e| e.key.clone())
+            .find(|k| k.ends_with("-routed"))
+            .expect("a routed tool use");
+        assert_eq!(texts_under(&rt, &routed)[0], "Routed to second mate docs");
+        tap(&mut rt, &format!("{routed}-open"));
+        assert_eq!(rt.state.showing, Showing::Mate("docs".into()));
+    }
+
+    #[test]
+    fn a_mates_terminal_peek_returns_to_its_page() {
+        let lab = Lab::new();
+        lab.pane("docs", "waiting quietly");
+        let mut rt = runtime_with(mates_app(&lab));
+        tap(&mut rt, "mate-docs");
+        tap_scrolled(&mut rt, "mate-peek");
+        wait(&mut rt, |s| {
+            s.peek.as_ref().is_some_and(|p| p.pane.is_some())
+        });
+        assert_eq!(texts_under(&rt, "crew-pane"), ["waiting quietly"]);
+        tap(&mut rt, "peek-close");
+        assert_eq!(rt.state.showing, Showing::Mate("docs".into()));
+    }
+
     #[test]
     fn a_chief_of_staff_that_is_not_firstmate_has_no_firstmate_rules() {
         let mut rt = runtime_with(fake_in(Mode::Run));
@@ -3723,10 +5756,204 @@ mod tests {
         assert!(last_entry(&rt).rule.is_none());
     }
 
+    /// The fake `claude`, signed in, with the app's reminders on a clock set to `now`.
+    fn fake_on_clock(now: jiff::Zoned) -> (Runtime<App>, Hands) {
+        let home = scratch("signed-in");
+        let hands = Arc::new(Mutex::new(now));
+        let claude = Claude::new(FAKE_CLAUDE).env("FAKE_CLAUDE_HOME", home.to_string_lossy());
+        let app = App::with_clock(
+            Box::new(claude),
+            installed_firstmate(),
+            &home,
+            clock(&hands),
+        );
+        let mut rt = runtime_with(app);
+        wait(&mut rt, settled);
+        (rt, hands)
+    }
+
+    #[test]
+    fn a_reminder_set_through_claudes_tool_comes_due_with_a_banner() {
+        let (mut rt, hands) = fake_on_clock(friday(14, 30));
+        let reply = send_and_wait(&mut rt, "remind: in 2 minutes | Stretch");
+        assert_eq!(reply, "Reminder set for Today, 2:32 PM: Stretch");
+        assert_eq!(texts_under(&rt, "reminders-summary"), ["1 coming up"]);
+        assert!(rt.find("reminder-banner").is_none());
+        // It links back to the captain's message it was set in.
+        let asked = rt
+            .state
+            .ws
+            .chat
+            .iter()
+            .find(|m| m.text == "remind: in 2 minutes | Stretch")
+            .expect("the captain's message")
+            .id
+            .clone();
+        assert_eq!(rt.state.reminders.list()[0].message.as_ref(), Some(&asked));
+        let reply = send_and_wait(&mut rt, "reminders?");
+        assert_eq!(
+            reply,
+            format!(
+                "It is now Today, 2:30 PM.\n- Today, 2:32 PM: Stretch (set Today, 2:30 PM in {})",
+                links::url(&asked)
+            )
+        );
+        *hands.lock().unwrap() = friday(14, 32);
+        rt.frame(1.0 / 60.0);
+        assert_eq!(texts_under(&rt, "reminder-banner-text"), ["Stretch"]);
+        assert_eq!(
+            texts_under(&rt, "reminder-banner-when"),
+            ["Set Today, 2:30 PM \u{b7} due Today, 2:32 PM"]
+        );
+        assert!(rt.find("reminder-1").is_some(), "in For you to do");
+        // From the Reminders page, the link goes back to the message and highlights it.
+        tap(&mut rt, "reminders");
+        tap(&mut rt, "list-1-message");
+        assert_eq!(rt.state.showing, Showing::Chat);
+        assert!(matches!(&rt.state.flash, Some((Ok(id), _)) if *id == asked));
+        tap(&mut rt, "banner-1-done");
+        assert!(rt.find("reminder-banner").is_none());
+        assert!(rt.find("reminder-1").is_none());
+        assert!(rt.state.reminders.list().is_empty());
+    }
+
+    #[test]
+    fn the_reminder_settings_are_a_section_of_settings() {
+        let (app, _) = on_clock(&scratch("unused"), friday(14, 30));
+        let mut rt = runtime_with(app);
+        chord(&mut rt, ',', false);
+        assert_eq!(rt.state.showing, Showing::Settings);
+        assert_eq!(
+            texts_under(&rt, "reminder-settings-summary"),
+            ["later today by 6:00 PM \u{b7} mornings 9:00 AM"]
+        );
+        tap(&mut rt, "reminder-settings");
+        assert_eq!(rt.state.showing, Showing::ReminderSettings);
+        tap(&mut rt, "reminder-setting-morning-up");
+        tap(&mut rt, "reminder-settings-all-settings");
+        assert_eq!(rt.state.showing, Showing::Settings);
+        assert_eq!(
+            texts_under(&rt, "reminder-settings-summary"),
+            ["later today by 6:00 PM \u{b7} mornings 9:30 AM"]
+        );
+    }
+
+    #[test]
+    fn the_tool_refuses_what_it_cannot_set_and_says_why() {
+        let (mut rt, _) = fake_on_clock(friday(14, 30));
+        let reply = send_and_wait(&mut rt, "remind: soon | Stretch");
+        assert!(reply.starts_with("when must be one of"), "{reply}");
+        let reply = send_and_wait(&mut rt, "remind: in 0 minutes | Stretch");
+        assert!(reply.contains("1 or more"), "{reply}");
+        assert!(rt.state.reminders.list().is_empty());
+    }
+
+    #[test]
+    fn a_reminder_missed_while_closed_shows_as_overdue_at_launch() {
+        let data = scratch("unused");
+        let (app, _) = on_clock(&data, friday(9, 0));
+        app.reminders
+            .set("Call the bank", When::In(1, Unit::Hours))
+            .unwrap();
+        drop(app);
+        let (app, _) = on_clock(&data, friday(14, 30));
+        let rt = runtime_with(app);
+        assert_eq!(texts_under(&rt, "reminder-banner-text"), ["Call the bank"]);
+        assert!(texts(&rt).contains(&"Reminder \u{b7} overdue".to_string()));
+        assert!(
+            texts_under(&rt, "reminder-1-when")[0].starts_with("Reminder \u{b7} overdue \u{b7} ")
+        );
+    }
+
+    #[test]
+    fn snoozing_from_the_banner_sets_the_reminder_again() {
+        let (app, stretch) = reminders_due();
+        let mut rt = runtime_with(app);
+        tap(&mut rt, &format!("banner-{stretch}-snooze"));
+        assert!(rt.find(&format!("banner-{stretch}-snooze-menu")).is_some());
+        tap(&mut rt, &format!("banner-{stretch}-snooze-10m"));
+        assert_eq!(rt.state.snoozing, None);
+        let r = rt.state.reminders.list();
+        let r = r.iter().find(|r| r.id == stretch).unwrap();
+        assert_eq!(r.fired, None);
+        assert_eq!(r.due_words(&friday(14, 32)), "Today, 2:42 PM");
+        // The overdue one is still due, so the banner shows it.
+        assert_eq!(
+            texts_under(&rt, "reminder-banner-text"),
+            ["Call the bank about the wire"]
+        );
+        // A typed number of hours, and a typed word that is not a number.
+        let bank = rt.state.reminders.list()[0].id;
+        tap(&mut rt, &format!("panel-{bank}-snooze"));
+        rt.state.snooze_amount.text = "soon".into();
+        tap(&mut rt, &format!("panel-{bank}-snooze-hours"));
+        assert!(rt.find("snooze-problem").is_some());
+        rt.state.snooze_amount.text = "2".into();
+        tap(&mut rt, &format!("panel-{bank}-snooze-hours"));
+        let r = rt.state.reminders.list();
+        let r = r.iter().find(|r| r.id == bank).unwrap();
+        assert_eq!(r.due_words(&friday(14, 32)), "Today, 4:32 PM");
+        assert!(rt.find("reminder-banner").is_none());
+    }
+
+    #[test]
+    fn the_reminders_page_groups_them_and_deletes_one() {
+        let (app, _) = reminders_set();
+        let mut rt = runtime_with(app);
+        tap(&mut rt, "reminders-close");
+        tap(&mut rt, "for-you-reminders");
+        assert_eq!(rt.state.showing, Showing::Reminders);
+        assert!(rt.find("reminders-coming").is_some());
+        assert!(rt.find("reminders-later").is_some());
+        assert!(rt.find("reminders-due").is_none());
+        assert_eq!(texts_under(&rt, "reminders-3-due"), ["Tomorrow, 9:00 AM"]);
+        tap(&mut rt, "list-1-delete");
+        assert!(rt.find("reminders-1").is_none());
+        assert_eq!(rt.state.reminders.list().len(), 6);
+        assert_eq!(
+            texts_under(&rt, "reminders-summary"),
+            ["4 coming up \u{b7} 2 later"]
+        );
+    }
+
+    #[test]
+    fn the_settings_page_changes_what_later_today_means_and_survives_a_restart() {
+        let data = scratch("unused");
+        let (app, _) = on_clock(&data, friday(14, 30));
+        let mut rt = runtime_with(app);
+        tap(&mut rt, "reminders");
+        tap(&mut rt, "reminders-settings");
+        assert_eq!(
+            texts_under(&rt, "reminder-example-later-today"),
+            ["\u{201c}Remind me later today\u{201d} \u{2192} Today, 5:30 PM"]
+        );
+        tap(&mut rt, "reminder-setting-later-today-hours-down");
+        assert_eq!(
+            texts_under(&rt, "reminder-setting-later-today-hours-value"),
+            ["2 hours"]
+        );
+        assert_eq!(
+            texts_under(&rt, "reminder-example-later-today"),
+            ["\u{201c}Remind me later today\u{201d} \u{2192} Today, 4:30 PM"]
+        );
+        rt.state
+            .reminders
+            .set("Reply to the review", When::LaterToday)
+            .unwrap();
+        drop(rt);
+        let (app, _) = on_clock(&data, friday(14, 30));
+        assert_eq!(app.reminder_settings.settings().later_today_hours, 2);
+        assert_eq!(
+            app.reminders.list()[0].due_words(&friday(14, 30)),
+            "Today, 4:30 PM"
+        );
+    }
+
     #[test]
     fn the_rules_page_lists_every_rule_on_by_default() {
         let mut rt = runtime();
-        assert_eq!(texts_under(&rt, "rules-summary"), ["7 of 7 on"]);
+        chord(&mut rt, ',', false);
+        assert_eq!(texts_under(&rt, "rules-summary"), ["8 of 8 on"]);
         tap(&mut rt, "rules");
         for rule in guard::Rule::ALL {
             assert!(
@@ -3736,8 +5963,961 @@ mod tests {
             assert!(rt.find(&format!("guard-{}-toggle", rule.key())).is_some());
         }
         tap_scrolled(&mut rt, "guard-publish-asks-captain-toggle");
-        assert_eq!(texts_under(&rt, "rules-summary"), ["6 of 7 on"]);
+        tap(&mut rt, "rules-all-settings");
+        assert_eq!(texts_under(&rt, "rules-summary"), ["7 of 8 on"]);
+        tap(&mut rt, "rules");
         tap(&mut rt, "rules-activity");
         assert_eq!(rt.state.showing, Showing::Activity);
+    }
+
+    /// Opens Settings with Cmd+, (Ctrl+, off macOS), then the section keyed `key`.
+    fn open_setting(rt: &mut Runtime<App>, key: &str) {
+        chord(rt, ',', false);
+        assert_eq!(rt.state.showing, Showing::Settings);
+        tap(rt, key);
+    }
+
+    /// Presses `key` with Cmd (Ctrl off macOS) held, and Shift when `shift`.
+    fn chord(rt: &mut Runtime<App>, c: char, shift: bool) {
+        let mac = cfg!(target_os = "macos");
+        let mods = rune::Mods {
+            cmd: true,
+            shift,
+            ctrl: !mac,
+            logo: mac,
+            ..rune::Mods::default()
+        };
+        rt.key(KeyEvent {
+            key: Key::Command(c),
+            mods,
+        });
+        settle(rt);
+    }
+
+    fn press_key(rt: &mut Runtime<App>, key: Key, shift: bool) {
+        let mods = rune::Mods {
+            shift,
+            ..rune::Mods::default()
+        };
+        rt.key(KeyEvent { key, mods });
+        settle(rt);
+    }
+
+    fn type_text(rt: &mut Runtime<App>, words: &str) {
+        for c in words.chars() {
+            rt.key(KeyEvent {
+                key: Key::Text(c.to_string()),
+                mods: rune::Mods::default(),
+            });
+        }
+        settle(rt);
+    }
+
+    fn settle(rt: &mut Runtime<App>) {
+        for _ in 0..30 {
+            rt.frame(1.0 / 60.0);
+        }
+    }
+
+    fn find_count(rt: &Runtime<App>) -> Vec<String> {
+        texts_under(rt, "find-count")
+    }
+
+    /// Whether the element keyed `key` is drawn inside the window.
+    fn on_screen(rt: &Runtime<App>, key: &str) -> bool {
+        rt.find(key).is_some_and(|(_, y)| (0.0..720.0).contains(&y))
+    }
+
+    #[test]
+    fn cmd_f_opens_find_over_the_conversation_and_counts_matches() {
+        let mut rt = runtime_with(long_chat(40));
+        tap(&mut rt, "chat-input");
+        assert!(rt.find("find-bar").is_none());
+        chord(&mut rt, 'f', false);
+        assert!(rt.find("find-bar").is_some());
+        // The cursor is in the find field, not the message field.
+        type_text(&mut rt, "RELEASE");
+        assert_eq!(rt.state.find.query.text, "RELEASE");
+        assert!(rt.state.draft.text.is_empty());
+        assert_eq!(find_count(&rt), ["1 of 4"]);
+        assert!(rt.find(&find::match_key(0)).is_some());
+        assert!(on_screen(&rt, &find::match_key(0)));
+    }
+
+    #[test]
+    fn a_query_with_no_matches_says_so() {
+        let mut rt = runtime_with(long_chat(5));
+        chord(&mut rt, 'f', false);
+        type_text(&mut rt, "zebra");
+        assert_eq!(find_count(&rt), ["No matches"]);
+        assert!(rt.find(&find::match_key(0)).is_none());
+        // Stepping with nothing to step to changes nothing.
+        press_key(&mut rt, Key::Enter, false);
+        assert_eq!(rt.state.find.current, 0);
+    }
+
+    #[test]
+    fn enter_and_cmd_g_step_through_the_matches_and_scroll_to_each() {
+        let mut rt = runtime_with(long_chat(40));
+        chord(&mut rt, 'f', false);
+        type_text(&mut rt, "release");
+        assert_eq!(find_count(&rt), ["1 of 4"]);
+        press_key(&mut rt, Key::Enter, false);
+        assert_eq!(find_count(&rt), ["2 of 4"]);
+        assert!(on_screen(&rt, &find::match_key(1)));
+        chord(&mut rt, 'g', false);
+        chord(&mut rt, 'g', false);
+        assert_eq!(find_count(&rt), ["4 of 4"]);
+        assert!(on_screen(&rt, &find::match_key(3)));
+        assert!(!on_screen(&rt, &find::match_key(0)));
+        // Past the last it wraps to the first, and back.
+        press_key(&mut rt, Key::Enter, false);
+        assert_eq!(find_count(&rt), ["1 of 4"]);
+        assert!(on_screen(&rt, &find::match_key(0)));
+        press_key(&mut rt, Key::Enter, true);
+        assert_eq!(find_count(&rt), ["4 of 4"]);
+        chord(&mut rt, 'g', true);
+        assert_eq!(find_count(&rt), ["3 of 4"]);
+        tap(&mut rt, "find-previous");
+        assert_eq!(find_count(&rt), ["2 of 4"]);
+        tap(&mut rt, "find-next");
+        assert_eq!(find_count(&rt), ["3 of 4"]);
+    }
+
+    #[test]
+    fn escape_closes_find_and_returns_to_the_message_field() {
+        let mut rt = runtime_with(long_chat(5));
+        chord(&mut rt, 'f', false);
+        type_text(&mut rt, "release");
+        press_key(&mut rt, Key::Escape, false);
+        assert!(rt.find("find-bar").is_none());
+        assert!(rt.find(&find::match_key(0)).is_none());
+        type_text(&mut rt, "hi");
+        assert_eq!(rt.state.draft.text, "hi");
+        // Opening it again keeps the query.
+        chord(&mut rt, 'f', false);
+        assert_eq!(find_count(&rt), ["1 of 1"]);
+    }
+
+    #[test]
+    fn find_is_case_insensitive_and_searches_captain_messages() {
+        let mut rt = runtime();
+        chord(&mut rt, 'f', false);
+        type_text(&mut rt, "desktop SKELETON");
+        assert_eq!(find_count(&rt), ["1 of 1"]);
+        assert_eq!(
+            find::search(&rt.state, "desktop SKELETON")[0].message,
+            0,
+            "the captain's first message"
+        );
+    }
+
+    #[test]
+    fn find_searches_tool_uses_and_the_words_in_views() {
+        let mut rt = runtime_with(viewing(spec("ui-release.json"), true));
+        chord(&mut rt, 'f', false);
+        let hits = find::search(&rt.state, "release");
+        assert!(hits.iter().any(|h| h.card), "the view's card");
+        type_text(&mut rt, "release");
+        assert!(rt.find("find-count").is_some());
+        assert_ne!(find_count(&rt), ["No matches"]);
+
+        let mut rt = runtime_with(fake_in(Mode::Run));
+        send_and_wait(&mut rt, "shell: ls");
+        let hits = find::search(&rt.state, "three");
+        assert_eq!(hits.len(), 1, "the command's output");
+        assert!(hits[0].card);
+    }
+
+    #[test]
+    fn the_conversation_is_kept_across_a_restart_and_find_searches_it() {
+        let data = scratch("unused");
+        let mut first = App::new(Box::new(Stub::default()), installed_firstmate(), &data);
+        first.draft.text = "Remember the zeppelin plan.".into();
+        first.send();
+        let said = first.ws.chat[first.ws.chat.len() - 2].clone();
+        let replied = first.ws.chat.last().unwrap().clone();
+        drop(first);
+
+        let mut rt = runtime_with(App::new(
+            Box::new(Stub::default()),
+            installed_firstmate(),
+            &data,
+        ));
+        assert_eq!(rt.state.ws.earlier, 2);
+        assert_eq!(rt.state.ws.chat[0], said);
+        assert_eq!(rt.state.ws.chat[1], replied);
+        assert!(rt.find("earlier-divider").is_some());
+        chord(&mut rt, 'f', false);
+        type_text(&mut rt, "zeppelin");
+        assert_eq!(find_count(&rt), ["1 of 2"]);
+        assert!(on_screen(&rt, &find::match_key(0)));
+    }
+
+    #[test]
+    fn attachments_come_back_with_the_kept_conversation_and_go_when_it_is_cleared() {
+        let data = scratch("unused");
+        let mut first = App::new(Box::new(Stub::default()), installed_firstmate(), &data);
+        first.attach_files(&[fixture("chart.png").into()]);
+        settle_attachments(&mut first);
+        first.draft.text = "The chart.".into();
+        first.send();
+        let said = first.ws.chat[first.ws.chat.len() - 2].clone();
+        assert_eq!(said.attachments.len(), 1);
+        let copy = said.attachments[0].path.clone();
+        drop(first);
+
+        let mut rt = runtime_with(App::new(
+            Box::new(Stub::default()),
+            installed_firstmate(),
+            &data,
+        ));
+        assert_eq!(rt.state.ws.chat[0], said);
+        assert!(rt.state.attachment_media.contains_key(&copy));
+        assert!(rt.find("msg-0-attachments-0-thumb").is_some());
+        rt.state.clear_history();
+        assert!(
+            !copy.exists(),
+            "clearing the history deletes its attachments"
+        );
+    }
+
+    #[test]
+    fn a_messages_link_button_copies_its_link() {
+        let mut rt = runtime();
+        let board = rune::clipboard::memory();
+        rt.use_clipboard(&board);
+        let id = rt.state.ws.chat[1].id.clone();
+        assert_eq!(rt.state.hovered, None);
+        // The button shows once the pointer is over its message.
+        let (x, y) = rt.find("msg-1-link").unwrap();
+        rt.pointer_move(x, y);
+        settle(&mut rt);
+        assert_eq!(rt.state.hovered, Some(1));
+        tap(&mut rt, "msg-1-link");
+        assert_eq!(rt.state.copied.as_deref(), Some(id.as_str()), "pressed");
+        assert_eq!(
+            board.text().as_deref().map(|t| t.as_str()),
+            Some(links::url(&id).as_str())
+        );
+        assert_eq!(texts_under(&rt, "msg-1-link"), ["Link copied"]);
+        assert_eq!(rt.state.hovered, Some(1));
+    }
+
+    #[test]
+    fn opening_a_message_link_scrolls_to_the_message_and_highlights_it_briefly() {
+        let mut rt = runtime_with(long_chat(40));
+        settle(&mut rt);
+        assert!(!on_screen(&rt, "msg-5"));
+        let url = links::url(&rt.state.ws.chat[5].id);
+        rt.update(|s, tx| s.open_link(&url, tx));
+        settle(&mut rt);
+        assert!(on_screen(&rt, "msg-5"));
+        assert!(matches!(&rt.state.flash, Some((Ok(_), _))));
+        for _ in 0..200 {
+            rt.frame(1.0 / 60.0);
+        }
+        assert_eq!(rt.state.flash, None, "the highlight fades");
+        // From another page, the link comes back to the chat.
+        rt.state.showing = Showing::Approvals;
+        let url = links::url(&rt.state.ws.chat[0].id);
+        rt.update(|s, tx| s.open_link(&url, tx));
+        settle(&mut rt);
+        assert_eq!(rt.state.showing, Showing::Chat);
+        assert!(on_screen(&rt, "msg-0"));
+    }
+
+    #[test]
+    fn a_link_pasted_into_find_goes_to_its_message() {
+        let mut rt = runtime_with(long_chat(40));
+        let url = links::url(&rt.state.ws.chat[3].id);
+        chord(&mut rt, 'f', false);
+        type_text(&mut rt, &url);
+        assert!(on_screen(&rt, "msg-3"));
+        assert_eq!(find_count(&rt), ["Went to the linked message"]);
+        rt.state.find.query.text = links::url("0000deadbeef");
+        settle(&mut rt);
+        assert_eq!(find_count(&rt), ["Message not found"]);
+    }
+
+    #[test]
+    fn links_in_messages_show_as_chips_naming_their_message() {
+        let mut rt = runtime();
+        let answer = rt.state.ws.chat[1].id.clone();
+        let words = format!(
+            "Do what this says: {} and {}",
+            links::url(&answer),
+            links::url("0000deadbeef")
+        );
+        rt.update(|s, _| {
+            let first = links::url(&s.ws.chat[0].id);
+            s.ws.chat.push(Message::new(Author::Captain, words));
+            s.ws.chat.push(Message::new(
+                Author::ChiefOfStaff,
+                format!("As you asked in {first}."),
+            ));
+        });
+        settle(&mut rt);
+        let all = texts(&rt).join("\n");
+        assert!(
+            all.contains(
+                "Do what this says: \u{21aa} Chief of staff: On it. I've split the work between \
+                 two crewmates. Two questi… and \u{26a0} Message not found"
+            ),
+            "{all}"
+        );
+        assert!(all.contains("\u{21aa} You: Get the desktop skeleton building and check it"));
+        assert!(
+            !all.contains("velvet-hammer://"),
+            "links show as chips: {all}"
+        );
+    }
+
+    #[test]
+    fn a_link_in_the_captains_message_reaches_the_chief_of_staff_quoted() {
+        let mut rt = runtime_with(fake_in(Mode::Run));
+        assert_eq!(send_and_wait(&mut rt, "links?"), "You said: links: told");
+        assert_eq!(
+            send_and_wait(&mut rt, "links?"),
+            "You said: links: not told",
+            "told once per session"
+        );
+        send_and_wait(&mut rt, "Plan: merge the docs PR first.");
+        let answer = rt.state.ws.chat.last().unwrap().id.clone();
+        let words = format!(
+            "do what this answer says: {} {}",
+            links::url(&answer),
+            links::url("0000deadbeef")
+        );
+        let reply = send_and_wait(&mut rt, &words);
+        assert!(reply.starts_with(&format!("You said: {words}")), "{reply}");
+        assert!(
+            reply.contains(&format!(
+                "<<< {}, written by you, the chief of staff:\nYou said: Plan: merge the docs PR \
+                 first.\n>>>",
+                links::url(&answer)
+            )),
+            "{reply}"
+        );
+        assert!(reply.contains(&format!(
+            "<<< {}: message not found.",
+            links::url("0000deadbeef")
+        )));
+        // The captain's own message keeps their words, with the links as chips.
+        let said = &rt.state.ws.chat[rt.state.ws.chat.len() - 2];
+        assert_eq!(said.text, words);
+    }
+
+    #[test]
+    fn nothing_kept_from_an_earlier_session_reaches_the_chief_of_staff_unless_linked() {
+        let home = scratch("signed-in");
+        let mut first = runtime_with(on_fake(FAKE_CLAUDE, &home, &[]));
+        wait(&mut first, settled);
+        send_and_wait(&mut first, "The zeppelin code is 42.");
+        let kept = first.state.ws.chat[first.state.ws.chat.len() - 2]
+            .id
+            .clone();
+        drop(first);
+
+        let mut rt = runtime_with(on_fake(FAKE_CLAUDE, &home, &[]));
+        wait(&mut rt, settled);
+        assert_eq!(rt.state.ws.earlier, 2);
+        assert_eq!(send_and_wait(&mut rt, "hello"), "You said: hello");
+        let reply = send_and_wait(&mut rt, &format!("what was {}", links::url(&kept)));
+        assert!(
+            reply.contains("written by the captain:\nThe zeppelin code is 42."),
+            "{reply}"
+        );
+    }
+
+    #[test]
+    fn the_main_window_keeps_its_panels_and_settings_hold_every_setting() {
+        let mut rt = runtime();
+        for key in ["agents", "chat", "needs-input", "for-you"] {
+            assert!(rt.find(key).is_some(), "{key}");
+        }
+        for key in [
+            "approvals",
+            "visuals",
+            "rules",
+            "firstmate",
+            "history-section",
+        ] {
+            assert!(
+                rt.find(key).is_none(),
+                "{key} is in Settings, not the main window"
+            );
+        }
+        chord(&mut rt, ',', false);
+        assert_eq!(rt.state.showing, Showing::Settings);
+        for key in [
+            "approvals",
+            "visuals",
+            "rules",
+            "firstmate",
+            "history-section",
+        ] {
+            assert!(rt.find(key).is_some(), "{key}");
+        }
+        assert_eq!(
+            texts_under(&rt, "approvals-summary"),
+            ["Run without asking"]
+        );
+        // Each section opens its page, which comes back to Settings and to the chat.
+        for (card, page) in [
+            ("approvals", Showing::Approvals),
+            ("visuals", Showing::Visuals),
+            ("rules", Showing::Rules),
+            ("firstmate", Showing::Firstmate),
+        ] {
+            tap(&mut rt, card);
+            assert_eq!(rt.state.showing, page);
+            tap(&mut rt, &format!("{card}-all-settings"));
+            assert_eq!(rt.state.showing, Showing::Settings);
+        }
+        tap(&mut rt, "settings-close");
+        assert_eq!(rt.state.showing, Showing::Chat);
+    }
+
+    #[test]
+    fn turning_history_off_keeps_nothing_new_and_on_again_keeps_it() {
+        let data = scratch("unused");
+        let open = || App::new(Box::new(Stub::default()), installed_firstmate(), &data);
+        let mut rt = runtime_with(open());
+        assert_eq!(*rt.state.keeping.settings(), history::Keeping(true));
+        chord(&mut rt, ',', false);
+        assert!(
+            texts(&rt)
+                .iter()
+                .any(|t| t == "\u{25cf} Keep the conversation (Recommended)")
+        );
+        tap_scrolled(&mut rt, "history-off");
+        assert_eq!(*rt.state.keeping.settings(), history::Keeping(false));
+        rt.state.draft.text = "Not kept.".into();
+        rt.update(|s, _| s.send());
+        drop(rt);
+        let mut rt = runtime_with(open());
+        assert_eq!(
+            rt.state.ws.earlier, 0,
+            "nothing was kept, and nothing is shown"
+        );
+        chord(&mut rt, ',', false);
+        tap_scrolled(&mut rt, "history-keep");
+        rt.update(|s, _| {
+            s.draft.text = "Kept.".into();
+            s.send();
+        });
+        drop(rt);
+        let rt = runtime_with(open());
+        assert_eq!(rt.state.ws.earlier, 2);
+        assert_eq!(rt.state.ws.chat[0].text, "Kept.");
+    }
+
+    #[test]
+    fn clearing_history_asks_first_then_deletes_it_and_the_earlier_sessions() {
+        let mut rt = runtime_with(reopened(&format!("clear-{}", std::process::id())));
+        let path = rt.state.history.path().to_path_buf();
+        assert!(path.exists());
+        assert_eq!(rt.state.ws.earlier, 2);
+        chord(&mut rt, ',', false);
+        tap_scrolled(&mut rt, "history-clear");
+        assert!(
+            path.exists(),
+            "nothing is deleted before the captain confirms"
+        );
+        tap_scrolled(&mut rt, "history-clear-cancel");
+        assert!(rt.find("history-clear-confirm").is_none());
+        tap_scrolled(&mut rt, "history-clear");
+        tap_scrolled(&mut rt, "history-clear-confirm");
+        assert!(!path.exists());
+        assert_eq!(rt.state.ws.earlier, 0);
+        assert!(
+            rt.state
+                .ws
+                .chat
+                .iter()
+                .all(|m| !m.text.contains("zeppelin")),
+            "the earlier session left the chat"
+        );
+        assert_eq!(rt.state.ws.chat.len(), 2, "this session's messages stay");
+    }
+
+    #[test]
+    fn the_in_window_menus_reach_settings_and_find() {
+        let mut app = long_chat(5);
+        app.in_window_menus = true;
+        app.platform = menus::Platform::Windows;
+        let mut rt = runtime_with(app);
+        assert!(rt.find("menu-bar").is_some());
+        tap(&mut rt, "menu-file");
+        assert!(rt.find("menu-item-settings").is_some());
+        assert_eq!(
+            texts_under(&rt, "menu-item-settings"),
+            ["Settings", "Ctrl+,"]
+        );
+        tap(&mut rt, "menu-item-settings");
+        assert_eq!(rt.state.showing, Showing::Settings);
+        assert_eq!(rt.state.open_menu, None);
+        tap(&mut rt, "menu-edit");
+        tap(&mut rt, "menu-item-find");
+        assert_eq!(rt.state.showing, Showing::Chat);
+        type_text(&mut rt, "release");
+        assert_eq!(find_count(&rt), ["1 of 1"]);
+        // Linux calls it Preferences, in the Edit menu.
+        rt.update(|s, _| s.platform = menus::Platform::Linux);
+        tap(&mut rt, "menu-edit");
+        assert_eq!(
+            texts_under(&rt, "menu-item-settings"),
+            ["Preferences", "Ctrl+,"]
+        );
+        press_key(&mut rt, Key::Escape, false);
+        assert_eq!(rt.state.open_menu, None);
+    }
+
+    #[test]
+    fn a_long_command_output_shows_its_first_lines_until_unfolded() {
+        let mut rt = runtime_with(ran("tools-bash.json"));
+        rt.frame(1.0 / 60.0);
+        let output = texts_under(&rt, "tool-2-output").concat();
+        assert!(output.contains("running 112 tests"));
+        assert!(!output.contains("test result: ok"));
+        assert_eq!(texts_under(&rt, "tool-2-status"), ["Done"]);
+        assert_eq!(texts_under(&rt, "tool-2-took"), ["42 s"]);
+        tap_scrolled(&mut rt, "tool-2-more");
+        assert!(
+            texts_under(&rt, "tool-2-output")
+                .concat()
+                .contains("test result: ok")
+        );
+        assert_eq!(texts_under(&rt, "tool-2-more"), ["Show fewer lines"]);
+        // The command shows its first line cut to the width, then whole.
+        tap_scrolled(&mut rt, "tool-2-command-toggle");
+        assert!(rt.state.cards["toolu_bash"].full_input);
+        tap_scrolled(&mut rt, "tool-2-wrap");
+        assert!(rt.state.cards["toolu_bash"].no_wrap);
+    }
+
+    #[test]
+    fn the_copy_buttons_copy_the_command_and_the_output_without_escapes() {
+        let mut rt = runtime_with(ran("tools-terminal.json"));
+        let clipboard = rune::clipboard::memory();
+        rt.use_clipboard(&clipboard);
+        tap_scrolled(&mut rt, "tool-3-copy");
+        assert_eq!(
+            clipboard.text().as_deref().map(String::as_str),
+            Some("cargo clippy --color always --all-targets -- -D warnings")
+        );
+        assert_eq!(texts_under(&rt, "tool-3-copy"), ["Copied"]);
+        tap_scrolled(&mut rt, "tool-3-copy-output");
+        let copied = clipboard.text().unwrap().to_string();
+        assert!(copied.starts_with("    Checking velvet-hammer"));
+        assert!(!copied.contains('\u{1b}'));
+        assert_eq!(texts_under(&rt, "tool-3-copy"), ["Copy"]);
+    }
+
+    #[test]
+    fn a_failed_command_shows_its_exit_code_and_its_colours_not_their_escapes() {
+        let mut rt = runtime_with(ran("tools-terminal.json"));
+        rt.frame(1.0 / 60.0);
+        assert_eq!(texts_under(&rt, "tool-3-status"), ["Exit code 101"]);
+        let output = texts_under(&rt, "tool-3-output").concat();
+        assert!(output.contains("error: unused variable"));
+        assert!(!output.contains('\u{1b}') && !output.contains("Exit code"));
+        // Nothing came back yet from the command still running, and an empty one says so.
+        assert_eq!(texts_under(&rt, "tool-6-status"), ["Running\u{2026}"]);
+        assert!(rt.find("tool-6-output").is_none());
+        assert!(rt.find("tool-4-empty").is_some());
+    }
+
+    #[test]
+    fn edits_show_as_diffs_and_reads_as_numbered_code() {
+        let mut rt = runtime_with(ran("tools-diff.json"));
+        rt.frame(1.0 / 60.0);
+        assert_eq!(texts_under(&rt, "tool-2-counts"), ["+2", "\u{2212}1"]);
+        assert_eq!(texts_under(&rt, "tool-3-counts"), ["+5"]);
+        assert!(
+            texts_under(&rt, "tool-2-diff").contains(&"    let name = name.trim();".to_string())
+        );
+        assert_eq!(texts_under(&rt, "tool-5-status"), ["Failed"]);
+        assert!(texts_under(&rt, "tool-5-error")[0].starts_with("String to replace not found"));
+        let mut rt = runtime_with(ran("tools-files.json"));
+        rt.frame(1.0 / 60.0);
+        assert_eq!(texts_under(&rt, "tool-2-found"), ["Found 2 files"]);
+        assert_eq!(texts_under(&rt, "tool-3-found"), ["3 results"]);
+        let numbers = texts_under(&rt, "tool-4-numbers");
+        assert!(numbers[0].starts_with("1\n2\n3"));
+        assert!(
+            texts_under(&rt, "tool-4-output")
+                .iter()
+                .any(|t| t.starts_with("use std::path::Path;"))
+        );
+    }
+
+    /// The captain's messages in the chat, in order.
+    fn said(app: &App) -> Vec<(String, bool)> {
+        app.ws
+            .chat
+            .iter()
+            .filter(|m| m.author == Author::Captain)
+            .map(|m| (m.text.clone(), m.while_working))
+            .collect()
+    }
+
+    /// Presses Enter in the message field, as the captain sending with the keyboard.
+    fn enter(rt: &mut Runtime<App>) {
+        rt.key(rune::KeyEvent {
+            key: rune::Key::Enter,
+            mods: rune::Mods::default(),
+        });
+        rt.frame(1.0 / 60.0);
+    }
+
+    #[test]
+    fn a_message_sent_while_the_chief_of_staff_works_goes_out_at_once_and_is_marked() {
+        let (app, finish) = working_stub();
+        let mut rt = runtime_with(app);
+        assert_eq!(*rt.state.delivery.settings(), messages::Delivery::Now);
+        rt.state.draft.text = "Draft the release notes.".into();
+        tap(&mut rt, "send");
+        assert!(rt.state.working);
+        assert!(rt.find("working").is_some());
+        rt.state.draft.text = "Also mention the Messages setting.".into();
+        tap(&mut rt, "send");
+        assert!(rt.state.queue.is_empty());
+        assert_eq!(
+            said(&rt.state),
+            [
+                ("Draft the release notes.".to_string(), false),
+                ("Also mention the Messages setting.".to_string(), true),
+            ]
+        );
+        let last = rt.state.ws.chat.len() - 1;
+        assert_eq!(
+            texts_under(&rt, &format!("msg-{last}"))[0],
+            "You \u{b7} sent while your chief of staff was working"
+        );
+        // The rest of the turn shows after the message, and answers both.
+        finish.finish();
+        rt.frame(1.0 / 60.0);
+        assert!(!rt.state.working);
+        assert!(rt.find("working").is_none());
+        let reply = rt.state.ws.chat.last().unwrap();
+        assert_eq!(reply.author, Author::ChiefOfStaff);
+        assert!(reply.text.contains("I also took in \u{201c}Also mention"));
+    }
+
+    #[test]
+    fn a_double_enter_sends_the_message_once() {
+        let (app, _finish) = working_stub();
+        let mut rt = runtime_with(app);
+        tap(&mut rt, "chat-input");
+        rt.state.draft.text = "Ship it.".into();
+        enter(&mut rt);
+        assert_eq!(said(&rt.state), [("Ship it.".to_string(), false)]);
+        enter(&mut rt);
+        tap(&mut rt, "send");
+        assert_eq!(said(&rt.state), [("Ship it.".to_string(), false)]);
+        // In queue mode too: the second Enter finds the field empty.
+        rt.state.delivery.change(|d| *d = messages::Delivery::Queue);
+        tap(&mut rt, "chat-input");
+        rt.state.draft.text = "Then tag it.".into();
+        enter(&mut rt);
+        enter(&mut rt);
+        assert_eq!(queued_texts(&rt.state), ["Then tag it."]);
+    }
+
+    #[test]
+    fn a_queued_message_keeps_its_attachments_until_it_goes_out() {
+        let (mut app, finish) = working_stub();
+        app.delivery.change(|d| *d = messages::Delivery::Queue);
+        app.draft.text = "Start.".into();
+        app.send();
+        app.attach_files(&[fixture("notes.md").into()]);
+        settle_attachments(&mut app);
+        app.send();
+        assert_eq!(app.queue.len(), 1);
+        assert_eq!(app.queue[0].text, "");
+        assert_eq!(app.queue[0].attachments[0].name, "notes.md");
+        let mut rt = runtime_with(app);
+        assert!(texts_under(&rt, "queued-0-text")[0].ends_with("\u{b7} 1 attachment"));
+        finish.finish();
+        rt.frame(1.0 / 60.0);
+        assert!(rt.state.queue.is_empty());
+        let sent = rt
+            .state
+            .ws
+            .chat
+            .iter()
+            .rfind(|m| m.author == Author::Captain)
+            .unwrap();
+        assert_eq!(sent.attachments.len(), 1);
+    }
+
+    #[test]
+    fn queued_messages_can_be_edited_or_deleted_and_go_out_one_at_a_time_in_order() {
+        let (app, finish) = queued_while_working();
+        let mut rt = runtime_with(app);
+        assert_eq!(
+            queued_texts(&rt.state),
+            [
+                "Then open the release PR.",
+                "Tag it once CI is green.",
+                "Tell me when it is out."
+            ]
+        );
+        assert_eq!(said(&rt.state).len(), 1);
+        // The field stays usable while the chief of staff works.
+        assert!(rt.find("chat-input").is_some());
+        assert!(rt.find("queue").is_some());
+        tap(&mut rt, "queued-2-delete");
+        assert_eq!(rt.state.queue.len(), 2);
+        tap(&mut rt, "queued-1-edit");
+        rt.state.editing.as_mut().unwrap().1.text = "Tag it v0.2.0 once CI is green.".into();
+        tap(&mut rt, "queued-1-save");
+        assert_eq!(rt.state.queue[1].text, "Tag it v0.2.0 once CI is green.");
+        // A long message with a link takes the same path.
+        let long = format!(
+            "See https://example.com/notes?x=1 and {}",
+            "keep every word. ".repeat(500)
+        );
+        rt.state.draft.text = long.clone();
+        tap(&mut rt, "send");
+        assert_eq!(rt.state.queue.len(), 3);
+
+        let mut sent = vec!["Draft the release notes for 0.2.".to_string()];
+        for next in [
+            "Then open the release PR.",
+            "Tag it v0.2.0 once CI is green.",
+            long.trim(),
+        ] {
+            finish.finish();
+            rt.frame(1.0 / 60.0);
+            // One went out, and the chief of staff is working on it.
+            sent.push(next.to_string());
+            assert!(rt.state.working);
+            let texts: Vec<String> = said(&rt.state).into_iter().map(|(t, _)| t).collect();
+            assert_eq!(texts, sent);
+        }
+        assert!(rt.state.queue.is_empty());
+        finish.finish();
+        rt.frame(1.0 / 60.0);
+        assert!(!rt.state.working);
+        assert_eq!(said(&rt.state).len(), 4, "nothing went out twice");
+        // Messages that went out of the queue went out once the turn ended, so none is marked.
+        assert!(said(&rt.state).iter().all(|(_, marked)| !marked));
+    }
+
+    #[test]
+    fn a_queued_message_being_edited_holds_the_queue_until_the_edit_ends() {
+        let (app, finish) = queued_while_working();
+        let mut rt = runtime_with(app);
+        tap(&mut rt, "queued-0-edit");
+        finish.finish();
+        rt.frame(1.0 / 60.0);
+        assert!(!rt.state.working);
+        assert_eq!(rt.state.queue.len(), 3);
+        assert_eq!(said(&rt.state).len(), 1);
+        // A message sent now waits behind it, so the order holds.
+        rt.state.draft.text = "One more thing.".into();
+        tap(&mut rt, "send");
+        assert_eq!(rt.state.queue.len(), 4);
+        tap(&mut rt, "queued-0-cancel");
+        assert_eq!(
+            said(&rt.state).last().unwrap().0,
+            "Then open the release PR."
+        );
+        assert_eq!(rt.state.queue.len(), 3);
+    }
+
+    #[test]
+    fn the_messages_setting_recommends_sending_right_away_and_is_kept_but_the_queue_is_not() {
+        let dir = scratch("unused");
+        let (chief, _finish) = Stub::slow();
+        let mut rt = runtime_with(App::new(Box::new(chief), installed_firstmate(), &dir));
+        chord(&mut rt, ',', false);
+        assert_eq!(texts_under(&rt, "messages-summary"), ["Send right away"]);
+        tap(&mut rt, "messages");
+        assert_eq!(rt.state.showing, Showing::Messages);
+        assert_eq!(
+            texts_under(&rt, "message-mode-now")[0],
+            "\u{25cf} Send right away (Recommended)"
+        );
+        tap(&mut rt, "message-mode-queue");
+        assert_eq!(*rt.state.delivery.settings(), messages::Delivery::Queue);
+        tap(&mut rt, "messages-all-settings");
+        assert_eq!(texts_under(&rt, "messages-summary"), ["Queue until done"]);
+        tap(&mut rt, "settings-close");
+        rt.state.draft.text = "Start.".into();
+        tap(&mut rt, "send");
+        rt.state.draft.text = "Waits.".into();
+        tap(&mut rt, "send");
+        assert_eq!(queued_texts(&rt.state), ["Waits."]);
+        drop(rt);
+        // After a restart the setting holds; queued messages lived in memory only.
+        let app = App::new(Box::new(Stub::default()), installed_firstmate(), &dir);
+        assert_eq!(*app.delivery.settings(), messages::Delivery::Queue);
+        assert!(app.queue.is_empty());
+    }
+
+    #[test]
+    fn messages_are_kept_while_claude_code_is_not_ready() {
+        // Send right away: the message stays in the field, as before.
+        let (app, _finish) = working_stub();
+        let mut rt = runtime_with(app);
+        rt.state
+            .take(Event::Status(Status::SignedOut { problem: None }));
+        rt.state.draft.text = "Are you there?".into();
+        rt.state.send();
+        assert_eq!(rt.state.draft.text, "Are you there?");
+        assert!(said(&rt.state).is_empty());
+
+        // Queue mode: queued messages wait through it and go out once Claude Code is ready.
+        let (app, finish) = queued_while_working();
+        let mut rt = runtime_with(app);
+        rt.state
+            .take(Event::Status(Status::SignedOut { problem: None }));
+        finish.finish();
+        rt.frame(1.0 / 60.0);
+        assert_eq!(rt.state.queue.len(), 3);
+        assert!(rt.find("sign-in-queued").is_some());
+        rt.state
+            .take(Event::Status(Status::Ready(model::Plan::Simulated)));
+        rt.frame(1.0 / 60.0);
+        assert_eq!(rt.state.queue.len(), 2);
+        assert_eq!(
+            said(&rt.state).last().unwrap().0,
+            "Then open the release PR."
+        );
+    }
+
+    #[test]
+    fn a_message_sent_mid_turn_reaches_claude_code_and_is_answered_after_the_turn() {
+        let home = scratch("signed-in");
+        let mut rt = runtime_with(on_fake(FAKE_CLAUDE, &home, &[]));
+        wait(&mut rt, settled);
+        rt.state.draft.text = "slow: first".into();
+        tap(&mut rt, "send");
+        assert!(rt.state.working);
+        rt.state.draft.text = "second".into();
+        tap(&mut rt, "send");
+        assert_eq!(
+            said(&rt.state),
+            [
+                ("slow: first".to_string(), false),
+                ("second".to_string(), true)
+            ]
+        );
+        release_slow_turn(&home);
+        wait(&mut rt, |s| {
+            !s.working
+                && s.ws
+                    .chat
+                    .last()
+                    .is_some_and(|m| m.text == "You said: second")
+        });
+        let replies: Vec<&str> = rt
+            .state
+            .ws
+            .chat
+            .iter()
+            .filter(|m| m.author == Author::ChiefOfStaff)
+            .map(|m| m.text.as_str())
+            .collect();
+        assert_eq!(replies, ["You said: slow: first", "You said: second"]);
+    }
+
+    #[test]
+    fn a_message_claude_code_never_echoes_does_not_keep_the_app_working() {
+        for mode in [messages::Delivery::Now, messages::Delivery::Queue] {
+            let mut rt = runtime_with(fake("signed-in", &[]));
+            rt.state.delivery.change(|d| *d = mode);
+            wait(&mut rt, settled);
+            rt.state.draft.text = "swallow: merged".into();
+            tap(&mut rt, "send");
+            wait(&mut rt, |s| {
+                !s.working
+                    && s.ws
+                        .chat
+                        .last()
+                        .is_some_and(|m| m.text == "You said: swallow: merged")
+            });
+            rt.state.draft.text = "after".into();
+            tap(&mut rt, "send");
+            assert!(
+                !said(&rt.state).last().unwrap().1,
+                "{mode:?}: sent as if working"
+            );
+            wait(&mut rt, |s| {
+                !s.working
+                    && s.ws
+                        .chat
+                        .last()
+                        .is_some_and(|m| m.text == "You said: after")
+            });
+        }
+    }
+
+    #[test]
+    fn in_queue_mode_a_message_waits_for_claude_codes_turn_to_end() {
+        let home = scratch("signed-in");
+        let mut rt = runtime_with(on_fake(FAKE_CLAUDE, &home, &[]));
+        rt.state.delivery.change(|d| *d = messages::Delivery::Queue);
+        wait(&mut rt, settled);
+        rt.state.draft.text = "slow: first".into();
+        tap(&mut rt, "send");
+        rt.state.draft.text = "second".into();
+        tap(&mut rt, "send");
+        assert_eq!(queued_texts(&rt.state), ["second"]);
+        release_slow_turn(&home);
+        wait(&mut rt, |s| {
+            !s.working
+                && s.ws
+                    .chat
+                    .last()
+                    .is_some_and(|m| m.text == "You said: second")
+        });
+        let order: Vec<&str> = rt.state.ws.chat.iter().map(|m| m.text.as_str()).collect();
+        assert_eq!(
+            order,
+            [
+                "slow: first",
+                "You said: slow: first",
+                "second",
+                "You said: second"
+            ]
+        );
+    }
+
+    /// The real `claude` on the Haiku model: a message sent while a turn runs a tool is taken in
+    /// at the turn's next step and answered. Run it with `cargo test real_claude -- --ignored`.
+    #[test]
+    #[ignore = "uses the real Claude account"]
+    fn real_claude_takes_in_a_message_sent_mid_turn() {
+        let claude = Claude::new("claude").env("ANTHROPIC_MODEL", "haiku");
+        let mut rt = runtime_with(App::new(
+            Box::new(claude),
+            installed_firstmate(),
+            &scratch("unused"),
+        ));
+        wait(&mut rt, settled);
+        assert!(matches!(rt.state.status, Status::Ready(_)), "not signed in");
+        rt.state.draft.text = "Run the Bash command `sleep 8; echo one`, then reply with only the \
+                               word DONE."
+            .into();
+        tap(&mut rt, "send");
+        let started = |s: &App| s.ws.chat.iter().any(|m| m.tool.is_some());
+        wait_for(&mut rt, Duration::from_secs(120), started);
+        assert!(rt.state.working);
+        rt.state.draft.text = "Also add the word BANANA on its own line to your reply.".into();
+        tap(&mut rt, "send");
+        assert!(said(&rt.state)[1].1, "marked as sent while working");
+        wait_for(&mut rt, Duration::from_secs(180), |s| {
+            !s.working
+                && s.ws
+                    .chat
+                    .iter()
+                    .any(|m| m.text.contains("BANANA") && m.author == Author::ChiefOfStaff)
+        });
+        eprintln!("chat: {:?}", rt.state.ws.chat);
     }
 }

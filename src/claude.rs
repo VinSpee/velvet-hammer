@@ -70,6 +70,14 @@ pub struct Claude {
     notes: HashMap<Id, String>,
     /// The settings the session's hooks decide with.
     policies: Policies,
+    /// Messages written to the session that Claude Code has not taken in yet. It echoes each one
+    /// back as it takes it in (`--replay-user-messages`): at the start of a turn, or at the next
+    /// step of the turn that is running when the message arrived mid-turn.
+    unread: usize,
+    /// A turn is running: from a message or the session's own start of one to its `result`.
+    turn: bool,
+    /// What [`Event::Working`] last said.
+    working: bool,
 }
 
 /// Where a firstmate chief of staff runs: the managed clone is the working directory, so
@@ -116,6 +124,9 @@ impl Claude {
             notes: HashMap::new(),
             // Asks about everything until the app hands over the captain's settings.
             policies: Policies::ask_every_time(),
+            unread: 0,
+            turn: false,
+            working: false,
         }
     }
 
@@ -150,6 +161,18 @@ impl Claude {
         self.session = None;
         for (id, _) in self.approvals.drain() {
             self.out.push(Event::Withdrawn(id));
+        }
+        self.unread = 0;
+        self.turn = false;
+        self.report_working();
+    }
+
+    /// Reports whether the chief of staff is working, when that changed.
+    fn report_working(&mut self) {
+        let working = self.turn || self.unread > 0;
+        if working != self.working {
+            self.working = working;
+            self.out.push(Event::Working(working));
         }
     }
 
@@ -238,6 +261,10 @@ impl Claude {
             self.out.push(Event::Activity(entry));
             return;
         }
+        if let Call::AddMate(scope) = call {
+            self.out.push(Event::AddMate(scope));
+            return;
+        }
         // The reply so far ends here, so the captain sees it was sent back before the view.
         if let Call::Nudged(why) = call {
             self.finish_reply();
@@ -246,9 +273,17 @@ impl Claude {
             )));
             return;
         }
+        // The wake that brought this call makes the app look for the next reminder due.
+        if let Call::Reminded = call {
+            return;
+        }
         let id = self.item_id();
         let item = match call {
-            Call::Expired(_) | Call::Logged(_) | Call::Nudged(_) => return,
+            Call::Expired(_)
+            | Call::Logged(_)
+            | Call::Nudged(_)
+            | Call::AddMate(_)
+            | Call::Reminded => return,
             Call::Note(text) => {
                 self.notes.insert(id, text.clone());
                 Item {
@@ -294,6 +329,17 @@ impl Claude {
     fn record(&mut self, record: &Value) {
         let subagent = !record["parent_tool_use_id"].is_null();
         match record["type"].as_str() {
+            // One of the captain's messages, echoed as Claude Code takes it in.
+            Some("user") if record["isReplay"] == true => {
+                self.unread = self.unread.saturating_sub(1);
+                self.turn = true;
+            }
+            // A turn the session started on its own, such as one a hook woke, is work too.
+            Some("stream_event" | "assistant") => self.turn = true,
+            _ => {}
+        }
+        match record["type"].as_str() {
+            Some("user") if record["isReplay"] == true => {}
             Some("stream_event") => {
                 let event = &record["event"];
                 match event["type"].as_str() {
@@ -386,9 +432,12 @@ impl Claude {
                     self.finish_reply();
                 }
                 self.replied = false;
+                self.turn = false;
+                self.unread = 0;
             }
             _ => {}
         }
+        self.report_working();
     }
 
     fn finish_reply(&mut self) {
@@ -418,7 +467,10 @@ impl Claude {
         let line = json!({"type": "user", "message": {"role": "user", "content": content}});
         writeln!(stdin, "{line}")
             .and_then(|()| stdin.flush())
-            .map_err(|e| format!("Could not send the message to Claude Code: {e}"))
+            .map_err(|e| format!("Could not send the message to Claude Code: {e}"))?;
+        self.unread += 1;
+        self.report_working();
+        Ok(())
     }
 }
 
@@ -474,7 +526,7 @@ impl ChiefOfStaff for Claude {
         self.policies = policies;
     }
 
-    fn act(&mut self, _ws: &Workspace, action: &Action) {
+    fn act(&mut self, ws: &Workspace, action: &Action) {
         // A tool-use answer goes back to the hook that asked, not into the chat.
         if let Action::Answer { item, choice } = action
             && let Some(approval) = self.approvals.remove(item)
@@ -487,13 +539,17 @@ impl ChiefOfStaff for Claude {
             return;
         }
         let content = match action {
-            Action::Say { text, attachments } => user_content(text, attachments),
+            // The captain's words, with any message they link to quoted (see crate::links), and
+            // any files attached to them.
+            Action::Say { text, attachments } => {
+                user_content(&crate::links::outgoing(ws, text), attachments)
+            }
             Action::Answer { item, choice } => format!("My answer to item {item}: {choice}").into(),
             Action::Done { item } => match self.notes.remove(item) {
                 Some(note) => format!("I have done this: {note}").into(),
                 None => format!("I have done item {item}.").into(),
             },
-            Action::Ui(ui) => ui.message().into(),
+            Action::Ui(ui) => crate::links::outgoing(ws, &ui.message()).into(),
         };
         if let Err(problem) = self.say(content) {
             self.end_session();
@@ -839,6 +895,7 @@ impl Session {
                     "stream-json",
                     "--verbose",
                     "--include-partial-messages",
+                    "--replay-user-messages",
                     "--no-session-persistence",
                     "--mcp-config",
                     &bridge.mcp_config(),
@@ -1013,7 +1070,10 @@ mod tests {
         ] {
             claude.record(&record);
         }
-        let events = std::mem::take(&mut claude.out);
+        let events: Vec<Event> = std::mem::take(&mut claude.out)
+            .into_iter()
+            .filter(|e| !matches!(e, Event::Working(_)))
+            .collect();
         // The text before the view ends as it starts.
         assert!(matches!(&events[1], Event::Reply { text, done: true } if text == "Here it is."));
         assert!(matches!(&events[2], Event::Tool(t) if t.id == "v1" && t.name == name));
@@ -1045,6 +1105,43 @@ mod tests {
                 text: "Listed.".into(),
                 done: true
             }));
+    }
+
+    #[test]
+    fn it_works_while_a_turn_runs_or_a_message_awaits_its_echo_and_a_turn_end_clears_both() {
+        let mut claude = Claude::new("unused");
+        // Two messages written: the second arrived during the first's turn.
+        claude.unread = 2;
+        claude.report_working();
+        let replay = |text: &str| {
+            json!({"type": "user", "isReplay": true, "parent_tool_use_id": null,
+                "message": {"role": "user", "content": text}})
+        };
+        let result = json!({"type": "result", "subtype": "success", "result": "ok"});
+        claude.record(&replay("first"));
+        assert_eq!(claude.unread, 1);
+        // The second was merged into the first turn and never echoed: the turn's end is final.
+        claude.record(&result);
+        assert_eq!(claude.unread, 0);
+        // A turn the session starts on its own is work too.
+        claude.record(&json!({"type": "stream_event", "event": {"type": "message_start"}}));
+        claude.record(&result);
+        let working: Vec<bool> = claude
+            .out
+            .iter()
+            .filter_map(|e| match e {
+                Event::Working(w) => Some(*w),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(working, [true, false, true, false]);
+        assert!(
+            !claude
+                .out
+                .iter()
+                .any(|e| matches!(e, Event::Tool(_) | Event::ToolResult { .. })),
+            "a replayed message is not a tool result"
+        );
     }
 
     #[test]

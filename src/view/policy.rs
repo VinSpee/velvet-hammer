@@ -4,7 +4,7 @@
 use rune::tok::{Theme, radius, space, type_};
 use rune::{El, col, row, text, text_input};
 
-use super::{button, choice, note, page, section, small_button, warning};
+use super::{all_settings, button, choice, note, page, section, small_button, warning};
 use crate::guard::{self, Rule};
 use crate::visual::{self, Mode};
 use crate::{App, Showing, approval};
@@ -123,6 +123,7 @@ pub fn visuals_page(s: &App, t: Theme, dark: bool) -> El {
     ));
     let actions = row()
         .gap(space::S2)
+        .child(all_settings("visuals-all-settings", s, t))
         .child(button("visuals-close", "Back to chat", t, |s| {
             s.showing = Showing::Chat
         }));
@@ -240,6 +241,7 @@ pub fn rules_page(s: &App, t: Theme, dark: bool) -> El {
     ));
     let actions = row()
         .gap(space::S2)
+        .child(all_settings("rules-all-settings", s, t))
         .child(button("rules-activity", "Activity log", t, |s| {
             s.showing = Showing::Activity
         }))
@@ -250,7 +252,7 @@ pub fn rules_page(s: &App, t: Theme, dark: bool) -> El {
 }
 
 /// Text the app sends the model, shown as written.
-fn quote(key: &str, words: &str, t: Theme) -> El {
+pub(super) fn quote(key: &str, words: &str, t: Theme) -> El {
     col()
         .padding(space::S3)
         .radius(radius::MD)
