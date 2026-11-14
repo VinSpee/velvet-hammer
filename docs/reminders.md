@@ -73,8 +73,8 @@ due shows in three places:
   a toast only for a registered app, which Velvet Hammer does not do yet; elsewhere there are none.
 
 A reminder that came due while the app was not running shows as due, marked **overdue**, as soon
-as the app opens. The deep link back to the chat message where a reminder was set is not there
-yet: that work has not landed on main.
+as the app opens. A reminder does not yet link back to the chat message where it was set,
+though [message links](links.md) exist.
 
 **Snooze** opens a small menu: **10 minutes**, **1 hour**, **Later today**, **Tomorrow morning**,
 **Next week** and **Later list**, and a field for a number of minutes, hours or days. A snoozed
@@ -90,8 +90,8 @@ reminder with its time, its text, when it was set, and its actions. **All remind
 bottom of For you to do opens it too. **Settings** on the page opens **Reminder settings**: each
 setting with **−** and **+** (hours one at a time, times by half an hour, the day of the week
 round the week), **Reset to the defaults**, and what the keywords mean if said now. The settings
-apply at once, to reminders set from then on. The Settings menu planned for the app has not
-landed on main; when it does, these settings belong in a Reminders section of it.
+apply at once, to reminders set from then on. They are not yet a section of the app's
+**Settings** page, so this page is the only way to reach them.
 
 ## What is stored
 
