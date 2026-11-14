@@ -7,6 +7,7 @@ mod approval;
 mod bearings;
 mod bridge;
 mod claude;
+mod crew;
 mod find;
 mod firstmate;
 mod guard;
@@ -15,6 +16,7 @@ mod links;
 mod markdown;
 mod menus;
 mod model;
+mod pi;
 mod projects;
 mod secondmates;
 mod store;
@@ -59,6 +61,19 @@ pub struct App {
     pub visual_example: TextEdit,
     /// Which of firstmate's rules the hook enforces.
     pub rules: store::Store<guard::Settings>,
+    /// The captain's worker nicknames, in the firstmate home's `config/`.
+    pub nicknames: store::Store<crew::Nicknames>,
+    /// The Workers page's nickname editor.
+    pub crew_form: crew::Form,
+    /// The pi runtime the app installs for workers on other providers.
+    pub runtime: pi::Runtime,
+    /// Whether the opencode Go key is in the keychain, as last checked; None before the
+    /// Workers page first opens.
+    pub key: Option<pi::Key>,
+    /// How the key is checked: [`pi::key_state`], or a stand-in in tests.
+    pub key_check: fn() -> pi::Key,
+    /// Why firstmate's pi account setting could not be written.
+    pub pin_problem: Option<String>,
     /// Whether the conversation is kept across restarts.
     pub keeping: store::Store<history::Keeping>,
     /// The conversation as kept across restarts.
@@ -165,6 +180,8 @@ pub enum Showing {
     Visuals,
     /// Firstmate's rules the hook enforces, and what each did lately.
     Rules,
+    /// Workers on other providers: the pi runtime, the key, and the worker nicknames.
+    Workers,
     /// Every setting, by section.
     Settings,
     /// One image from the chat, enlarged, by its tool use's id.
@@ -185,12 +202,18 @@ impl App {
         let approvals = Store::open(data);
         let visuals = store::Store::<visual::Mode>::open(data);
         let rules = store::Store::<guard::Settings>::open(data);
+        let home = firstmate.home_dir();
+        let nicknames = store::Store::<crew::Nicknames>::open(&home.join("config"));
+        let mut runtime = pi::Runtime::open(data, pi::Release::official());
+        runtime.list_models();
         let keeping = store::Store::<history::Keeping>::open(data);
         let mut history = history::History::new(data);
         chief.approve_with(bridge::Policies {
             approval: approvals.shared(),
             visual: visuals.shared(),
             rules: rules.shared(),
+            nicknames: nicknames.shared(),
+            models: runtime.models(),
         });
         let window_wake: Arc<OnceLock<Waker>> = Arc::new(OnceLock::new());
         let media_wake: Waker = Arc::new({
@@ -218,6 +241,12 @@ impl App {
             visuals,
             visual_example: TextEdit::new(visual::EXAMPLE),
             rules,
+            nicknames,
+            crew_form: crew::Form::default(),
+            runtime,
+            key: None,
+            key_check: pi::key_state,
+            pin_problem: None,
             keeping,
             history,
             find: find::Find::default(),
@@ -293,6 +322,7 @@ impl App {
     pub fn drain(&mut self) -> bool {
         let events = self.chief.events();
         let mut changed = self.firstmate.poll() | !events.is_empty();
+        changed |= self.runtime.poll();
         changed |= self.follow_peek();
         changed |= self.drain_mates();
         if let Some(projects) = self.project_watcher.as_mut().and_then(|w| w.poll()) {
@@ -670,6 +700,23 @@ impl App {
         self.picking.is_some()
     }
 
+    /// Opens the Workers page, checking the keychain for the provider key on the way.
+    pub fn open_workers(&mut self) {
+        self.showing = Showing::Workers;
+        self.check_key();
+    }
+
+    pub fn check_key(&mut self) {
+        self.key = Some((self.key_check)());
+    }
+
+    /// Points firstmate's pi workers at the app's pi directory (see [`pi::connect`]), on the
+    /// captain's press of the Workers page's button, then lists the models pi can use.
+    pub fn connect_workers(&mut self) {
+        self.pin_problem = pi::connect(&self.runtime, &self.firstmate.home_dir()).err();
+        self.runtime.list_models();
+    }
+
     /// Tells the chief of staff, in the chat, that the captain approves merging `url`.
     pub fn approve_merge(&mut self, task: &str, url: &str) {
         if self.chat_ready() {
@@ -747,7 +794,12 @@ pub const ADD_PROJECT: &str = "I want to add a project. Follow your project-mana
 fn init() -> App {
     let mut firstmate = Firstmate::open(&firstmate::data_dir(), firstmate::UPSTREAM);
     firstmate.start();
-    let claude = Claude::new("claude").in_firstmate(firstmate.clone_dir(), firstmate.home_dir());
+    // The pi runtime goes first on the chief of staff's PATH, where firstmate's spawn finds it
+    // for pi workers. Claude Code itself is found and signed in as before.
+    let path = pi::Runtime::open(&firstmate::data_dir(), None).path_env(std::env::var_os("PATH"));
+    let claude = Claude::new("claude")
+        .env("PATH", path.to_string_lossy())
+        .in_firstmate(firstmate.clone_dir(), firstmate.home_dir());
     App::new(Box::new(claude), firstmate, &firstmate::data_dir())
 }
 
@@ -952,6 +1004,7 @@ fn setup(s: &mut App, wake: Waker) {
     if let Some(watcher) = &mut s.project_watcher {
         watcher.connect(wake.clone());
     }
+    s.runtime.connect(wake.clone());
     s.mates.connect(wake.clone());
     s.wake = Some(wake.clone());
     let _ = s.window_wake.set(wake.clone());
@@ -1271,6 +1324,36 @@ fn main() {
                 s.draft.text = format!("run: {MERGE}");
                 s.send();
                 s.settle(|s| s.ws.needs_input().next().is_some());
+            }),
+            // Workers on other providers: the page before anything is set up, the page with pi
+            // installed from a stand-in release, the key found and firstmate pointed at it, a
+            // Claude model refused for pi, and the agents list showing what each worker runs on.
+            ("workers-fresh", |s| {
+                *s = workers_lab("workers-fresh", false);
+                s.key_check = || pi::Key::Missing;
+                s.open_workers();
+            }),
+            ("workers-settings", |s| {
+                *s = workers_lab("workers-settings", true);
+                s.open_workers();
+            }),
+            ("workers-claude-refused", |s| {
+                *s = workers_lab("workers-claude-refused", true);
+                s.open_workers();
+                s.crew_form.nickname.text = "poet".into();
+                s.crew_form.model.text = "opencode-go/claude-haiku-5-5".into();
+                s.crew_form.save(&mut s.nicknames);
+            }),
+            ("workers-crew", |s| {
+                let lab = Lab::at(Path::new("/tmp/velvet-hammer/workers-crew"));
+                lab.bearings(bearings::SNAPSHOT);
+                lab.meta(
+                    "lab-verify",
+                    "harness=pi\nmodel=opencode-go/deepseek-v4.1-flash\neffort=default\n",
+                );
+                lab.meta("lab-layout", "harness=claude\nmodel=claude-sonnet-5-5\n");
+                *s = fake_in_firstmate(&lab, true);
+                s.settle(|s| s.captain.crew.iter().any(|c| c.runs.is_some()));
             }),
             // Find in the conversation: a long chat for scripts/find.json, matches with the first
             // current, the third current after stepping, a query with none, and the history kept
@@ -1654,6 +1737,30 @@ fn rules_lab(name: &str) -> App {
     app
 }
 
+/// The fake `claude` running as firstmate in a lab under `/tmp/velvet-hammer/NAME`, with the pi
+/// runtime installable from a stand-in release. When `ready`, pi is installed, firstmate is
+/// pointed at it, the keychain stand-in has the key, and a second nickname is added.
+fn workers_lab(name: &str, ready: bool) -> App {
+    let root = Path::new("/tmp/velvet-hammer").join(name);
+    let lab = Lab::at(&root);
+    let mut app = fake_in_firstmate(&lab, true);
+    app.runtime
+        .set_release(pi::lab::release(&root.join("pi-release"), false));
+    app.key_check = || pi::Key::Present;
+    if ready {
+        app.runtime.install();
+        app.runtime.settle();
+        app.connect_workers();
+        app.runtime.settle();
+        app.crew_form.nickname.text = "night-owl".into();
+        app.crew_form.harness = crew::Harness::Claude;
+        app.crew_form.model.text = "opus".into();
+        app.crew_form.effort.text = "high".into();
+        app.crew_form.save(&mut app.nicknames);
+    }
+    app
+}
+
 /// Rules for the tool-approval scenes: ask before any push, never force one, and allow edits
 /// under `src`.
 fn sample_rules() -> Vec<approval::Rule> {
@@ -1945,6 +2052,25 @@ mod tests {
         for _ in 0..30 {
             rt.frame(1.0 / 60.0);
         }
+    }
+
+    #[test]
+    fn opening_the_app_writes_nothing_into_the_firstmate_home() {
+        let root = scratch("quiet-home");
+        let firstmate = Firstmate::showing(
+            root.join("clone"),
+            firstmate::UPSTREAM,
+            Distro::Installed(Checkout::default()),
+            None,
+        );
+        let home = firstmate.home_dir();
+        std::fs::create_dir_all(&home).unwrap();
+        let claude = Claude::new(FAKE_CLAUDE)
+            .env("FAKE_CLAUDE_HOME", scratch("signed-in").to_string_lossy())
+            .in_firstmate(firstmate.clone_dir(), home.clone());
+        let app = App::new(Box::new(claude), firstmate, &root.join("data"));
+        assert_eq!(std::fs::read_dir(&home).unwrap().count(), 0);
+        assert_eq!(app.nicknames.settings().presets.len(), 1);
     }
 
     #[test]
@@ -4163,7 +4289,7 @@ mod tests {
     fn the_rules_page_lists_every_rule_on_by_default() {
         let mut rt = runtime();
         chord(&mut rt, ',', false);
-        assert_eq!(texts_under(&rt, "rules-summary"), ["7 of 7 on"]);
+        assert_eq!(texts_under(&rt, "rules-summary"), ["8 of 8 on"]);
         tap(&mut rt, "rules");
         for rule in guard::Rule::ALL {
             assert!(
@@ -4174,7 +4300,7 @@ mod tests {
         }
         tap_scrolled(&mut rt, "guard-publish-asks-captain-toggle");
         tap(&mut rt, "rules-all-settings");
-        assert_eq!(texts_under(&rt, "rules-summary"), ["6 of 7 on"]);
+        assert_eq!(texts_under(&rt, "rules-summary"), ["7 of 8 on"]);
         tap(&mut rt, "rules");
         tap(&mut rt, "rules-activity");
         assert_eq!(rt.state.showing, Showing::Activity);

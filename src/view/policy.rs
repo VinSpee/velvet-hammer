@@ -252,7 +252,7 @@ pub fn rules_page(s: &App, t: Theme, dark: bool) -> El {
 }
 
 /// Text the app sends the model, shown as written.
-fn quote(key: &str, words: &str, t: Theme) -> El {
+pub(super) fn quote(key: &str, words: &str, t: Theme) -> El {
     col()
         .padding(space::S3)
         .radius(radius::MD)

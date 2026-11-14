@@ -544,6 +544,13 @@ pub mod lab {
             std::fs::write(data.join("bearings.json"), json).expect("write bearings");
         }
 
+        /// Firstmate's record of task `id` in this lab's home, as `bin/fm-spawn.sh` writes it.
+        pub fn meta(&self, id: &str, text: &str) {
+            let state = self.data.join("home/state");
+            std::fs::create_dir_all(&state).expect("mkdir");
+            std::fs::write(state.join(format!("{id}.meta")), text).expect("write meta");
+        }
+
         /// Firstmate's project registry in this lab's home from now on, as firstmate's
         /// `project-management` procedure writes it.
         pub fn registry(&self, text: &str) {

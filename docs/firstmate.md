@@ -223,8 +223,11 @@ mode, the panel shows firstmate's own error above the last items it read.
 
 The agents column lists firstmate's tasks in flight, from `in_flight[]` in the same snapshot
 that fills the panel: each row shows the task's title, firstmate's word for its state (such as
-`working`, `parked` or `blocked`) and one line on what it is doing. The list changes when
-firstmate's records change. You never have to open a row.
+`working`, `parked` or `blocked`) and one line on what it is doing. Under that, a row shows what
+the worker runs on, such as `pi · opencode-go/deepseek-v4.1-flash`, read from the `harness=` and
+`model=` lines of firstmate's `state/<id>.meta`, because the snapshot does not carry them (see
+[Workers on other providers](worker-providers.md)). The list changes when firstmate's records
+change. You never have to open a row.
 
 Selecting a row opens a peek in place of the chat. While it is open, the app runs firstmate's
 `bin/fm-peek.sh <task-id> 40` every two seconds and shows the last 40 lines of that crewmate's

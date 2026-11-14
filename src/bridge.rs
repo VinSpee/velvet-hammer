@@ -28,6 +28,7 @@ use std::time::{Duration, Instant};
 use serde_json::{Value, json};
 
 use crate::approval::{self, Effect, Entry, Policy, Settings};
+use crate::crew;
 use crate::guard::{self, Home};
 use crate::store::Shared;
 use crate::ui;
@@ -85,6 +86,10 @@ pub struct Policies {
     pub approval: Policy,
     pub visual: Shared<visual::Mode>,
     pub rules: Shared<guard::Settings>,
+    /// The captain's worker nicknames and the models the pi runtime lists, for the standing
+    /// crew instruction while the chief of staff runs as firstmate.
+    pub nicknames: Shared<crew::Nicknames>,
+    pub models: Shared<Vec<String>>,
 }
 
 impl Policies {
@@ -95,6 +100,8 @@ impl Policies {
             approval: Arc::new(RwLock::new(Settings::ask_every_time())),
             visual: Arc::new(RwLock::new(visual::Mode::Off)),
             rules: Arc::new(RwLock::new(guard::Settings::default())),
+            nicknames: Arc::new(RwLock::new(crew::Nicknames::default())),
+            models: Arc::new(RwLock::new(Vec::new())),
         }
     }
 }
@@ -272,7 +279,9 @@ fn serve(
             ("/hooks/pre-tool-use", Ok(input)) => {
                 Reply::Json(pre_tool_use(&input, &stream, serving, on_call))
             }
-            ("/hooks/user-prompt-submit", Ok(_)) => Reply::Json(user_prompt_submit(serving)),
+            ("/hooks/user-prompt-submit", Ok(input)) => {
+                Reply::Json(user_prompt_submit(&input, serving))
+            }
             ("/hooks/stop", Ok(input)) => Reply::Json(stop(&input, serving, on_call)),
             (
                 "/mcp" | "/hooks/pre-tool-use" | "/hooks/user-prompt-submit" | "/hooks/stop",
@@ -419,14 +428,24 @@ fn lock(turn: &Mutex<Turn>) -> std::sync::MutexGuard<'_, Turn> {
 
 /// A message from the captain starts a new reply, and carries the standing instruction to use
 /// views when the visual-replies mode asks for one. The session's first message also says how
-/// message links work, once.
-fn user_prompt_submit(serving: &Serving) -> Value {
+/// message links work, once. While the chief of staff runs as firstmate, each message also
+/// carries the worker nicknames and what the app made of a request for a worker (see
+/// [`crate::crew`]).
+fn user_prompt_submit(input: &Value, serving: &Serving) -> Value {
     lock(&serving.turn).prompt();
     let links =
         (!serving.told_links.swap(true, Ordering::SeqCst)).then_some(crate::links::INSTRUCTION);
+    let crew = serving.home.as_ref().map(|_| {
+        crew::context(
+            input["prompt"].as_str().unwrap_or_default(),
+            &read(&serving.policies.nicknames),
+            &read(&serving.policies.models),
+        )
+    });
     let context: Vec<&str> = links
         .into_iter()
         .chain(read(&serving.policies.visual).instruction())
+        .chain(crew.as_deref())
         .collect();
     if context.is_empty() {
         return json!({});
@@ -556,6 +575,8 @@ mod tests {
             approval: Arc::new(RwLock::new(settings)),
             visual: Arc::new(RwLock::new(visual::Mode::Enforce)),
             rules: Arc::new(RwLock::new(guard::Settings::default())),
+            nicknames: Arc::new(RwLock::new(crew::Nicknames::default())),
+            models: Arc::new(RwLock::new(Vec::new())),
         };
         let bridge = Bridge::start(policies.clone(), home, move |call| {
             tx.lock().unwrap().send(call).unwrap()
@@ -1015,6 +1036,46 @@ mod tests {
                 "{mode:?}"
             );
         }
+    }
+
+    #[test]
+    fn a_firstmate_session_learns_the_nicknames_and_how_a_request_resolved() {
+        let (bridge, _, policies) = bridge_on(Settings::default(), Some(Home::new("/home")));
+        *policies.visual.write().unwrap() = visual::Mode::Off;
+        *policies.models.write().unwrap() = vec!["opencode-go/kimi-k3".into()];
+        let auth = bearer(&bridge);
+        let context = |prompt: &str| {
+            let out = post(
+                &bridge,
+                "/hooks/user-prompt-submit",
+                Some(&auth),
+                json!({"hook_event_name": "UserPromptSubmit", "prompt": prompt}),
+            )
+            .1;
+            out["hookSpecificOutput"]["additionalContext"]
+                .as_str()
+                .unwrap_or_default()
+                .to_string()
+        };
+        assert!(context("status?").contains("\u{201c}hacker\u{201d} is --harness pi"));
+        assert!(
+            context("send a kimi k3 worker to look").contains("as the model opencode-go/kimi-k3")
+        );
+
+        // Outside firstmate there is no crew to send.
+        let (plain, _, policies) = bridge_on(Settings::default(), None);
+        *policies.visual.write().unwrap() = visual::Mode::Off;
+        let out = post(
+            &plain,
+            "/hooks/user-prompt-submit",
+            Some(&bearer(&plain)),
+            json!({"hook_event_name": "UserPromptSubmit", "prompt": "send a hacker"}),
+        )
+        .1;
+        let context = out["hookSpecificOutput"]["additionalContext"]
+            .as_str()
+            .unwrap_or_default();
+        assert!(!context.contains("hacker"), "{context}");
     }
 
     #[test]

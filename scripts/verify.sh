@@ -38,7 +38,8 @@ for scene in chat replied empty peek signed-out signing-in signed-in expired cli
   mates-none mates-listed mate-idle mate-working mate-stopped mate-mismatch mate-peek \
   add-mate-scope add-mate-projects add-mate-name add-mate-runtime add-mate-confirm add-mate-created add-mate-refused \
   mate-retire-confirm mate-retire-refused mate-message mate-replied mate-escalation mate-escalation-answered \
-  mate-routed mate-from-chat; do
+  mate-routed mate-from-chat \
+  workers-fresh workers-settings workers-claude-refused workers-crew; do
   headless --scene "$scene" --snap "$out/$scene.png"
   headless --scene "$scene" --tree "$out/$scene.json"
 done
@@ -365,7 +366,7 @@ check menus-shortcut.json yes '"key": "settings-page"'
 # Firstmate's rules: the page with what two rules did, a merge question that names the pull
 # request, and a write into a project waiting for the captain.
 check settings.json yes '"key": "rules"'
-check settings.json yes '"text": "7 of 7 on"'
+check settings.json yes '"text": "8 of 8 on"'
 check rules-settings.json yes '"key": "rules-page"'
 check rules-settings.json yes '"key": "guard-merge-through-script"'
 check rules-settings.json yes '"key": "guard-publish-asks-captain-toggle"'
@@ -378,6 +379,30 @@ check rules-merge-ask.json yes 'Firstmate'"'"'s hard rule 2: never merge a pull 
 check rules-merge-ask.json yes '"key": "answer-1-0"'
 check rules-project-ask.json yes 'Let the chief of staff edit /tmp/velvet-hammer/rules-project-ask/data/home/projects/site/README.md?'
 check rules-project-ask.json yes '"key": "answer-1-1"'
+# Workers on other providers: nothing set up, pi installed from a stand-in release with
+# firstmate pointed at it, a Claude model refused for pi, and what each worker runs on.
+check settings.json yes '"key": "workers"'
+check settings.json yes '"text": "1 nickname · pi not installed"'
+check workers-fresh.json yes '"key": "workers-page"'
+check workers-fresh.json yes '"text": "pi 1.5.2 is not installed."'
+check workers-fresh.json yes '"key": "workers-install"'
+check workers-fresh.json yes '"text": "No opencode Go key is in the keychain yet."'
+check workers-fresh.json yes '"key": "workers-connect"'
+check workers-fresh.json yes '"key": "nickname-0"'
+check workers-fresh.json yes 'pi · opencode-go/deepseek-v4.1-flash'
+check workers-settings.json yes 'It lists 6 models for the keys it has.'
+check workers-settings.json yes '"text": "Your opencode Go key is in the keychain."'
+check workers-settings.json yes 'may spend only opencode Go.'
+check workers-settings.json no  '"key": "workers-connect"'
+check workers-settings.json yes '"key": "nickname-1"'
+check workers-settings.json yes 'claude · opus · effort high'
+check workers-claude-refused.json yes '"key": "nickname-problem"'
+check workers-claude-refused.json yes 'never through pi. Choose Claude Code for a Claude model.'
+check workers-claude-refused.json no  '"key": "nickname-2"'
+check workers-crew.json yes '"key": "crew-lab-verify-runs"'
+check workers-crew.json yes '"text": "pi · opencode-go/deepseek-v4.1-flash"'
+check workers-crew.json yes '"text": "claude · claude-sonnet-5-5"'
+check rules-settings.json yes '"key": "guard-claude-on-subscription"'
 # Find in the conversation: the count and the highlighted matches, the current one after
 # stepping, no matches, and the history kept from an earlier session above its divider.
 check find.json yes '"key": "find-bar"'

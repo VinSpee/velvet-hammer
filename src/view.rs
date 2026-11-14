@@ -20,9 +20,11 @@ mod policy;
 mod settings;
 mod tool;
 mod ui;
+mod workers;
 use policy::{rules_page, visuals_page};
 use settings::{all_settings, menu_bar, settings_page};
 use tool::{picture_page, tool_use};
+use workers::{workers_page, workers_summary};
 
 pub fn view(s: &App, cx: &mut Cx<App>) -> El {
     let t = tok::theme(cx.system_dark());
@@ -40,6 +42,7 @@ pub fn view(s: &App, cx: &mut Cx<App>) -> El {
         (Showing::Activity, ..) => activity_page(s, t, cx.system_dark()),
         (Showing::Visuals, ..) => visuals_page(s, t, cx.system_dark()),
         (Showing::Rules, ..) => rules_page(s, t, cx.system_dark()),
+        (Showing::Workers, ..) => workers_page(s, t, cx.system_dark()),
         (Showing::Picture(id), ..) => picture_page(s, id, t, cx.system_dark()),
         (_, Some(agent), _) => peek(s, agent, t, cx.system_dark()),
         // A chief of staff that runs in the managed clone cannot chat until it is installed.
@@ -117,30 +120,34 @@ fn agents(s: &App, t: Theme, dark: bool) -> El {
     for crew in &s.captain.crew {
         let id = crew.id.clone();
         let selected = s.showing == Showing::Crew(id.clone());
-        list = list.child(
-            col()
-                .key(format!("crew-{id}"))
-                .role("button")
-                .label(format!("Peek at {}", crew.name))
-                .focusable(true)
-                .padding(space::S2)
-                .gap(2.0)
-                .radius(radius::SM)
-                .fill(if selected { t.control_off } else { t.card })
-                .on_press(move |s: &mut App| s.showing = Showing::Crew(id.clone()))
-                .child(
-                    text(crew.name.clone())
-                        .font(type_::TITLE)
-                        .color(t.text)
-                        .wrap(),
-                )
-                .child(
-                    text(format!("{} \u{b7} {}", crew.state, crew.doing))
-                        .font(type_::LABEL)
-                        .color(t.text_secondary)
-                        .wrap(),
-                ),
-        );
+        list =
+            list.child(
+                col()
+                    .key(format!("crew-{id}"))
+                    .role("button")
+                    .label(format!("Peek at {}", crew.name))
+                    .focusable(true)
+                    .padding(space::S2)
+                    .gap(2.0)
+                    .radius(radius::SM)
+                    .fill(if selected { t.control_off } else { t.card })
+                    .on_press(move |s: &mut App| s.showing = Showing::Crew(id.clone()))
+                    .child(
+                        text(crew.name.clone())
+                            .font(type_::TITLE)
+                            .color(t.text)
+                            .wrap(),
+                    )
+                    .child(
+                        text(format!("{} \u{b7} {}", crew.state, crew.doing))
+                            .font(type_::LABEL)
+                            .color(t.text_secondary)
+                            .wrap(),
+                    )
+                    .children(crew.runs.as_ref().map(|runs| {
+                        note(&format!("crew-{}-runs", crew.id), runs, t).wrap_anywhere()
+                    })),
+            );
     }
     if s.mates.records.is_some() {
         list = list.child(mates::mate_list(s, t, dark));
