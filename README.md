@@ -26,7 +26,11 @@ agents list shows the tasks firstmate has in flight, and selecting one shows tha
 terminal. The **Projects** list shows the projects in firstmate's records, and **Add project**
 starts a guided conversation in which the chief of staff adds one with firstmate's own procedure;
 with no projects yet, the chat opens with a prompt to add the first (see
-[Projects](docs/firstmate.md#projects)). [Where the integration stands](docs/firstmate.md#where-the-integration-stands) lists
+[Projects](docs/firstmate.md#projects)). **Second mates** lists firstmate's second mates with
+how each one stands; **Add second mate** walks you through creating one and runs firstmate's
+own scripts after your yes, and each mate's page starts, interrupts, relaunches or retires it,
+peeks at its terminal, and holds a conversation with it and the questions it escalated (see
+[Second mates](docs/firstmate.md#second-mates)). [Where the integration stands](docs/firstmate.md#where-the-integration-stands) lists
 what works end to end and what is not verified. A stub with sample data stands in for the agent layer in headless scenes and tests. The interface
 and code will change.
 
@@ -38,8 +42,9 @@ been tested yet (see [Trying the real sign-in](#trying-the-real-sign-in)).
 The window has three columns:
 
 - **Agents** (left): the subagents the chief of staff manages. Selecting one opens a peek at its
-  transcript in place of the chat; **Back to chat** closes it. Under them, **Projects** lists the
-  projects in firstmate's records with **Add project**. A **Firstmate** card at the bottom
+  transcript in place of the chat; **Back to chat** closes it. Under them, **Second mates** lists
+  firstmate's second mates with **Add second mate**, and selecting one opens its page; then
+  **Projects** lists the projects in firstmate's records with **Add project**. A **Firstmate** card at the bottom
   shows the state of the managed firstmate clone and opens a page for installing and updating it.
   Above it, **Visual replies**, **Firstmate rules** and **Tool approval** cards show each
   setting in a few words and open its page; the tool-approval page links to the activity log.
@@ -328,7 +333,10 @@ scenes have the fake `claude` use Read and Bash on the files in `scripts/fixture
 they need no Claude account; each waits for the fake's real processes before rendering. The
 firstmate and projects scenes run `git` on a scratch upstream repository under `target/`, so
 they need no network; the projects scenes write the registry firstmate's procedure would write,
-because the fake `claude` cannot run that procedure. The
+because the fake `claude` cannot run that procedure. The `mates`, `mate` and `add-mate` scenes run the fake
+`claude` as firstmate in a scratch home under `/tmp/velvet-hammer`, with stand-ins of
+firstmate's second-mate scripts that write what the real ones did (see
+[Second mates](docs/firstmate.md#second-mates)). The
 walkthrough runs on the stub's `chat` scene. The `.json` files are Rune element trees. The script then checks them for the keys and text each
 state must or must not have (for example `needs-input`, `input-1`, `for-you-empty`, `peek`) and
 exits non-zero if any check fails.

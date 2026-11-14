@@ -14,6 +14,7 @@ use crate::firstmate::{Checkout, Distro, Firstmate, Standing, Work};
 use crate::model::{Action, Agent, Author, Item, ItemKind, Message, Plan, Status};
 use crate::projects::Project;
 
+mod mates;
 mod policy;
 mod tool;
 mod ui;
@@ -28,6 +29,8 @@ pub fn view(s: &App, cx: &mut Cx<App>) -> El {
     };
     let main = match (&s.showing, peeked, &s.status) {
         (Showing::Crew(id), ..) => crew_peek(s, id, t, cx.system_dark()),
+        (Showing::Mate(id), ..) => mates::mate_page(s, id, t, cx.system_dark()),
+        (Showing::AddMate, ..) => mates::add_page(s, t, cx.system_dark()),
         (Showing::Firstmate, ..) => firstmate_page(&s.firstmate, t, cx.system_dark()),
         (Showing::Approvals, ..) => approvals_page(s, t, cx.system_dark()),
         (Showing::Activity, ..) => activity_page(s, t, cx.system_dark()),
@@ -62,7 +65,7 @@ pub fn view(s: &App, cx: &mut Cx<App>) -> El {
 }
 
 fn agents(s: &App, t: Theme, dark: bool) -> El {
-    let mut list = col()
+    let list = col()
         .key("agents")
         .role("list")
         .label("Agents")
@@ -73,10 +76,12 @@ fn agents(s: &App, t: Theme, dark: bool) -> El {
         .gap(space::S1)
         .fill(t.card)
         .child(heading("Agents", t));
+    // The agents, second mates and projects scroll, so the cards under them stay in view.
+    let mut items = col().gap(space::S1);
     for a in &s.ws.agents {
         let id = a.id;
         let selected = s.showing == Showing::Peek(id);
-        list = list.child(
+        items = items.child(
             col()
                 .key(format!("agent-{id}"))
                 .role("button")
@@ -100,7 +105,7 @@ fn agents(s: &App, t: Theme, dark: bool) -> El {
     for crew in &s.captain.crew {
         let id = crew.id.clone();
         let selected = s.showing == Showing::Crew(id.clone());
-        list = list.child(
+        items = items.child(
             col()
                 .key(format!("crew-{id}"))
                 .role("button")
@@ -125,46 +130,58 @@ fn agents(s: &App, t: Theme, dark: bool) -> El {
                 ),
         );
     }
+    if s.mates.records.is_some() {
+        items = items.child(mates::mate_list(s, t, dark));
+    }
     if let Some(projects) = &s.projects {
-        list = list.child(project_list(s, projects, t, dark));
+        items = items.child(project_list(s, projects, t, dark));
     }
     let on = guard::Rule::ALL
         .iter()
         .filter(|r| s.rules.settings().on(**r))
         .count();
-    list.child(el().grow(1.0))
-        .child(nav_card(
-            s,
-            "visuals",
-            "Visual replies",
-            s.visuals.settings().label().to_string(),
-            &[Showing::Visuals],
-            t,
-        ))
-        .child(nav_card(
-            s,
-            "rules",
-            "Firstmate rules",
-            format!("{on} of {} on", guard::Rule::ALL.len()),
-            &[Showing::Rules],
-            t,
-        ))
-        .child(nav_card(
-            s,
-            "approvals",
-            "Tool approval",
-            s.approvals.settings().mode.label().to_string(),
-            &[Showing::Approvals, Showing::Activity],
-            t,
-        ))
-        .child(nav_card(
-            s,
-            "firstmate",
-            "Firstmate",
-            firstmate_summary(&s.firstmate).to_string(),
-            &[Showing::Firstmate],
-            t,
-        ))
+    list.child(
+        col()
+            .key("agents-scroll")
+            .grow(1.0)
+            .min_h(0.0)
+            .scroll(ScrollSpec {
+                stick_bottom: false,
+            })
+            .child(items),
+    )
+    .child(nav_card(
+        s,
+        "visuals",
+        "Visual replies",
+        s.visuals.settings().label().to_string(),
+        &[Showing::Visuals],
+        t,
+    ))
+    .child(nav_card(
+        s,
+        "rules",
+        "Firstmate rules",
+        format!("{on} of {} on", guard::Rule::ALL.len()),
+        &[Showing::Rules],
+        t,
+    ))
+    .child(nav_card(
+        s,
+        "approvals",
+        "Tool approval",
+        s.approvals.settings().mode.label().to_string(),
+        &[Showing::Approvals, Showing::Activity],
+        t,
+    ))
+    .child(nav_card(
+        s,
+        "firstmate",
+        "Firstmate",
+        firstmate_summary(&s.firstmate).to_string(),
+        &[Showing::Firstmate],
+        t,
+    ))
 }
 
 /// A card at the bottom of the agents column that opens the first of `pages`, and is
@@ -1219,13 +1236,21 @@ fn warning(key: &str, words: &str, dark: bool) -> El {
 /// steers a crewmate through the chief of staff.
 fn crew_peek(s: &App, id: &str, t: Theme, dark: bool) -> El {
     let crew = s.captain.crew.iter().find(|c| c.id == id);
+    let mate = s.captain.mate(id).is_some() || s.mates.get(id).is_some();
     let (name, doing) = match crew {
         Some(crew) => (
-            crew.name.as_str(),
+            crew.name.clone(),
             format!("{} \u{b7} {}", crew.state, crew.doing),
         ),
-        None => (id, "No longer in flight.".to_string()),
+        None if mate => (
+            format!("second mate {id}"),
+            s.captain
+                .mate(id)
+                .map_or(String::new(), |m| m.doing.clone()),
+        ),
+        None => (id.to_string(), "No longer in flight.".to_string()),
     };
+    let back = id.to_string();
     let header = row()
         .gap(space::S2)
         .center_y()
@@ -1236,9 +1261,15 @@ fn crew_peek(s: &App, id: &str, t: Theme, dark: bool) -> El {
                 .child(heading(&format!("Peeking at {name}"), t))
                 .child(note("crew-doing", &doing, t)),
         )
-        .child(button("peek-close", "Back to chat", t, |s| {
-            s.showing = Showing::Chat
-        }));
+        .child(if mate {
+            button("peek-close", "Back to its page", t, move |s| {
+                s.open_mate(&back)
+            })
+        } else {
+            button("peek-close", "Back to chat", t, |s| {
+                s.showing = Showing::Chat
+            })
+        });
     let pane = match s.peek.as_ref().and_then(|p| p.pane.as_ref()) {
         None => note("crew-peek-reading", "Reading its terminal\u{2026}", t),
         Some(Err(problem)) => warning("crew-peek-problem", problem, dark),
@@ -1269,8 +1300,13 @@ fn crew_peek(s: &App, id: &str, t: Theme, dark: bool) -> El {
         .child(pane)
         .child(note(
             "crew-peek-help",
-            "The last 40 lines of this crewmate's terminal, read by firstmate's bin/fm-peek.sh. \
-             To steer it, tell your chief of staff.",
+            if mate {
+                "The last 40 lines of this second mate's terminal, read by firstmate's \
+                 bin/fm-peek.sh. To steer it, send it a message from its page."
+            } else {
+                "The last 40 lines of this crewmate's terminal, read by firstmate's \
+                 bin/fm-peek.sh. To steer it, tell your chief of staff."
+            },
             t,
         ))
 }
@@ -1406,6 +1442,29 @@ fn needs_input(s: &App, t: Theme, dark: bool) -> El {
     }
     for hold in &s.captain.holds {
         let key = hold.key.clone();
+        // A second mate's hold is answered to that mate, which owns it.
+        if let Some(owner) = hold.owner.clone() {
+            let answering = s.mates.answering == Some((owner.clone(), key.clone()));
+            rows.push(
+                words_card(
+                    &format!("hold-{owner}-{key}"),
+                    &format!("{key} \u{b7} from second mate {owner}"),
+                    &hold.question,
+                    t,
+                )
+                .child(row().child(button(
+                    &format!("answer-{owner}-{key}"),
+                    if answering {
+                        "Answering on its page"
+                    } else {
+                        "Answer"
+                    },
+                    t,
+                    move |s| s.answer_mate_hold(&owner, &key),
+                ))),
+            );
+            continue;
+        }
         let answering = s.answering.as_deref() == Some(&hold.key);
         rows.push(
             words_card(&format!("hold-{key}"), &hold.key, &hold.question, t).child(row().child(

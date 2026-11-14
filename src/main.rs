@@ -12,6 +12,7 @@ mod guard;
 mod markdown;
 mod model;
 mod projects;
+mod secondmates;
 mod store;
 mod tools;
 mod ui;
@@ -33,6 +34,7 @@ use claude::Claude;
 use firstmate::{Checkout, Distro, Firstmate, Work, lab::Lab};
 use model::{Action, Author, Id, Message, Status, Workspace};
 use projects::Project;
+use secondmates::Step;
 use tools::{Handler, Picture};
 
 /// All app state: the workspace the agent layer fills, plus what only the UI needs.
@@ -75,6 +77,8 @@ pub struct App {
     picking: Option<Receiver<Result<Option<PathBuf>, String>>>,
     /// Why the folder dialog could not open.
     pub pick_problem: Option<String>,
+    /// Firstmate's second mates: their records, the flow that adds one, and the actions on them.
+    pub mates: secondmates::Mates,
     wake: Option<Waker>,
     /// The captain hold the next message answers, by its key.
     pub answering: Option<String>,
@@ -116,6 +120,10 @@ pub enum Showing {
     Peek(Id),
     /// A firstmate crewmate's terminal, by its task id.
     Crew(String),
+    /// A second mate's page, by its id.
+    Mate(String),
+    /// The guided flow for adding a second mate.
+    AddMate,
     /// The managed firstmate clone: its state, and installing and updating it.
     Firstmate,
     /// The tool-approval settings.
@@ -139,6 +147,8 @@ impl App {
         let project_watcher = chief
             .workplace()
             .map(|_| projects::Watcher::start(&firstmate.home_dir()));
+        let home = firstmate.home_dir();
+        let mates = secondmates::Mates::new(chief.workplace().map(|_| home.as_path()), data);
         let approvals = Store::open(data);
         let visuals = store::Store::<visual::Mode>::open(data);
         let rules = store::Store::<guard::Settings>::open(data);
@@ -177,6 +187,7 @@ impl App {
             picker: projects::pick_folder,
             picking: None,
             pick_problem: None,
+            mates,
             wake: None,
             answering: None,
             draft: TextEdit::default(),
@@ -199,6 +210,7 @@ impl App {
         let events = self.chief.events();
         let mut changed = self.firstmate.poll() | !events.is_empty();
         changed |= self.follow_peek();
+        changed |= self.drain_mates();
         if let Some(projects) = self.project_watcher.as_mut().and_then(|w| w.poll()) {
             self.projects = Some(projects);
             changed = true;
@@ -259,6 +271,14 @@ impl App {
             Event::Withdrawn(id) => self.ws.items.retain(|i| i.id != id),
             Event::Activity(entry) => self.activity.record(entry),
             Event::Notice(text) => self.ws.chat.push(Message::new(Author::App, text)),
+            Event::AddMate(scope) => {
+                self.ws.chat.push(Message::new(
+                    Author::App,
+                    "Your chief of staff opened Add a second mate. Answer its questions there; \
+                     nothing is created until you say yes.",
+                ));
+                self.add_mate(Some(scope));
+            }
             // A view tool use arrives first as it starts streaming, then whole.
             Event::Tool(tool) => {
                 let id = tool.id.clone();
@@ -758,6 +778,7 @@ fn setup(s: &mut App, wake: Waker) {
     if let Some(watcher) = &mut s.project_watcher {
         watcher.connect(wake.clone());
     }
+    s.mates.connect(wake.clone());
     s.wake = Some(wake.clone());
     let _ = s.window_wake.set(wake.clone());
     s.chief.connect(wake);
@@ -1084,12 +1105,286 @@ fn main() {
                 s.send();
                 s.settle(|s| s.ws.needs_input().next().is_some());
             }),
+            // Second mates, on the fake `claude` running as firstmate in a lab home whose
+            // stand-in scripts behave as firstmate's did in a scratch home: none yet, five in
+            // each state, each one's page, a peek at one's terminal, the guided add at each
+            // step, its outcome and a refusal, a refused retirement, a message and its reply,
+            // an escalation answered, work the chief of staff routed, and the add opened from
+            // the chat.
+            ("mates-none", |s| {
+                let lab = Lab::at(&Path::new("/tmp/velvet-hammer").join("mates-none"));
+                *s = fake_in_firstmate(&lab, true);
+                s.settle(|s| s.mates.records.is_some() && s.projects.is_some());
+            }),
+            ("mates-listed", |s| *s = mates_lab("mates-listed").0),
+            ("mate-idle", |s| {
+                *s = mates_lab("mate-idle").0;
+                s.open_mate("docs");
+            }),
+            ("mate-working", |s| {
+                *s = mates_lab("mate-working").0;
+                s.open_mate("billing");
+            }),
+            ("mate-stopped", |s| {
+                *s = mates_lab("mate-stopped").0;
+                s.open_mate("infra");
+            }),
+            ("mate-mismatch", |s| {
+                *s = mates_lab("mate-mismatch").0;
+                s.open_mate("web");
+            }),
+            ("mate-peek", |s| {
+                let (app, lab) = mates_lab("mate-peek");
+                lab.pane("docs", "$ bin/fm-watch.sh\nno routed work; waiting quietly");
+                *s = app;
+                s.showing = Showing::Crew("docs".into());
+                s.settle(|s| s.peek.as_ref().is_some_and(|p| p.pane.is_some()));
+            }),
+            ("add-mate-scope", |s| {
+                *s = adding_mate("add-mate-scope", Step::Scope).0
+            }),
+            ("add-mate-projects", |s| {
+                *s = adding_mate("add-mate-projects", Step::Projects).0
+            }),
+            ("add-mate-name", |s| {
+                *s = adding_mate("add-mate-name", Step::Name).0
+            }),
+            ("add-mate-runtime", |s| {
+                *s = adding_mate("add-mate-runtime", Step::Runtime).0
+            }),
+            ("add-mate-confirm", |s| {
+                *s = adding_mate("add-mate-confirm", Step::Confirm).0
+            }),
+            ("add-mate-created", |s| {
+                let (app, lab) = adding_mate("add-mate-created", Step::Confirm);
+                *s = app;
+                s.create_mate();
+                s.settle_mates();
+                // Firstmate's snapshot now reports the new mate, idle in its new session.
+                lab.bearings(&with_mate(bearings::MATES, "payments"));
+                s.settle(|s| s.captain.mate("payments").is_some() && replied(s));
+            }),
+            ("add-mate-refused", |s| {
+                let (app, lab) = adding_mate("add-mate-refused", Step::Confirm);
+                lab.refuse("fm-home-seed.sh", SEED_REFUSAL);
+                *s = app;
+                s.create_mate();
+                s.settle_mates();
+            }),
+            ("mate-retire-confirm", |s| {
+                *s = mates_lab("mate-retire-confirm").0;
+                s.open_mate("billing");
+                s.confirm_mate(secondmates::Op::Retire("billing".into()));
+            }),
+            ("mate-retire-refused", |s| {
+                let (app, lab) = mates_lab("mate-retire-refused");
+                lab.mate_child("billing", "invoice-retries");
+                *s = app;
+                s.open_mate("billing");
+                s.confirm_mate(secondmates::Op::Retire("billing".into()));
+                s.confirmed_mate();
+                s.settle_mates();
+            }),
+            ("mate-message", |s| {
+                *s = mates_lab("mate-message").0;
+                message_docs(s);
+            }),
+            ("mate-replied", |s| {
+                let (app, lab) = mates_lab("mate-replied");
+                *s = app;
+                message_docs(s);
+                lab.mate_says("docs", &docs_reply());
+                s.settle(|s| {
+                    s.mates
+                        .channel("docs")
+                        .is_some_and(|c| c.conversation().len() == 4)
+                });
+            }),
+            ("mate-escalation", |s| {
+                *s = mates_lab("mate-escalation").0;
+                s.answer_mate_hold("support", "refund-window");
+            }),
+            ("mate-escalation-answered", |s| {
+                *s = mates_lab("mate-escalation-answered").0;
+                s.answer_mate_hold("support", "refund-window");
+                s.mates.draft("support").text = "30 days, counted from delivery.".into();
+                s.send_to_mate("support");
+                s.settle_mates();
+                s.settle(|s| {
+                    s.mates
+                        .channel("support")
+                        .is_some_and(|c| !c.sent.is_empty())
+                });
+            }),
+            ("mate-routed", |s| {
+                *s = mates_lab("mate-routed").0;
+                say(
+                    s,
+                    "shell: bin/fm-send.sh docs Add a search page to the docs",
+                );
+            }),
+            ("mate-from-chat", |s| {
+                *s = mates_lab("mate-from-chat").0;
+                s.draft.text = "mate: the billing service, its invoices and payment retries".into();
+                s.send();
+                s.settle(|s| s.showing == Showing::AddMate);
+            }),
         ],
         min_size: Some((900.0, 560.0)),
         setup: Some(setup),
         poll: Some(poll),
         ..AppSpec::new("Velvet Hammer", (1100.0, 720.0), init, view::view)
     });
+}
+
+/// The projects in the second-mate scenes: the sample registry and one local-only project.
+const MATE_PROJECTS: &str = "# Projects\n\n\
+    - velvet-hammer [no-mistakes-prod-only] - The desktop app (added 2026-11-13)\n\
+    - site [direct-PR +yolo branch=web/] - The marketing site (added 2026-11-02)\n\
+    - scratch [local-only] - Experiments (added 2026-11-10)\n";
+
+/// A refusal `bin/fm-home-seed.sh` prints, in its own words.
+const SEED_REFUSAL: &str = "error: seeded project site at /tmp/velvet-hammer/add-mate-refused/\
+    data/secondmates/payments/projects/site is not initialized for no-mistakes; refusing to \
+    mutate preexisting clone";
+
+/// The reply the docs mate appends to its parent channel, as `bin/fm-secondmate-report.sh`
+/// appends one, answering the message `message_docs` sends a moment before.
+fn docs_reply() -> String {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs());
+    format!(
+        "done [corr=0000000000000002] [at={}]: Not yet. The search page is **built** and \
+         waits for its pull request to merge. (via-helper)",
+        now + 60
+    )
+}
+
+/// [`mates_app`] in a lab at `/tmp/velvet-hammer/<name>`, a short path for screenshots.
+fn mates_lab(name: &str) -> (App, Lab) {
+    let lab = Lab::at(&Path::new("/tmp/velvet-hammer").join(name));
+    (mates_app(&lab), lab)
+}
+
+/// The app on the fake `claude` running as firstmate in `lab`, with five second mates, one in
+/// each state the bearings fixture reports, a conversation with `docs` and a hold `support`
+/// escalated.
+fn mates_app(lab: &Lab) -> App {
+    lab.registry(MATE_PROJECTS);
+    lab.bearings(bearings::MATES);
+    for (id, charter, scope, projects) in [
+        (
+            "billing",
+            "Owns the billing service: invoices, payment retries and dashboards.",
+            "billing service work",
+            &["site"][..],
+        ),
+        (
+            "docs",
+            "Keeps the documentation site accurate and current.",
+            "documentation site work: pages, examples and the docs build",
+            &["velvet-hammer"][..],
+        ),
+        (
+            "infra",
+            "Looks after deploys and the build machines.",
+            "deploy and CI infrastructure",
+            &["site"][..],
+        ),
+        (
+            "web",
+            "Runs the marketing site.",
+            "marketing site pages and copy",
+            &["site"][..],
+        ),
+        (
+            "support",
+            "Handles customer support tooling and refunds.",
+            "support tooling and refund policy",
+            &[][..],
+        ),
+    ] {
+        lab.second_mate(id, charter, scope, projects);
+    }
+    lab.mate_inbox(
+        "docs",
+        1,
+        "2026-11-14T00:58:32Z",
+        "ebbe292e407ab6f6",
+        "Please check whether the docs build passes on main.",
+        true,
+    );
+    lab.mate_says(
+        "docs",
+        "done [corr=ebbe292e407ab6f6] [at=1794617925]: The docs build passes on main; the last \
+         run took 41 seconds. (via-helper)",
+    );
+    lab.mate_says(
+        "support",
+        "needs-decision [key=captain-hold-refund-window-1] [at=1794617854]: captain hold \
+         refund-window: Refund within 14 days or 30 days of purchase?",
+    );
+    let mut app = fake_in_firstmate(lab, true);
+    app.settle(|s| s.mates.list().len() == 5 && s.captain.mates.len() == 5 && s.projects.is_some());
+    app
+}
+
+/// The add flow in `mates_lab`, answered up to `step`.
+fn adding_mate(name: &str, step: Step) -> (App, Lab) {
+    let (app, lab) = mates_lab(name);
+    (answered(app, &lab, step), lab)
+}
+
+/// The add flow in `app`, answered up to `step`. The lab's firstmate names two runtimes, so the
+/// flow asks which one.
+fn answered(mut app: App, lab: &Lab, step: Step) -> App {
+    lab.harness("secondmate", "codex");
+    app.add_mate(None);
+    let answers: [&dyn Fn(&mut App); 4] = [
+        &|s| s.mates.adding.charter.text = "Payments: card retries, refunds and payouts.".into(),
+        &|s| s.toggle_mate_project("site"),
+        &|s| s.mates.adding.name.text = "payments".into(),
+        &|s| s.mates.adding.runtime = 1,
+    ];
+    for answer in answers {
+        if app.mates.adding.step() == step {
+            break;
+        }
+        answer(&mut app);
+        app.add_mate_next();
+    }
+    app
+}
+
+/// The bearings snapshot `json` with one more second mate, idle in a running session.
+fn with_mate(json: &str, id: &str) -> String {
+    let mut doc: serde_json::Value = serde_json::from_str(json).expect("a bearings snapshot");
+    doc["secondmates"]
+        .as_array_mut()
+        .expect("secondmates")
+        .push(serde_json::json!({
+            "id": id, "state": "no_active_work", "doing": "No active child work",
+            "provenance": "structured-home", "freshness": "fresh", "age_seconds": 0,
+            "contradiction": false, "reason": "-"
+        }));
+    doc["endpoints"]
+        .as_array_mut()
+        .expect("endpoints")
+        .push(serde_json::json!({
+            "id": id, "backend": "tmux", "target": format!("firstmate:fm-{id}"),
+            "exists": true, "agent": "alive"
+        }));
+    doc.to_string()
+}
+
+/// The captain writes to the docs mate from its page and the message is delivered.
+fn message_docs(s: &mut App) {
+    s.open_mate("docs");
+    s.mates.draft("docs").text = "Is the search page live yet?".into();
+    s.send_to_mate("docs");
+    s.settle_mates();
+    s.settle(|s| s.mates.channel("docs").is_some_and(|c| c.sent.len() == 2));
 }
 
 /// The list the visual-replies scenes and tests have the fake send as text.
@@ -3206,6 +3501,307 @@ mod tests {
             send_and_wait(&mut rt, &format!("write: {} Hello", notes.display())),
             format!("You said: Write was allowed to run {}", notes.display())
         );
+    }
+
+    fn calls(lab: &Lab, script: &str) -> Vec<String> {
+        lab.calls()
+            .lines()
+            .filter(|l| l.starts_with(script))
+            .map(str::to_string)
+            .collect()
+    }
+
+    fn mates_idle(s: &App) -> bool {
+        s.mates.running().is_none()
+    }
+
+    #[test]
+    fn with_no_second_mates_the_list_says_so_and_offers_to_add_one() {
+        let lab = Lab::new();
+        let mut rt = runtime_with(fake_in_firstmate(&lab, true));
+        wait(&mut rt, |s| s.mates.records.is_some());
+        assert!(rt.find("mates-none").is_some());
+        tap_scrolled(&mut rt, "add-mate");
+        assert_eq!(rt.state.showing, Showing::AddMate);
+        assert!(rt.find("add-mate-scope").is_some());
+        // A chief of staff that is not firstmate has no second mates to show.
+        let rt = runtime();
+        assert!(rt.find("mates").is_none());
+    }
+
+    #[test]
+    fn each_mate_shows_its_session_its_work_and_where_the_records_disagree() {
+        let lab = Lab::new();
+        let mut rt = runtime_with(mates_app(&lab));
+        let standing =
+            |rt: &Runtime<App>, id: &str| texts_under(rt, &format!("mate-{id}-standing"));
+        assert_eq!(standing(&rt, "docs"), ["running \u{b7} idle"]);
+        assert_eq!(standing(&rt, "billing"), ["running \u{b7} working"]);
+        assert_eq!(standing(&rt, "infra"), ["stopped \u{b7} idle"]);
+        assert_eq!(standing(&rt, "support"), ["running \u{b7} waiting on you"]);
+        assert!(rt.find("mate-web-mismatch").is_some());
+        assert!(rt.find("mate-docs-mismatch").is_none());
+
+        tap(&mut rt, "mate-billing");
+        assert_eq!(rt.state.showing, Showing::Mate("billing".into()));
+        assert!(rt.find("mate-child-invoice-retries").is_some());
+        assert!(rt.find("mate-child-billing-dashboard").is_some());
+        assert!(rt.find("mate-interrupt").is_some());
+        assert!(rt.find("mate-start").is_none());
+
+        tap(&mut rt, "mate-infra");
+        assert!(rt.find("mate-start").is_some());
+        assert!(rt.find("mate-interrupt").is_none());
+        assert!(rt.find("mate-children-none").is_some());
+
+        tap(&mut rt, "mate-web");
+        let mismatch = texts_under(&rt, "mate-mismatch").join(" ");
+        assert!(
+            mismatch.contains("invalid home: not a seeded secondmate home"),
+            "{mismatch}"
+        );
+        assert!(rt.find("mate-edit-note").is_some());
+    }
+
+    #[test]
+    fn the_guided_add_asks_one_question_at_a_time_and_creates_nothing_before_the_yes() {
+        let lab = Lab::new();
+        lab.harness("secondmate", "codex");
+        let mut rt = runtime_with(mates_app(&lab));
+        tap_scrolled(&mut rt, "add-mate");
+        tap_scrolled(&mut rt, "add-mate-next");
+        assert!(rt.find("add-mate-problem").is_some(), "a scope is required");
+        rt.state.mates.adding.charter.text = "Payments: card retries and refunds.".into();
+        tap_scrolled(&mut rt, "add-mate-next");
+        assert_eq!(rt.state.mates.adding.step(), Step::Projects);
+        // A local-only project stays with the main firstmate.
+        tap_scrolled(&mut rt, "add-mate-project-scratch");
+        assert!(rt.state.mates.adding.projects.is_empty());
+        tap_scrolled(&mut rt, "add-mate-project-site");
+        tap_scrolled(&mut rt, "add-mate-next");
+        assert_eq!(rt.state.mates.adding.step(), Step::Name);
+        assert_eq!(rt.state.mates.adding.name.text, "site");
+        rt.state.mates.adding.name.text = "docs".into();
+        tap_scrolled(&mut rt, "add-mate-next");
+        assert!(texts_under(&rt, "add-mate-problem")[0].contains("already a second mate"));
+        rt.state.mates.adding.name.text = "payments".into();
+        tap_scrolled(&mut rt, "add-mate-next");
+        assert_eq!(rt.state.mates.adding.step(), Step::Runtime);
+        tap_scrolled(&mut rt, "add-mate-runtime-1");
+        tap_scrolled(&mut rt, "add-mate-next");
+        assert_eq!(rt.state.mates.adding.step(), Step::Confirm);
+        let plan = texts_under(&rt, "add-mate-plan").join("\n");
+        assert!(plan.contains("bin/fm-home-seed.sh payments"), "{plan}");
+        assert!(plan.contains("--harness claude"), "{plan}");
+        assert!(plan.contains("Nothing remote is created"), "{plan}");
+        assert!(calls(&lab, "fm-home-seed.sh").is_empty());
+        assert!(calls(&lab, "fm-spawn.sh").is_empty());
+
+        tap_scrolled(&mut rt, "add-mate-yes");
+        wait(&mut rt, |s| s.showing == Showing::Mate("payments".into()));
+        let home = lab.data.join("secondmates/payments");
+        assert_eq!(
+            calls(&lab, "fm-home-seed.sh"),
+            [format!("fm-home-seed.sh payments {} site", home.display())]
+        );
+        assert_eq!(
+            calls(&lab, "fm-spawn.sh"),
+            ["fm-spawn.sh payments --secondmate --harness claude"]
+        );
+        // The chief of staff is asked to do the rest of firstmate's procedure.
+        let asked = rt
+            .state
+            .ws
+            .chat
+            .iter()
+            .find(|m| m.author == Author::Captain);
+        assert!(
+            asked.is_some_and(|m| m.text.contains("I added the second mate payments")
+                && m.text.contains("bin/fm-backlog-handoff.sh")),
+            "{:?}",
+            rt.state.ws.chat
+        );
+        wait(&mut rt, |s| s.mates.get("payments").is_some());
+        assert!(texts_under(&rt, "mate-outcome")[0].contains("created payments"));
+    }
+
+    #[test]
+    fn a_refused_seed_is_shown_in_firstmates_words_and_starts_nothing() {
+        let lab = Lab::new();
+        let app = answered(mates_app(&lab), &lab, Step::Confirm);
+        lab.refuse(
+            "fm-home-seed.sh",
+            "error: project site not found at /h/projects/site",
+        );
+        let mut rt = runtime_with(app);
+        tap_scrolled(&mut rt, "add-mate-yes");
+        wait(&mut rt, mates_idle);
+        let problem = texts_under(&rt, "add-mate-problem").join(" ");
+        assert!(
+            problem.contains("Firstmate refused to create payments"),
+            "{problem}"
+        );
+        assert!(
+            problem.contains("error: project site not found"),
+            "{problem}"
+        );
+        assert!(calls(&lab, "fm-spawn.sh").is_empty());
+        assert_eq!(rt.state.showing, Showing::AddMate);
+    }
+
+    #[test]
+    fn the_chief_of_staff_opens_the_guided_add_from_the_chat() {
+        let lab = Lab::new();
+        let mut rt = runtime_with(mates_app(&lab));
+        rt.state.draft.text = "mate: the billing service and its refunds".into();
+        rt.state.send();
+        wait(&mut rt, |s| s.showing == Showing::AddMate);
+        assert_eq!(
+            rt.state.mates.adding.charter.text,
+            "the billing service and its refunds"
+        );
+        assert!(notices(&rt)[0].contains("opened Add a second mate"));
+        assert!(calls(&lab, "fm-home-seed.sh").is_empty());
+    }
+
+    #[test]
+    fn actions_run_firstmates_scripts_only_after_a_yes_and_never_force() {
+        let lab = Lab::new();
+        let mut rt = runtime_with(mates_app(&lab));
+        tap(&mut rt, "mate-docs");
+        tap_scrolled(&mut rt, "mate-interrupt");
+        assert!(rt.find("mate-confirm").is_some());
+        tap_scrolled(&mut rt, "mate-confirm-cancel");
+        assert!(calls(&lab, "fm-control.sh").is_empty());
+        tap_scrolled(&mut rt, "mate-interrupt");
+        tap_scrolled(&mut rt, "mate-confirm-yes");
+        wait(&mut rt, mates_idle);
+        tap_scrolled(&mut rt, "mate-relaunch");
+        tap_scrolled(&mut rt, "mate-confirm-yes");
+        wait(&mut rt, mates_idle);
+        assert_eq!(
+            calls(&lab, "fm-control.sh"),
+            [
+                "fm-control.sh docs interrupt",
+                "fm-control.sh docs relaunch --note Relaunched by the captain from Velvet Hammer."
+            ]
+        );
+        tap(&mut rt, "mate-infra");
+        tap_scrolled(&mut rt, "mate-start");
+        tap_scrolled(&mut rt, "mate-confirm-yes");
+        wait(&mut rt, mates_idle);
+        assert_eq!(
+            calls(&lab, "fm-spawn.sh"),
+            ["fm-spawn.sh infra --secondmate"]
+        );
+
+        // Retiring a mate with work in its home is refused, and the app never forces it.
+        lab.mate_child("billing", "invoice-retries");
+        tap(&mut rt, "mate-billing");
+        tap_scrolled(&mut rt, "mate-retire");
+        tap_scrolled(&mut rt, "mate-confirm-yes");
+        wait(&mut rt, mates_idle);
+        let refused = texts_under(&rt, "mate-outcome").join(" ");
+        assert!(
+            refused.contains("REFUSED: secondmate billing still has in-flight work"),
+            "{refused}"
+        );
+        assert!(!refused.contains("WARNING"), "{refused}");
+        assert!(rt.state.mates.get("billing").is_some());
+        // An idle mate retires, and leaves firstmate's registry.
+        tap(&mut rt, "mate-infra");
+        tap_scrolled(&mut rt, "mate-retire");
+        tap_scrolled(&mut rt, "mate-confirm-yes");
+        wait(&mut rt, |s| s.mates.get("infra").is_none());
+        let retired = calls(&lab, "fm-teardown.sh");
+        assert_eq!(retired, ["fm-teardown.sh billing", "fm-teardown.sh infra"]);
+        assert!(retired.iter().all(|c| !c.contains("--force")));
+    }
+
+    #[test]
+    fn a_message_goes_through_firstmates_send_and_its_reply_comes_back_on_the_parent_channel() {
+        let lab = Lab::new();
+        let mut rt = runtime_with(mates_app(&lab));
+        tap(&mut rt, "mate-docs");
+        assert_eq!(
+            texts_under(&rt, "mate-msg-0")[0].split(' ').next(),
+            Some("Firstmate")
+        );
+        rt.state.mates.draft("docs").text = "Is the search page live yet?".into();
+        tap_scrolled(&mut rt, "mate-send");
+        wait(&mut rt, |s| {
+            s.mates.channel("docs").is_some_and(|c| c.sent.len() == 2)
+        });
+        assert_eq!(
+            calls(&lab, "fm-send.sh"),
+            ["fm-send.sh docs Is the search page live yet?"]
+        );
+        assert!(texts_under(&rt, "mate-msg-2")[0].starts_with("You"));
+        lab.mate_says("docs", &docs_reply());
+        wait(&mut rt, |s| {
+            s.mates
+                .channel("docs")
+                .is_some_and(|c| c.conversation().len() == 4)
+        });
+        let reply = texts_under(&rt, "mate-msg-3").join(" ");
+        assert!(reply.contains("waits for its pull request"), "{reply}");
+        // The reply is Markdown, drawn like the chief of staff's.
+        assert!(!reply.contains("**"), "{reply}");
+    }
+
+    #[test]
+    fn an_escalation_is_answered_to_the_mate_that_holds_it() {
+        let lab = Lab::new();
+        let mut rt = runtime_with(mates_app(&lab));
+        assert!(rt.find("hold-support-refund-window").is_some());
+        tap(&mut rt, "answer-support-refund-window");
+        assert_eq!(rt.state.showing, Showing::Mate("support".into()));
+        assert!(rt.find("mate-answering").is_some());
+        rt.state.mates.draft("support").text = "30 days.".into();
+        tap_scrolled(&mut rt, "mate-send");
+        wait(&mut rt, |s| s.mates.answering.is_none() && mates_idle(s));
+        assert_eq!(
+            calls(&lab, "fm-send.sh"),
+            [
+                "fm-send.sh support The captain's answer to your captain hold refund-window: 30 days."
+            ]
+        );
+        // The chief of staff was not asked: the hold is the mate's own.
+        assert!(rt.state.ws.chat.is_empty());
+    }
+
+    #[test]
+    fn work_the_chief_of_staff_routes_shows_which_mate_took_it() {
+        let lab = Lab::new();
+        let mut rt = runtime_with(mates_app(&lab));
+        send_and_wait(
+            &mut rt,
+            "shell: bin/fm-send.sh docs Add a search page to the docs",
+        );
+        let routed = rt
+            .elements()
+            .iter()
+            .filter_map(|e| e.key.clone())
+            .find(|k| k.ends_with("-routed"))
+            .expect("a routed tool use");
+        assert_eq!(texts_under(&rt, &routed)[0], "Routed to second mate docs");
+        tap(&mut rt, &format!("{routed}-open"));
+        assert_eq!(rt.state.showing, Showing::Mate("docs".into()));
+    }
+
+    #[test]
+    fn a_mates_terminal_peek_returns_to_its_page() {
+        let lab = Lab::new();
+        lab.pane("docs", "waiting quietly");
+        let mut rt = runtime_with(mates_app(&lab));
+        tap(&mut rt, "mate-docs");
+        tap_scrolled(&mut rt, "mate-peek");
+        wait(&mut rt, |s| {
+            s.peek.as_ref().is_some_and(|p| p.pane.is_some())
+        });
+        assert_eq!(texts_under(&rt, "crew-pane"), ["waiting quietly"]);
+        tap(&mut rt, "peek-close");
+        assert_eq!(rt.state.showing, Showing::Mate("docs".into()));
     }
 
     #[test]

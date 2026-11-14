@@ -45,6 +45,9 @@ pub enum Event {
     Activity(Entry),
     /// Something Velvet Hammer itself did in the conversation, shown in the chat in its words.
     Notice(String),
+    /// The chief of staff opened the guided flow for adding a second mate, with the scope the
+    /// captain described.
+    AddMate(String),
 }
 
 pub trait ChiefOfStaff {

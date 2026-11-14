@@ -1,0 +1,157 @@
+{
+  "schema": "fm-bearings.v1",
+  "generated": "2026-11-14T00:58:05Z",
+  "home": "lab/home",
+  "prs": "not_requested (run: /bearings include PRs)",
+  "contributions": {
+    "scope": "owned contributions per home",
+    "known": 0,
+    "checked": 0,
+    "counts": {
+      "captain": 0,
+      "fleet": 0,
+      "maintainer": 0,
+      "nobody": 0
+    },
+    "complete": true,
+    "proven_clear": true,
+    "unmeasured_homes": 0,
+    "unreadable_records": 0,
+    "unmeasured": 0,
+    "stale_verdicts": 0,
+    "missing_verdicts": 0,
+    "captain_omitted": 0,
+    "captain": []
+  },
+  "in_flight": [
+    {
+      "id": "billing/invoice-retries",
+      "kind": "ship",
+      "state": "working",
+      "repo": "billing",
+      "name": "Retry failed invoice payments",
+      "doing": "running the retry tests"
+    },
+    {
+      "id": "billing/billing-dashboard",
+      "kind": "scout",
+      "state": "parked",
+      "repo": "billing",
+      "name": "Audit the billing dashboard queries",
+      "doing": "waiting for the report review"
+    }
+  ],
+  "secondmates": [
+    {
+      "id": "billing",
+      "state": "active_child_work",
+      "doing": "billing/invoice-retries: running the retry tests; billing/billing-dashboard: waiting for the report review",
+      "provenance": "structured-home",
+      "freshness": "fresh",
+      "age_seconds": 4,
+      "contradiction": false,
+      "reason": "-"
+    },
+    {
+      "id": "docs",
+      "state": "no_active_work",
+      "doing": "No active child work",
+      "provenance": "structured-home",
+      "freshness": "fresh",
+      "age_seconds": 0,
+      "contradiction": false,
+      "reason": "-"
+    },
+    {
+      "id": "infra",
+      "state": "no_active_work",
+      "doing": "No active child work",
+      "provenance": "structured-home",
+      "freshness": "fresh",
+      "age_seconds": 22,
+      "contradiction": false,
+      "reason": "-"
+    },
+    {
+      "id": "web",
+      "state": "unknown",
+      "doing": "invalid home: not a seeded secondmate home",
+      "provenance": "parent-event-fallback",
+      "freshness": "historical-event",
+      "age_seconds": 43,
+      "contradiction": false,
+      "reason": "invalid home: not a seeded secondmate home"
+    },
+    {
+      "id": "support",
+      "state": "captain_decision",
+      "doing": "Refund window: Refund within 14 days or 30 days of purchase?",
+      "provenance": "structured-home",
+      "freshness": "fresh",
+      "age_seconds": 9,
+      "contradiction": false,
+      "reason": "-"
+    }
+  ],
+  "secondmate_reconcile": [],
+  "decisions_open": [
+    {
+      "id": "support/refund-window",
+      "key": "refund-window",
+      "verb": "captain-hold",
+      "summary": "Refund window: Refund within 14 days or 30 days of purchase?",
+      "question": "Refund window: Refund within 14 days or 30 days of purchase?",
+      "owner": "support"
+    }
+  ],
+  "landed": [],
+  "gates": [],
+  "reports": [],
+  "recorded_prs": [],
+  "unhealthy_endpoints": [
+    {
+      "id": "infra",
+      "backend": "tmux",
+      "target": "firstmate:fm-infra",
+      "exists": false,
+      "agent": "dead"
+    }
+  ],
+  "endpoints": [
+    {
+      "id": "billing",
+      "backend": "tmux",
+      "target": "firstmate:fm-billing",
+      "exists": true,
+      "agent": "alive"
+    },
+    {
+      "id": "docs",
+      "backend": "tmux",
+      "target": "firstmate:fm-docs",
+      "exists": true,
+      "agent": "alive"
+    },
+    {
+      "id": "infra",
+      "backend": "tmux",
+      "target": "firstmate:fm-infra",
+      "exists": false,
+      "agent": "dead"
+    },
+    {
+      "id": "web",
+      "backend": "tmux",
+      "target": "firstmate:fm-web",
+      "exists": true,
+      "agent": "alive"
+    },
+    {
+      "id": "support",
+      "backend": "tmux",
+      "target": "firstmate:fm-support",
+      "exists": true,
+      "agent": "alive"
+    }
+  ]
+}

@@ -2,9 +2,10 @@
 //! 127.0.0.1 that `claude` calls back into. It serves two things, both passed to that one session
 //! as command-line flags so the captain's own Claude settings are never written:
 //!
-//! - an MCP server (`--mcp-config`) with two tools: `app_note`, which puts a note in the
-//!   captain's For you to do panel, and `app_ui`, which shows a json-render view in the chat
-//!   (see [`crate::ui`]);
+//! - an MCP server (`--mcp-config`) with three tools: `app_note`, which puts a note in the
+//!   captain's For you to do panel, `app_ui`, which shows a json-render view in the chat
+//!   (see [`crate::ui`]), and `app_secondmate`, which opens the guided flow for adding a second
+//!   mate (see [`crate::secondmates`]);
 //! - a PreToolUse hook (`--settings`), which applies firstmate's rules (see [`crate::guard`])
 //!   and the captain's tool-approval settings (see [`crate::approval`]) to each tool use: it
 //!   allows it, denies it, or asks the captain to allow or deny it in the Needs your input panel.
@@ -35,6 +36,7 @@ use crate::visual::{self, Turn};
 /// The MCP server's name; Claude Code calls its tools `mcp__velvet-hammer__<tool>`.
 pub const SERVER: &str = "velvet-hammer";
 const NOTE_TOOL: &str = "app_note";
+const SECONDMATE_TOOL: &str = "app_secondmate";
 /// Claude Code's timeout for the hook, in seconds (its default).
 const HOOK_TIMEOUT_SECS: u64 = 600;
 /// Claude Code's timeout for the prompt and stop hooks, which answer at once.
@@ -55,6 +57,8 @@ static NEXT_TICKET: AtomicU64 = AtomicU64::new(1);
 pub enum Call {
     /// `app_note` was called with this text.
     Note(String),
+    /// `app_secondmate` was called with the scope the captain described.
+    AddMate(String),
     /// `claude` wants to use a tool; `title` is the question for the captain, such as "Allow
     /// Bash?", and `input` is all of what it would do, as text, after any firstmate rule's
     /// reason. Send true to allow it,
@@ -316,6 +320,21 @@ fn mcp(request: &Value, serving: &Serving, on_call: &dyn Fn(Call)) -> Option<Val
             "name": ui::TOOL,
             "description": ui::description(),
             "inputSchema": ui::input_schema(),
+        }, {
+            "name": SECONDMATE_TOOL,
+            "description": "Open Velvet Hammer's guided flow for adding a persistent second mate, \
+                            with the scope the captain described filled in. Use it when the \
+                            captain asks you to create a second mate. The app asks the captain \
+                            the remaining questions one at a time (projects, name, runtime), \
+                            shows exactly what will be created, and runs firstmate's \
+                            bin/fm-home-seed.sh and bin/fm-spawn.sh only after the captain's \
+                            yes, then tells you the outcome so you can hand the new mate its \
+                            work. Do not seed or launch the mate yourself as well.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {"scope": {"type": "string", "description": "What the second mate should be responsible for, in the captain's words."}},
+                "required": ["scope"],
+            },
         }]})),
         "tools/call" if params["name"] == NOTE_TOOL => {
             let text = params["arguments"]["text"]
@@ -328,6 +347,15 @@ fn mcp(request: &Value, serving: &Serving, on_call: &dyn Fn(Call)) -> Option<Val
                 on_call(Call::Note(text.to_string()));
                 json!({"content": [{"type": "text", "text": "Added to the captain's For you to do panel."}]})
             })
+        }
+        "tools/call" if params["name"] == SECONDMATE_TOOL => {
+            let scope = params["arguments"]["scope"]
+                .as_str()
+                .unwrap_or_default()
+                .trim();
+            on_call(Call::AddMate(scope.to_string()));
+            Ok(json!({"content": [{"type": "text", "text":
+                "Opened Add a second mate for the captain. Velvet Hammer will tell you the outcome."}]}))
         }
         // The chat draws the view from the tool use itself; the call only checks it, so the
         // model learns what was refused or left out.
@@ -620,6 +648,28 @@ mod tests {
         );
         assert_eq!(called["result"]["isError"], Value::Null);
         assert!(matches!(calls.try_recv(), Ok(Call::Note(text)) if text == "Renew the domain"));
+    }
+
+    #[test]
+    fn app_secondmate_opens_the_guided_add_with_the_scope() {
+        let (bridge, calls) = bridge();
+        let auth = bearer(&bridge);
+        let (_, list) = post(
+            &bridge,
+            "/mcp",
+            Some(&auth),
+            json!({"jsonrpc": "2.0", "id": 1, "method": "tools/list"}),
+        );
+        assert_eq!(list["result"]["tools"][2]["name"], "app_secondmate");
+        let (_, called) = post(
+            &bridge,
+            "/mcp",
+            Some(&auth),
+            json!({"jsonrpc": "2.0", "id": 2, "method": "tools/call",
+            "params": {"name": "app_secondmate", "arguments": {"scope": " billing work "}}}),
+        );
+        assert_eq!(called["result"]["isError"], Value::Null);
+        assert!(matches!(calls.try_recv(), Ok(Call::AddMate(scope)) if scope == "billing work"));
     }
 
     #[test]
