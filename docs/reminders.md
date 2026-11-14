@@ -73,8 +73,14 @@ due shows in three places:
   a toast only for a registered app, which Velvet Hammer does not do yet; elsewhere there are none.
 
 A reminder that came due while the app was not running shows as due, marked **overdue**, as soon
-as the app opens. A reminder does not yet link back to the chat message where it was set,
-though [message links](links.md) exist.
+as the app opens.
+
+**Set in this message.** A reminder keeps the id of the captain's message the chief of staff was
+answering when it set it, and shows **↪ Set in this message** in the banner, its For you to do
+card and the Reminders page. Pressing it goes to that message the way a
+[message link](links.md) does: the chat scrolls to it and highlights it briefly, or says it is
+not in the chat when the conversation history no longer holds it. `app_reminders` gives the
+chief of staff the same link, as "(set Today, 2:30 PM in velvet-hammer://message/…)".
 
 **Snooze** opens a small menu: **10 minutes**, **1 hour**, **Later today**, **Tomorrow morning**,
 **Next week** and **Later list**, and a field for a number of minutes, hours or days. A snoozed
@@ -87,11 +93,13 @@ page.
 The **Reminders** card under the agents, which says how many are due, coming up and later, opens
 the **Reminders** page: **Due now**, **Coming up** in time order, and the **Later list**, each
 reminder with its time, its text, when it was set, and its actions. **All reminders** at the
-bottom of For you to do opens it too. **Settings** on the page opens **Reminder settings**: each
+bottom of For you to do opens it too. **Reminder settings** is the **Reminders** section of
+**Settings** (Cmd+, on macOS), whose card sums them up ("later today by 6:00 PM · mornings 9:00
+AM"); **Settings** on the Reminders page opens it too. It has each
 setting with **−** and **+** (hours one at a time, times by half an hour, the day of the week
 round the week), **Reset to the defaults**, and what the keywords mean if said now. The settings
-apply at once, to reminders set from then on. They are not yet a section of the app's
-**Settings** page, so this page is the only way to reach them.
+apply at once, to reminders set from then on. Its buttons go back to the Reminders page, to all
+settings, and to the chat.
 
 ## What is stored
 
@@ -99,8 +107,8 @@ Both files are in the app's data directory (`~/.velvet-hammer`, or `$VELVET_HAMM
 a repository or in firstmate's home.
 
 - `reminders.json` keeps, for each reminder, a number, its text, when it was set, when it is due
-  (or that it is on the Later list), when it came due if it has, and for the Later list the day it
-  last came back. Nothing else from the conversation is stored. The file is written whole (a
+  (or that it is on the Later list), when it came due if it has, for the Later list the day it
+  last came back, and the id of the message it was set in. Nothing else from the conversation is stored. The file is written whole (a
   temporary file, synced, then renamed into place) and readable by the captain only (mode
   0600). If it cannot be read, the page says why and shows no reminders,
   and the next change keeps the old file as `reminders.json.bad`.
@@ -135,3 +143,5 @@ outside the app.
 | Two reminders due, one overdue: the banner and For you to do | [reminder-fired.png](screens/reminders/reminder-fired.png) |
 | The snooze menu open on the banner | [reminder-snooze.png](screens/reminders/reminder-snooze.png) |
 | Reminder settings, with what each keyword means now | [reminder-settings.png](screens/reminders/reminder-settings.png) |
+| **Set in this message** pressed: the chat at the captain's message, highlighted | [reminder-link-opened.png](screens/reminders/reminder-link-opened.png) |
+| Settings, with its Reminders section | [settings.png](screens/settings/settings.png) |

@@ -636,6 +636,9 @@ impl App {
         self.ws.apply(&action);
         if matches!(action, Action::Say(_) | Action::Ui(_)) {
             self.keep(self.ws.chat.len() - 1);
+            // A reminder the chief of staff sets in this turn links back to this message.
+            self.reminders
+                .said_in(&self.ws.chat[self.ws.chat.len() - 1].id);
         }
         self.chief.act(&self.ws, &action);
         self.drain();
@@ -1440,6 +1443,13 @@ fn main() {
                 *s = on_clock(&scratch("unused"), friday(14, 30)).0;
                 s.showing = Showing::ReminderSettings;
             }),
+            // A due reminder's "Set in this message", pressed: the chat at the captain's message,
+            // highlighted.
+            ("reminder-link-opened", |s| {
+                *s = reminders_due().0;
+                let message = s.ws.chat[0].id.clone();
+                s.go_to(&message);
+            }),
         ],
         min_size: Some((900.0, 560.0)),
         setup: Some(setup),
@@ -1515,6 +1525,8 @@ fn reminders_set() -> (App, Hands) {
 /// id of the second. Two more wait.
 fn reminders_due() -> (App, u64) {
     let (mut app, hands) = on_clock(&scratch("unused"), friday(9, 0));
+    // Set in reply to the stub's first message, which the reminders link back to.
+    app.reminders.said_in(&app.ws.chat[0].id);
     app.reminders
         .set("Call the bank about the wire", When::In(1, Unit::Hours))
         .expect("a reminder");
@@ -3805,10 +3817,24 @@ mod tests {
         assert_eq!(reply, "Reminder set for Today, 2:32 PM: Stretch");
         assert_eq!(texts_under(&rt, "reminders-summary"), ["1 coming up"]);
         assert!(rt.find("reminder-banner").is_none());
+        // It links back to the captain's message it was set in.
+        let asked = rt
+            .state
+            .ws
+            .chat
+            .iter()
+            .find(|m| m.text == "remind: in 2 minutes | Stretch")
+            .expect("the captain's message")
+            .id
+            .clone();
+        assert_eq!(rt.state.reminders.list()[0].message.as_ref(), Some(&asked));
         let reply = send_and_wait(&mut rt, "reminders?");
         assert_eq!(
             reply,
-            "It is now Today, 2:30 PM.\n- Today, 2:32 PM: Stretch (set Today, 2:30 PM)"
+            format!(
+                "It is now Today, 2:30 PM.\n- Today, 2:32 PM: Stretch (set Today, 2:30 PM in {})",
+                links::url(&asked)
+            )
         );
         *hands.lock().unwrap() = friday(14, 32);
         rt.frame(1.0 / 60.0);
@@ -3818,10 +3844,36 @@ mod tests {
             ["Set Today, 2:30 PM \u{b7} due Today, 2:32 PM"]
         );
         assert!(rt.find("reminder-1").is_some(), "in For you to do");
+        // From the Reminders page, the link goes back to the message and highlights it.
+        tap(&mut rt, "reminders");
+        tap(&mut rt, "list-1-message");
+        assert_eq!(rt.state.showing, Showing::Chat);
+        assert!(matches!(&rt.state.flash, Some((Ok(id), _)) if *id == asked));
         tap(&mut rt, "banner-1-done");
         assert!(rt.find("reminder-banner").is_none());
         assert!(rt.find("reminder-1").is_none());
         assert!(rt.state.reminders.list().is_empty());
+    }
+
+    #[test]
+    fn the_reminder_settings_are_a_section_of_settings() {
+        let (app, _) = on_clock(&scratch("unused"), friday(14, 30));
+        let mut rt = runtime_with(app);
+        chord(&mut rt, ',', false);
+        assert_eq!(rt.state.showing, Showing::Settings);
+        assert_eq!(
+            texts_under(&rt, "reminder-settings-summary"),
+            ["later today by 6:00 PM \u{b7} mornings 9:00 AM"]
+        );
+        tap(&mut rt, "reminder-settings");
+        assert_eq!(rt.state.showing, Showing::ReminderSettings);
+        tap(&mut rt, "reminder-setting-morning-up");
+        tap(&mut rt, "reminder-settings-all-settings");
+        assert_eq!(rt.state.showing, Showing::Settings);
+        assert_eq!(
+            texts_under(&rt, "reminder-settings-summary"),
+            ["later today by 6:00 PM \u{b7} mornings 9:30 AM"]
+        );
     }
 
     #[test]

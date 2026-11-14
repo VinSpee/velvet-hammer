@@ -35,7 +35,7 @@ for scene in chat replied empty peek signed-out signing-in signed-in expired cli
   visuals-settings visuals-enforced visuals-capped rules-settings rules-merge-ask rules-project-ask \
   find find-stepped find-none history link-copied link-opened link-context link-missing \
   settings settings-clear menu-windows menu-linux \
-  reminders-list reminder-fired reminder-snooze reminder-settings; do
+  reminders-list reminder-fired reminder-snooze reminder-settings reminder-link-opened; do
   headless --scene "$scene" --snap "$out/$scene.png"
   headless --scene "$scene" --tree "$out/$scene.json"
 done
@@ -441,6 +441,15 @@ check reminder-settings.json yes '"text": "6:00 PM"'
 check reminder-settings.json yes '"text": "Monday"'
 check reminder-settings.json yes '→ Today, 5:30 PM'
 check reminder-settings.json yes '→ Monday, Nov 16, 9:00 AM'
+# A reminder links back to the message it was set in, and its settings are a section of Settings.
+check reminder-fired.json yes '"key": "banner-2-message"'
+check reminder-fired.json yes '"key": "panel-1-message"'
+check reminder-fired.json yes '"text": "↪ Set in this message"'
+check reminder-link-opened.json yes '"key": "chat"'
+check reminder-link-opened.json no  '"key": "reminders-page"'
+check reminder-settings.json yes '"key": "reminder-settings-all-settings"'
+check settings.json yes '"key": "reminder-settings"'
+check settings.json yes '"text": "later today by 6:00 PM · mornings 9:00 AM"'
 # The scripted run.
 check walk-sent.json yes '"text": "Ship it when CI is green."'
 check walk-sent.json yes 'Got it:'

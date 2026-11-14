@@ -46,7 +46,7 @@ The window has three columns, and every setting is in **Settings** (see
   transcript in place of the chat; **Back to chat** closes it. Under them, **Projects** lists the
   projects in firstmate's records with **Add project**.
   The **Reminders** card at the bottom of the column shows how many are set and opens
-  their page, which links to the reminder settings.
+  their page; their settings are the **Reminders** section of Settings.
 - **Chief of staff** (middle): the conversation, with a message field and a **Send** button. A
   line under the heading says what runs it, such as "Claude Code · signed in with your Claude Max
   plan". When Claude Code is not ready, a sign-in screen takes the conversation's place. With no
@@ -265,7 +265,8 @@ are checked first; a rule's deny is final, and its question is asked whatever th
   `tool-activity.jsonl.1` when it passes 1 MB. It is readable by your user only (mode 0600) but
   holds command text as typed, so avoid putting secrets in commands.
 - **Reminders.** The data directory also holds `reminders.json`, which keeps each reminder's
-  text, when it was set, when it is due and whether it has come due (mode 0600), and
+  text, when it was set, when it is due, whether it has come due and the message it was set in
+  (mode 0600), and
   `reminder-settings.json`. See [What is stored](docs/reminders.md#what-is-stored).
 - **Where the settings live.** `tool-approval.json` in the same directory (versioned, written to a
   temporary file and renamed into place), never in your Claude settings or a repository.
@@ -401,6 +402,7 @@ It writes these files to `OUT_DIR`:
 | `reminder-fired.png`, `reminder-fired.json` | Two reminders due, one overdue: the banner and the top of For you to do |
 | `reminder-snooze.png`, `reminder-snooze.json` | The snooze menu open on the banner |
 | `reminder-settings.png`, `reminder-settings.json` | Reminder settings, with what each keyword means now |
+| `reminder-link-opened.png`, `reminder-link-opened.json` | A due reminder's **Set in this message** pressed: the chat at the captain's message, highlighted |
 | `walk-sent.json` | `scripts/walkthrough.json` after typing and sending a message |
 | `walk-end.png`, `walk-end.json` | The same script after answering an item, finishing the task and opening a peek |
 

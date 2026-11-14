@@ -4,11 +4,11 @@
 
 use jiff::Zoned;
 use rune::tok::{self, Theme, radius, space, type_};
-use rune::{El, col, row, text, text_input};
+use rune::{El, col, el, row, text, text_input};
 
-use super::{button, note, page, section, small_button, warning};
+use super::{all_settings, button, note, page, section, small_button, warning};
 use crate::reminders::{Due, Reminder, Setting, Unit, When, clock_words, words};
-use crate::{App, Showing};
+use crate::{App, Showing, links};
 
 /// The banner over the middle column while a reminder is due: the latest to come due, with
 /// how many more wait.
@@ -99,6 +99,26 @@ fn actions(s: &App, place: &'static str, r: &Reminder, t: Theme, dark: bool) -> 
         .child(small_button(&key("delete"), "Delete", t, move |s| {
             s.delete_reminder(id)
         }));
+    if let Some(message) = &r.message {
+        let url = links::url(message);
+        buttons = buttons.child(
+            el().key(key("message"))
+                .role("link")
+                .label("Go to the message it was set in")
+                .focusable(true)
+                .h(24.0)
+                .px(space::S2)
+                .center()
+                .radius(radius::SM)
+                .fill(t.control_off)
+                .on_press_tx(move |s: &mut App, tx: &mut rune::Tx| s.open_link(&url, tx))
+                .child(
+                    text("\u{21aa} Set in this message")
+                        .font(type_::LABEL)
+                        .color(t.text),
+                ),
+        );
+    }
     let mut out = col().gap(space::S2).child(buttons);
     if open {
         out = out.child(snooze_menu(s, place, id, t, dark));
@@ -209,6 +229,16 @@ fn group(r: &Reminder) -> &'static str {
     }
 }
 
+/// What the keywords mean, in a few words, for the Reminders section of Settings.
+pub fn settings_summary(s: &App) -> String {
+    let x = s.reminder_settings.settings();
+    format!(
+        "later today by {} \u{b7} mornings {}",
+        x.shown(Setting::Evening),
+        x.shown(Setting::Morning)
+    )
+}
+
 /// The card summary under the agents, such as "1 due · 3 coming up · 2 later".
 pub fn summary(s: &App) -> String {
     let list = s.reminders.list();
@@ -302,8 +332,9 @@ pub fn reminders_page(s: &App, t: Theme, dark: bool) -> El {
         "reminders-kept",
         &format!(
             "These are your own reminders in Velvet Hammer, not firstmate tasks. Each keeps its \
-             text, when it was set, when it is due and whether it has come due, in {} in \
-             Velvet Hammer's data directory, readable by your user only. A reminder that comes \
+             text, when it was set, when it is due, whether it has come due and the message \
+             it was set in, in {} in Velvet Hammer's data directory, readable by your user \
+             only. A reminder that comes \
              due shows here, in a banner and in For you to do, and in your system's \
              notifications where Velvet Hammer may post them.",
             crate::reminders::FILE
@@ -421,6 +452,7 @@ pub fn settings_page(s: &App, t: Theme, dark: bool) -> El {
         .child(button("reminder-settings-back", "Reminders", t, |s| {
             s.showing = Showing::Reminders
         }))
+        .child(all_settings("reminder-settings-all-settings", s, t))
         .child(button("reminder-settings-close", "Back to chat", t, |s| {
             s.showing = Showing::Chat
         }));

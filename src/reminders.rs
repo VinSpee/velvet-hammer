@@ -17,6 +17,7 @@ use jiff::civil::{Date, DateTime, Weekday};
 use jiff::{SignedDuration, Timestamp, ToSpan, Zoned};
 use serde_json::{Value, json};
 
+use crate::links;
 use crate::store::{self, Saved, Shared};
 
 /// The tool that sets a reminder, and the one that lists them.
@@ -403,6 +404,8 @@ pub struct Reminder {
     /// On the Later list: the day it last came back, or was set after that day's time, so it
     /// comes back once a day.
     pub surfaced: Option<Date>,
+    /// The id of the captain's message it was set in reply to, for a link back to it.
+    pub message: Option<String>,
 }
 
 impl Reminder {
@@ -433,6 +436,7 @@ impl Reminder {
             },
             "fired": self.fired.map(|t| t.to_string()),
             "surfaced": self.surfaced.map(|d| d.to_string()),
+            "message": self.message,
         })
     }
 
@@ -454,6 +458,11 @@ impl Reminder {
                 Value::Null => None,
                 v => Some(v.as_str()?.parse().ok()?),
             },
+            // Older files have no message; one that is not a message id is not kept.
+            message: value["message"]
+                .as_str()
+                .filter(|id| links::parse(&links::url(id)).is_some())
+                .map(str::to_string),
         })
     }
 }
@@ -570,6 +579,8 @@ struct Book {
     unreadable: bool,
     /// Counts changes, so the app sees one made by the chat session.
     version: u64,
+    /// The captain's message the chief of staff is answering, which a reminder set now names.
+    said_in: Option<String>,
 }
 
 impl Reminders {
@@ -620,6 +631,7 @@ impl Reminders {
                 unreadable: problem.is_some(),
                 problem,
                 version: 0,
+                said_in: None,
             })),
             settings,
             clock,
@@ -639,6 +651,12 @@ impl Reminders {
 
     pub fn now(&self) -> Zoned {
         (self.clock)()
+    }
+
+    /// The captain's message the chief of staff is now answering, by its id: a reminder set
+    /// from now on links back to it.
+    pub fn said_in(&self, message: &str) {
+        self.book().said_in = Some(message.to_string());
     }
 
     /// Every reminder: those that came due first, oldest first, then those still to come by
@@ -675,7 +693,7 @@ impl Reminders {
                  keeps. Ask them to clear some first."
             ));
         }
-        let id = book.next_id;
+        let (id, message) = (book.next_id, book.said_in.clone());
         book.next_id += 1;
         book.list.push(Reminder {
             id,
@@ -684,6 +702,7 @@ impl Reminders {
             due,
             fired: None,
             surfaced: surfaced(&settings, &now, due),
+            message,
         });
         book.save();
         Ok(match due {
@@ -711,7 +730,10 @@ impl Reminders {
             out.push_str(" The captain has no reminders.");
         }
         for r in &list {
-            let set = words(r.set_at, &now);
+            let set = match &r.message {
+                Some(id) => format!("{} in {}", words(r.set_at, &now), links::url(id)),
+                None => words(r.set_at, &now),
+            };
             out.push_str(&match (r.fired, r.due) {
                 (Some(fired), _) => format!(
                     "\n- Due now, waiting for the captain since {}: {} (set {set})",
@@ -1219,6 +1241,7 @@ mod tests {
         let dir = scratch();
         let now = Arc::new(Mutex::new(at(2026, 11, 13, 14, 30)));
         let reminders = open(&dir, &now);
+        reminders.said_in("3f9a01bc22de");
         reminders
             .set("stretch", When::In(2, Unit::Minutes))
             .unwrap();
@@ -1237,6 +1260,7 @@ mod tests {
         *now.lock().unwrap() = at(2026, 11, 13, 15, 32);
         let reminders = open(&dir, &now);
         assert_eq!(reminders.list(), saved);
+        assert_eq!(saved[0].message.as_deref(), Some("3f9a01bc22de"));
         let fired = reminders.fire_due();
         assert_eq!(fired.len(), 1);
         assert_eq!(fired[0].text, "stretch");
