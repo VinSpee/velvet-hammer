@@ -244,9 +244,13 @@ impl Claude {
             )));
             return;
         }
+        // The wake that brought this call makes the app look for the next reminder due.
+        if let Call::Reminded = call {
+            return;
+        }
         let id = self.item_id();
         let item = match call {
-            Call::Expired(_) | Call::Logged(_) | Call::Nudged(_) => return,
+            Call::Expired(_) | Call::Logged(_) | Call::Nudged(_) | Call::Reminded => return,
             Call::Note(text) => {
                 self.notes.insert(id, text.clone());
                 Item {

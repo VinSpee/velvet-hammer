@@ -2,9 +2,10 @@
 //! 127.0.0.1 that `claude` calls back into. It serves two things, both passed to that one session
 //! as command-line flags so the captain's own Claude settings are never written:
 //!
-//! - an MCP server (`--mcp-config`) with two tools: `app_note`, which puts a note in the
-//!   captain's For you to do panel, and `app_ui`, which shows a json-render view in the chat
-//!   (see [`crate::ui`]);
+//! - an MCP server (`--mcp-config`) with four tools: `app_note`, which puts a note in the
+//!   captain's For you to do panel, `app_ui`, which shows a json-render view in the chat
+//!   (see [`crate::ui`]), and `app_remind` and `app_reminders`, which set and list the captain's
+//!   reminders (see [`crate::reminders`]);
 //! - a PreToolUse hook (`--settings`), which applies firstmate's rules (see [`crate::guard`])
 //!   and the captain's tool-approval settings (see [`crate::approval`]) to each tool use: it
 //!   allows it, denies it, or asks the captain to allow or deny it in the Needs your input panel.
@@ -28,6 +29,7 @@ use serde_json::{Value, json};
 
 use crate::approval::{self, Effect, Entry, Policy, Settings};
 use crate::guard::{self, Home};
+use crate::reminders::{self, Reminders};
 use crate::store::Shared;
 use crate::ui;
 use crate::visual::{self, Turn};
@@ -73,14 +75,18 @@ pub enum Call {
     /// The stop hook sent the reply back to be shown as a view, because it has this shape (in
     /// words, such as "lists 4 items").
     Nudged(String),
+    /// `app_remind` set a reminder, so the app looks again for the next one due.
+    Reminded,
 }
 
-/// The settings the hooks decide with, each read at every call so a change applies at once.
+/// The settings the hooks decide with, each read at every call so a change applies at once,
+/// and the captain's reminders, which the reminder tools set and list.
 #[derive(Clone)]
 pub struct Policies {
     pub approval: Policy,
     pub visual: Shared<visual::Mode>,
     pub rules: Shared<guard::Settings>,
+    pub reminders: Reminders,
 }
 
 impl Policies {
@@ -91,6 +97,7 @@ impl Policies {
             approval: Arc::new(RwLock::new(Settings::ask_every_time())),
             visual: Arc::new(RwLock::new(visual::Mode::Off)),
             rules: Arc::new(RwLock::new(guard::Settings::default())),
+            reminders: Reminders::in_memory(reminders::system_clock()),
         }
     }
 }
@@ -316,6 +323,14 @@ fn mcp(request: &Value, serving: &Serving, on_call: &dyn Fn(Call)) -> Option<Val
             "name": ui::TOOL,
             "description": ui::description(),
             "inputSchema": ui::input_schema(),
+        }, {
+            "name": reminders::TOOL,
+            "description": reminders::description(),
+            "inputSchema": reminders::input_schema(),
+        }, {
+            "name": reminders::LIST_TOOL,
+            "description": reminders::list_description(),
+            "inputSchema": {"type": "object", "properties": {}},
         }]})),
         "tools/call" if params["name"] == NOTE_TOOL => {
             let text = params["arguments"]["text"]
@@ -340,6 +355,21 @@ fn mcp(request: &Value, serving: &Serving, on_call: &dyn Fn(Call)) -> Option<Val
                 json!({"isError": true, "content": [{"type": "text", "text": problem}]})
             }
         }),
+        // The app works out the time, so the answer tells the model what was set.
+        "tools/call" if params["name"] == reminders::TOOL => Ok(
+            match serving.policies.reminders.answer(&params["arguments"]) {
+                Ok(text) => {
+                    on_call(Call::Reminded);
+                    json!({"content": [{"type": "text", "text": text}]})
+                }
+                Err(problem) => {
+                    json!({"isError": true, "content": [{"type": "text", "text": problem}]})
+                }
+            },
+        ),
+        "tools/call" if params["name"] == reminders::LIST_TOOL => Ok(
+            json!({"content": [{"type": "text", "text": serving.policies.reminders.describe()}]}),
+        ),
         "tools/call" => Err((-32602, "Unknown tool")),
         _ => Err((-32601, "Method not found")),
     };
@@ -518,6 +548,7 @@ mod tests {
             approval: Arc::new(RwLock::new(settings)),
             visual: Arc::new(RwLock::new(visual::Mode::Enforce)),
             rules: Arc::new(RwLock::new(guard::Settings::default())),
+            reminders: Reminders::in_memory(reminders::system_clock()),
         };
         let bridge = Bridge::start(policies.clone(), home, move |call| {
             tx.lock().unwrap().send(call).unwrap()
@@ -659,6 +690,66 @@ mod tests {
         assert_eq!(refused["isError"], true);
         // Checking a spec asks nothing of the app: the chat draws it from the tool use.
         assert!(calls.try_recv().is_err());
+    }
+
+    #[test]
+    fn app_remind_sets_a_reminder_at_the_apps_time_and_app_reminders_lists_it() {
+        let (tx, calls) = channel();
+        let tx = Mutex::new(tx);
+        let eastern = jiff::tz::TimeZone::posix("EST5EDT,M3.2.0,M11.1.0").unwrap();
+        let now = jiff::civil::date(2026, 11, 13)
+            .at(14, 30, 0, 0)
+            .to_zoned(eastern)
+            .unwrap();
+        let mut policies = Policies::ask_every_time();
+        policies.reminders = Reminders::in_memory(Arc::new(move || now.clone()));
+        let bridge = Bridge::start(policies.clone(), None, move |call| {
+            tx.lock().unwrap().send(call).unwrap()
+        })
+        .unwrap();
+        let auth = bearer(&bridge);
+        let (_, list) = post(
+            &bridge,
+            "/mcp",
+            Some(&auth),
+            json!({"jsonrpc": "2.0", "id": 1, "method": "tools/list"}),
+        );
+        let names: Vec<&str> = list["result"]["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|t| t["name"].as_str().unwrap())
+            .collect();
+        assert_eq!(names, ["app_note", "app_ui", "app_remind", "app_reminders"]);
+        let call = |name: &str, arguments: Value| {
+            post(
+                &bridge,
+                "/mcp",
+                Some(&auth),
+                json!({"jsonrpc": "2.0", "id": 2, "method": "tools/call",
+                       "params": {"name": name, "arguments": arguments}}),
+            )
+            .1["result"]
+                .clone()
+        };
+        let set = call(
+            "app_remind",
+            json!({"text": "stretch", "when": "in", "amount": 2, "unit": "minutes"}),
+        );
+        assert_eq!(
+            set["content"][0]["text"],
+            "Reminder set for Today, 2:32 PM: stretch"
+        );
+        assert!(matches!(calls.try_recv(), Ok(Call::Reminded)));
+        let refused = call("app_remind", json!({"text": "stretch", "when": "soon"}));
+        assert_eq!(refused["isError"], true);
+        assert!(calls.try_recv().is_err());
+        let listed = call("app_reminders", json!({}));
+        assert_eq!(
+            listed["content"][0]["text"],
+            "It is now Today, 2:30 PM.\n- Today, 2:32 PM: stretch (set Today, 2:30 PM)"
+        );
+        assert_eq!(policies.reminders.list().len(), 1);
     }
 
     #[test]

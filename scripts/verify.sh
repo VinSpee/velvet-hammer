@@ -32,7 +32,8 @@ for scene in chat replied empty peek signed-out signing-in signed-in expired cli
   projects-fresh projects-empty projects-adding projects-listed \
   formatted formatted-all formatted-streaming tool-image tool-image-broken tool-video tool-generic tool-picture \
   view-static view-streaming view-state view-action view-unknown view-too-large \
-  visuals-settings visuals-enforced visuals-capped rules-settings rules-merge-ask rules-project-ask; do
+  visuals-settings visuals-enforced visuals-capped rules-settings rules-merge-ask rules-project-ask \
+  reminders-list reminder-fired reminder-snooze reminder-settings; do
   headless --scene "$scene" --snap "$out/$scene.png"
   headless --scene "$scene" --tree "$out/$scene.json"
 done
@@ -326,6 +327,39 @@ check rules-merge-ask.json yes 'Firstmate'"'"'s hard rule 2: never merge a pull 
 check rules-merge-ask.json yes '"key": "answer-1-0"'
 check rules-project-ask.json yes 'Let the chief of staff edit /tmp/velvet-hammer/rules-project-ask/data/home/projects/site/README.md?'
 check rules-project-ask.json yes '"key": "answer-1-1"'
+# Reminders on a fixed clock: the page with each form set, two come due (one overdue) in the
+# banner and For you to do, the snooze menu, and the settings with what each keyword means now.
+check chat.json yes '"key": "reminders"'
+check chat.json yes '"text": "none set"'
+check chat.json no  '"key": "reminder-banner"'
+check reminders-list.json yes '"key": "reminders-page"'
+check reminders-list.json yes '"key": "reminders-coming"'
+check reminders-list.json yes '"key": "reminders-later"'
+check reminders-list.json yes '"text": "Today, 2:50 PM"'
+check reminders-list.json yes '"text": "Today, 5:30 PM"'
+check reminders-list.json yes '"text": "Tomorrow, 9:00 AM"'
+check reminders-list.json yes '"text": "Monday, Nov 16, 9:00 AM"'
+check reminders-list.json yes '"text": "5 coming up · 2 later"'
+check reminders-list.json no  '"key": "reminder-banner"'
+check reminder-fired.json yes '"key": "reminder-banner"'
+check reminder-fired.json yes '"text": "Stretch"'
+check reminder-fired.json yes '"text": "Set Today, 2:30 PM · due Today, 2:32 PM"'
+check reminder-fired.json yes '"key": "reminder-banner-more"'
+check reminder-fired.json yes '"key": "reminder-1"'
+check reminder-fired.json yes 'Reminder · overdue · Set Today, 9:00 AM · due Today, 10:00 AM'
+check reminder-fired.json yes '"key": "panel-1-done"'
+check reminder-fired.json yes '"text": "2 due · 1 coming up · 1 later"'
+check reminder-fired.json no  '"key": "banner-2-snooze-menu"'
+check reminder-snooze.json yes '"key": "banner-2-snooze-menu"'
+check reminder-snooze.json yes '"key": "banner-2-snooze-10m"'
+check reminder-snooze.json yes '"key": "banner-2-snooze-tomorrow"'
+check reminder-snooze.json yes '"key": "snooze-amount"'
+check reminder-settings.json yes '"key": "reminder-settings-page"'
+check reminder-settings.json yes '"key": "reminder-setting-evening-up"'
+check reminder-settings.json yes '"text": "6:00 PM"'
+check reminder-settings.json yes '"text": "Monday"'
+check reminder-settings.json yes '→ Today, 5:30 PM'
+check reminder-settings.json yes '→ Monday, Nov 16, 9:00 AM'
 # The scripted run.
 check walk-sent.json yes '"text": "Ship it when CI is green."'
 check walk-sent.json yes 'Got it:'

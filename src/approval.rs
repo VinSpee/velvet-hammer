@@ -28,7 +28,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use rune::TextEdit;
 use serde_json::{Value, json};
 
-use crate::store::{self, Saved, Shared, suffixed};
+use crate::store::{self, Saved, Shared, create_private_dir, make_private, suffixed};
 
 /// The settings file in the data directory.
 pub const SETTINGS_FILE: &str = "tool-approval.json";
@@ -332,15 +332,6 @@ impl Saved for Settings {
     }
 }
 
-/// Creates the directory, and any missing parents, readable by its owner only.
-fn create_private_dir(dir: &Path) -> io::Result<()> {
-    let mut builder = fs::DirBuilder::new();
-    builder.recursive(true);
-    #[cfg(unix)]
-    std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o700);
-    builder.create(dir)
-}
-
 /// Opens the log for appending, creating it with owner-only permissions and tightening a log an
 /// earlier version made.
 fn open_private(path: &Path) -> io::Result<File> {
@@ -351,17 +342,6 @@ fn open_private(path: &Path) -> io::Result<File> {
     let file = options.open(path)?;
     make_private(path)?;
     Ok(file)
-}
-
-#[cfg(unix)]
-fn make_private(path: &Path) -> io::Result<()> {
-    use std::os::unix::fs::PermissionsExt;
-    fs::set_permissions(path, fs::Permissions::from_mode(0o600))
-}
-
-#[cfg(not(unix))]
-fn make_private(_: &Path) -> io::Result<()> {
-    Ok(())
 }
 
 /// One tool use and what was decided.

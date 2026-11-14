@@ -35,6 +35,10 @@
 # stops again with the same list and `stop_hook_active` unset, then ends with "Left as text.", or
 # with "looped" if the hook sent it back a second time.
 #
+# A message "remind: WHEN | TEXT" calls the `app_remind` tool with TEXT and WHEN, where WHEN is
+# "in AMOUNT UNIT" or one of the keywords such as tomorrow_morning, and answers with the tool's
+# text. A message "reminders?" calls `app_reminders` and answers with its text.
+#
 # A message containing "whereami" is answered with the session's working directory and FM_HOME.
 # After a message "wake: TEXT" and its reply, a second turn nobody asked for says TEXT, the way
 # a firstmate Stop hook wakes an idle session.
@@ -151,6 +155,28 @@ auth)
       else
         text="the app_note tool did not answer"
       fi
+      ;;
+    remind:* | 'reminders?')
+      case $text in
+      remind:*)
+        spec=${text#remind: }
+        what=${spec#* | }
+        # shellcheck disable=SC2086 # WHEN splits into its words on purpose.
+        set -- ${spec%% | *}
+        case $1 in
+        in) arguments="{\"text\":\"$what\",\"when\":\"in\",\"amount\":$2,\"unit\":\"$3\"}" ;;
+        *) arguments="{\"text\":\"$what\",\"when\":\"$1\"}" ;;
+        esac
+        call="{\"name\":\"app_remind\",\"arguments\":$arguments}"
+        ;;
+      *) call='{"name":"app_reminders","arguments":{}}' ;;
+      esac
+      answer=$(post "$mcp_url" "$mcp_auth" "{\"jsonrpc\":\"2.0\",\"id\":4,\"method\":\"tools/call\",\"params\":$call}" |
+        sed -E 's/.*"text":"(([^"\\]|\\.)*)".*/\1/')
+      echo '{"type":"system","subtype":"init","apiKeySource":"none","model":"fake"}'
+      # printf, not echo: the answer's \n escapes must reach the app as written.
+      printf '%s\n' "{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"result\":\"$answer\"}"
+      continue
       ;;
     run:* | abandon:* | big:* | write:* | read:*)
       case $text in

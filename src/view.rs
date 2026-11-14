@@ -15,6 +15,7 @@ use crate::model::{Action, Agent, Author, Item, ItemKind, Message, Plan, Status}
 use crate::projects::Project;
 
 mod policy;
+mod remind;
 mod tool;
 mod ui;
 use policy::{rules_page, visuals_page};
@@ -33,6 +34,8 @@ pub fn view(s: &App, cx: &mut Cx<App>) -> El {
         (Showing::Activity, ..) => activity_page(s, t, cx.system_dark()),
         (Showing::Visuals, ..) => visuals_page(s, t, cx.system_dark()),
         (Showing::Rules, ..) => rules_page(s, t, cx.system_dark()),
+        (Showing::Reminders, ..) => remind::reminders_page(s, t, cx.system_dark()),
+        (Showing::ReminderSettings, ..) => remind::settings_page(s, t, cx.system_dark()),
         (Showing::Picture(id), ..) => picture_page(s, id, t, cx.system_dark()),
         (_, Some(agent), _) => peek(s, agent, t, cx.system_dark()),
         // A chief of staff that runs in the managed clone cannot chat until it is installed.
@@ -41,6 +44,16 @@ pub fn view(s: &App, cx: &mut Cx<App>) -> El {
         }
         (_, None, Status::Ready(plan)) => chat(s, plan, t, cx.system_dark()),
         (_, None, status) => sign_in(status, t, cx.system_dark()),
+    };
+    // A reminder that came due stays over whatever the middle column shows.
+    let main = match remind::banner(s, t, cx.system_dark()) {
+        Some(banner) => col()
+            .grow(1.0)
+            .h_full()
+            .min_h(0.0)
+            .child(col().px(space::S6).pt(space::S6).child(banner))
+            .child(main),
+        None => main,
     };
     row()
         .w_full()
@@ -57,7 +70,7 @@ pub fn view(s: &App, cx: &mut Cx<App>) -> El {
                 .padding(space::S3)
                 .gap(space::S3)
                 .child(needs_input(s, t, cx.system_dark()))
-                .child(for_you(s, t)),
+                .child(for_you(s, t, cx.system_dark())),
         )
 }
 
@@ -133,6 +146,14 @@ fn agents(s: &App, t: Theme, dark: bool) -> El {
         .filter(|r| s.rules.settings().on(**r))
         .count();
     list.child(el().grow(1.0))
+        .child(nav_card(
+            s,
+            "reminders",
+            "Reminders",
+            remind::summary(s),
+            &[Showing::Reminders, Showing::ReminderSettings],
+            t,
+        ))
         .child(nav_card(
             s,
             "visuals",
@@ -1451,8 +1472,12 @@ fn needs_input(s: &App, t: Theme, dark: bool) -> El {
     )
 }
 
-fn for_you(s: &App, t: Theme) -> El {
-    let rows = s.ws.for_you().map(|item| {
+const NOTHING_FOR_YOU: &str = "Nothing for you to do.";
+
+/// Reminders that came due first, then the steps the agents left for the captain.
+fn for_you(s: &App, t: Theme, dark: bool) -> El {
+    let mut rows = remind::panel_rows(s, t, dark);
+    rows.extend(s.ws.for_you().map(|item| {
         let id = item.id;
         card(&format!("task-{id}"), item, t).child(row().child(button(
             &format!("done-{id}"),
@@ -1460,14 +1485,24 @@ fn for_you(s: &App, t: Theme) -> El {
             t,
             move |s| s.act(Action::Done { item: id }),
         )))
-    });
-    panel(
-        "for-you",
-        "For you to do",
-        "Nothing for you to do.",
-        rows.collect(),
-        t,
-    )
+    }));
+    if !s.reminders.list().is_empty() {
+        // Reminders still to come wait on the Reminders page, which this opens.
+        if rows.is_empty() {
+            rows.push(
+                text(NOTHING_FOR_YOU)
+                    .key("for-you-empty")
+                    .font(type_::BODY)
+                    .color(t.text_secondary),
+            );
+        }
+        rows.push(
+            row().child(small_button("for-you-reminders", "All reminders", t, |s| {
+                s.showing = Showing::Reminders
+            })),
+        );
+    }
+    panel("for-you", "For you to do", NOTHING_FOR_YOU, rows, t)
 }
 
 fn panel(key: &str, title: &str, empty: &str, rows: Vec<El>, t: Theme) -> El {

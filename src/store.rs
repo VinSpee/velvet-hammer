@@ -145,6 +145,26 @@ impl<T: Saved> Store<T> {
     }
 }
 
+/// Creates the directory, and any missing parents, readable by its owner only.
+pub fn create_private_dir(dir: &Path) -> io::Result<()> {
+    let mut builder = fs::DirBuilder::new();
+    builder.recursive(true);
+    #[cfg(unix)]
+    std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o700);
+    builder.create(dir)
+}
+
+#[cfg(unix)]
+pub fn make_private(path: &Path) -> io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(path, fs::Permissions::from_mode(0o600))
+}
+
+#[cfg(not(unix))]
+pub fn make_private(_: &Path) -> io::Result<()> {
+    Ok(())
+}
+
 pub fn suffixed(path: &Path, suffix: &str) -> PathBuf {
     let mut name = path.as_os_str().to_owned();
     name.push(suffix);
