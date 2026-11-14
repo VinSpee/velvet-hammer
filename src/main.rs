@@ -16,6 +16,7 @@ mod markdown;
 mod menus;
 mod model;
 mod projects;
+mod repos;
 mod store;
 mod tools;
 mod ui;
@@ -85,6 +86,8 @@ pub struct App {
     picking: Option<Receiver<Result<Option<PathBuf>, String>>>,
     /// Why the folder dialog could not open.
     pub pick_problem: Option<String>,
+    /// The GitHub repository combobox, the other way to answer which repository to add.
+    pub repos: repos::Chooser,
     wake: Option<Waker>,
     /// The captain hold the next message answers, by its key.
     pub answering: Option<String>,
@@ -221,6 +224,7 @@ impl App {
             picker: projects::pick_folder,
             picking: None,
             pick_problem: None,
+            repos: repos::Chooser::default(),
             wake: None,
             answering: None,
             draft: TextEdit::default(),
@@ -297,6 +301,7 @@ impl App {
             }
             changed = true;
         }
+        changed |= self.repos.poll();
         if let Some(snapshot) = self.watcher.as_mut().and_then(|w| w.poll()) {
             match snapshot {
                 Ok(captain) => {
@@ -624,6 +629,33 @@ impl App {
     pub fn finish_adding(&mut self) {
         self.adding = false;
         self.pick_problem = None;
+        self.repos.hide();
+    }
+
+    /// Opens the repository list, listing the repositories again.
+    pub fn show_repos(&mut self) {
+        self.repos.show(self.wake.clone());
+    }
+
+    /// The repository query changed: the list opens on its best match.
+    pub fn repos_edited(&mut self) {
+        self.repos.edited(self.wake.clone());
+    }
+
+    /// Lists the repositories again after a problem the captain fixed.
+    pub fn retry_repos(&mut self) {
+        self.repos.refresh(self.wake.clone());
+    }
+
+    /// Chooses the repository at `index` in the list: its address lands in the draft, as a
+    /// chosen folder's path does, for the captain to send. Firstmate clones it.
+    pub fn choose_repo(&mut self, index: usize) {
+        let Some(repo) = self.repos.repo(index).cloned() else {
+            return;
+        };
+        self.repos.query.text = repo.full_name();
+        self.repos.hide();
+        self.draft.text = repo.url();
     }
 
     /// Opens the folder dialog on a background thread; the chosen path lands in the draft.
@@ -1121,6 +1153,33 @@ fn main() {
                     s.projects.as_ref().is_some_and(|p| p.is_ok()) && !s.has_no_projects()
                 });
             }),
+            // The GitHub repository combobox while adding a project: the list, a query with its
+            // matches marked, a chosen repository, and gh missing or signed out.
+            ("projects-repos", |s| {
+                *s = choosing_repo("projects-repos", repos::sample)
+            }),
+            ("projects-repos-filtered", |s| {
+                *s = choosing_repo("projects-repos-filtered", repos::sample);
+                s.repos.query.text = "ham".into();
+                s.repos_edited();
+            }),
+            ("projects-repos-chosen", |s| {
+                *s = choosing_repo("projects-repos-chosen", repos::sample);
+                s.repos.query.text = "pay".into();
+                s.repos_edited();
+                let (matches, _) = s.repos.matches();
+                s.choose_repo(matches[0].index);
+            }),
+            ("projects-repos-missing", |s| {
+                *s = choosing_repo("projects-repos-missing", || {
+                    repos::list(Path::new("/nonexistent/velvet-hammer/gh"))
+                });
+            }),
+            ("projects-repos-signed-out", |s| {
+                *s = choosing_repo("projects-repos-signed-out", || {
+                    Err(repos::Problem::SignedOut)
+                });
+            }),
             // The managed firstmate clone. All but the first two run git on a scratch upstream.
             ("firstmate-missing", |s| {
                 *s = on_firstmate(Lab::new().firstmate());
@@ -1344,6 +1403,20 @@ const LIST: &str = "list: Merge the docs PR, Renew the domain, Answer the window
 
 /// A merge through firstmate's script, which its rules ask the captain about.
 const MERGE: &str = "bin/fm-pr-merge.sh site-docs https://github.com/captain/site/pull/7";
+
+/// Adding a project with the fake `claude` as firstmate in a lab under
+/// `/tmp/velvet-hammer/NAME`, so the screenshots name no one's home directory, with the
+/// repository list open on what `lister` listed.
+fn choosing_repo(name: &str, lister: fn() -> Result<Vec<repos::Repo>, repos::Problem>) -> App {
+    let mut app = fake_in_firstmate(&Lab::at(&Path::new("/tmp/velvet-hammer").join(name)), true);
+    app.settle(|s| s.projects.is_some());
+    app.add_project();
+    app.settle(replied);
+    app.repos.lister = lister;
+    app.show_repos();
+    app.settle(|s| !s.repos.loading());
+    app
+}
 
 /// The fake `claude` running as firstmate in a lab under `/tmp/velvet-hammer/NAME`, so the
 /// screenshots show a short path that names no one's home directory, with three projects
@@ -2027,6 +2100,116 @@ mod tests {
         tap(&mut rt, "add-pick-folder");
         wait(&mut rt, |s| !s.picking());
         assert!(rt.find("add-pick-problem").is_some());
+    }
+
+    fn key(rt: &mut Runtime<App>, key: rune::Key) {
+        rt.key(rune::KeyEvent {
+            key,
+            mods: rune::Mods::default(),
+        });
+        rt.frame(1.0 / 60.0);
+    }
+
+    /// Adding a project, with the repository combobox listing `lister`'s repositories.
+    fn adding_with_repos(lister: fn() -> Result<Vec<repos::Repo>, repos::Problem>) -> Runtime<App> {
+        let mut rt = runtime_with(fake_in_firstmate(&Lab::new(), true));
+        wait(&mut rt, projects_read);
+        tap(&mut rt, "add-project");
+        wait(&mut rt, replied);
+        rt.state.repos.lister = lister;
+        rt
+    }
+
+    #[test]
+    fn the_repository_combobox_filters_and_chooses_with_the_keyboard() {
+        let mut rt = adding_with_repos(repos::sample);
+        let sent = rt.state.ws.chat.len();
+        assert!(rt.find("repo-search").is_some());
+        assert!(rt.find("repo-list").is_none(), "closed until opened");
+        tap(&mut rt, "repo-search");
+        key(&mut rt, rune::Key::Down);
+        assert!(rt.state.repos.open);
+        wait(&mut rt, |s| !s.repos.loading());
+        assert!(rt.find("repo-list").is_some());
+        // The captain's own private repositories lead, the first highlighted.
+        let (matches, _) = rt.state.repos.matches();
+        assert_eq!(rt.state.repos.active(&matches), Some(0));
+        assert_eq!(
+            rt.state.repos.repo(0).unwrap().full_name(),
+            "captain/dotfiles"
+        );
+        key(&mut rt, rune::Key::Down);
+        assert_eq!(rt.state.repos.active(&matches), Some(1));
+        key(&mut rt, rune::Key::Up);
+        key(&mut rt, rune::Key::Up);
+        assert_eq!(
+            rt.state.repos.active(&matches),
+            Some(7),
+            "Up wraps to the last"
+        );
+        // Typing filters and highlights the best match again.
+        for c in ["p", "a", "y"] {
+            key(&mut rt, rune::Key::Text(c.into()));
+        }
+        assert_eq!(rt.state.repos.query.text, "pay");
+        assert!(rt.find("repo-option-acme:payments-api").is_some());
+        assert!(rt.find("repo-option-captain:dotfiles").is_none());
+        // Escape closes the list; Down opens it again on the same query.
+        key(&mut rt, rune::Key::Escape);
+        assert!(!rt.state.repos.open);
+        assert!(rt.find("repo-list").is_none());
+        key(&mut rt, rune::Key::Down);
+        wait(&mut rt, |s| !s.repos.loading());
+        // Return chooses: the address goes into the message, and nothing is sent.
+        key(&mut rt, rune::Key::Enter);
+        assert_eq!(rt.state.draft.text, "https://github.com/acme/payments-api");
+        assert!(!rt.state.repos.open);
+        assert_eq!(rt.state.repos.query.text, "acme/payments-api");
+        assert_eq!(rt.state.ws.chat.len(), sent);
+        // A second Escape, with the list closed, clears the query.
+        key(&mut rt, rune::Key::Escape);
+        assert!(rt.state.repos.query.text.is_empty());
+    }
+
+    #[test]
+    fn a_repository_can_be_chosen_with_the_pointer() {
+        let mut rt = adding_with_repos(repos::sample);
+        tap(&mut rt, "repo-toggle");
+        wait(&mut rt, |s| !s.repos.loading());
+        tap(&mut rt, "repo-option-captain:notes");
+        assert_eq!(rt.state.draft.text, "https://github.com/captain/notes");
+        assert!(rt.find("repo-list").is_none());
+    }
+
+    #[test]
+    fn a_missing_gh_says_how_to_fix_it_and_try_again_lists_once_it_is_fixed() {
+        let mut rt = adding_with_repos(|| repos::list(Path::new("/nonexistent/velvet-hammer/gh")));
+        tap(&mut rt, "repo-toggle");
+        wait(&mut rt, |s| !s.repos.loading());
+        assert!(rt.find("repo-problem").is_some());
+        assert!(rt.find("repo-list").is_none());
+        // The captain installed and signed in to gh.
+        rt.state.repos.lister = repos::sample;
+        tap(&mut rt, "repo-retry");
+        wait(&mut rt, |s| !s.repos.loading());
+        assert!(rt.find("repo-problem").is_none());
+        assert!(rt.find("repo-list").is_some());
+    }
+
+    #[test]
+    fn each_opening_lists_the_repositories_again() {
+        let mut rt = adding_with_repos(|| Err(repos::Problem::SignedOut));
+        tap(&mut rt, "repo-toggle");
+        wait(&mut rt, |s| !s.repos.loading());
+        assert!(rt.find("repo-problem").is_some());
+        tap(&mut rt, "repo-toggle");
+        rt.state.repos.lister = repos::sample;
+        tap(&mut rt, "repo-toggle");
+        wait(&mut rt, |s| !s.repos.loading());
+        assert!(rt.find("repo-list").is_some());
+        // Done adding closes it.
+        tap(&mut rt, "add-finish");
+        assert!(!rt.state.repos.open);
     }
 
     #[test]

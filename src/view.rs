@@ -16,10 +16,12 @@ use crate::model::{Action, Agent, Author, Item, ItemKind, Message, Plan, Status}
 use crate::projects::Project;
 
 mod policy;
+mod repos;
 mod settings;
 mod tool;
 mod ui;
 use policy::{rules_page, visuals_page};
+use repos::repo_picker;
 use settings::{all_settings, menu_bar, settings_page};
 use tool::{picture_page, tool_use};
 
@@ -1072,9 +1074,10 @@ fn adding(s: &App, t: Theme, dark: bool) -> El {
         .child(note(
             "adding-help",
             "Adding a project with your chief of staff. Answer in the chat; a chosen folder's \
-             path goes into your message for you to send.",
+             path or GitHub repository's address goes into your message for you to send.",
             t,
         ))
+        .child(repo_picker(s, t, dark))
         .child(buttons);
     if let Some(problem) = &s.pick_problem {
         bar = bar.child(warning("add-pick-problem", problem, dark));

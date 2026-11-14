@@ -30,6 +30,7 @@ for scene in chat replied empty peek signed-out signing-in signed-in expired cli
   firstmate-missing firstmate-installing firstmate-up-to-date firstmate-update-available \
   firstmate-modified firstmate-blocked firstmate-session firstmate-panels firstmate-answering firstmate-crew \
   projects-fresh projects-empty projects-adding projects-listed \
+  projects-repos projects-repos-filtered projects-repos-chosen projects-repos-missing projects-repos-signed-out \
   formatted formatted-all formatted-streaming tool-image tool-image-broken tool-video tool-generic tool-picture \
   view-static view-streaming view-state view-action view-unknown view-too-large \
   visuals-settings visuals-enforced visuals-capped rules-settings rules-merge-ask rules-project-ask \
@@ -261,6 +262,28 @@ check projects-listed.json yes '"key": "add-project"'
 check projects-listed.json no  '"key": "projects-empty"'
 check projects-listed.json no  '"key": "projects-none"'
 check chat.json no  '"key": "projects"'
+# The GitHub repository combobox while adding a project.
+check projects-adding.json yes '"key": "repo-search"'
+check projects-adding.json no  '"key": "repo-list"'
+check projects-repos.json yes '"role": "combobox"'
+check projects-repos.json yes '"key": "repo-list"'
+check projects-repos.json yes '"role": "listbox"'
+check projects-repos.json yes '"key": "repo-option-captain:dotfiles"'
+check projects-repos.json yes '"activeDescendant": "repo-option-captain:dotfiles"'
+check projects-repos.json yes '"text": "Private"'
+check projects-repos.json yes '"text": "Archived"'
+check projects-repos.json yes '"key": "add-pick-folder"'
+check projects-repos-filtered.json yes '"text": "ham"'
+check projects-repos-filtered.json yes '"key": "repo-option-acme:velvet-hammer"'
+check projects-repos-filtered.json yes '"key": "repo-option-acme:handbook"'
+check projects-repos-filtered.json no  '"key": "repo-option-captain:dotfiles"'
+check projects-repos-chosen.json yes 'https://github.com/acme/payments-api'
+check projects-repos-chosen.json no  '"key": "repo-list"'
+check projects-repos-missing.json yes '"key": "repo-problem"'
+check projects-repos-missing.json yes 'https://cli.github.com'
+check projects-repos-missing.json yes '"key": "repo-retry"'
+check projects-repos-signed-out.json yes 'is not signed in to GitHub'
+check projects-repos-signed-out.json yes '"key": "repo-retry"'
 # The chief of staff's Markdown, formatted: the screenshot's headings bold on their own lines with
 # no asterisks, every construct, HTML shown as text, and a reply still arriving with its bold
 # unclosed.

@@ -46,7 +46,9 @@ The window has three columns, and every setting is in **Settings** (see
   plan". When Claude Code is not ready, a sign-in screen takes the conversation's place. With no
   projects yet, a card above the conversation explains them and offers **Add a project**; while
   you add one, a row above the message field offers **Choose a folder…**, **Yes**, **No** and
-  **Done adding**.
+  **Done adding**, under a combobox of your GitHub repositories, listed with the GitHub CLI you
+  already signed in with, your own private ones first and filtered as you type (see
+  [Projects](docs/firstmate.md#projects)).
   Cmd+F (Ctrl+F on Windows and Linux) opens a find bar that searches the whole conversation,
   and the conversation is kept across restarts in the app's data directory, earlier sessions
   above a divider (see [The conversation: find and history](docs/conversation.md)). Every
@@ -134,6 +136,8 @@ input** and **For you to do**.
 - `src/projects.rs`: the projects in firstmate's records (its registry `data/projects.md` and
   the clones under `projects/`), re-read every two seconds, and the system folder dialog the add
   flow uses.
+- `src/repos.rs`: the captain's GitHub repositories for the add flow, listed with `gh api`, put
+  in order and fuzzy-filtered, and the combobox's state; its view is `src/view/repos.rs`.
 - `src/bearings.rs`: what waits on the captain, read from firstmate's records by running its
   `bin/fm-bearings-snapshot.sh --json` whenever the records change.
 - `scripts/fake-claude`: a stand-in for `claude` that speaks the same protocol without an account.
@@ -347,6 +351,11 @@ It writes these files to `OUT_DIR`:
 | `projects-empty.png`, `projects-empty.json` | An installed home with no projects: the prompt to add the first one |
 | `projects-adding.png`, `projects-adding.json` | After **Add a project**: the request in the chat, the reply and the add controls |
 | `projects-listed.png`, `projects-listed.json` | Three projects from firstmate's registry |
+| `projects-repos.png`, `projects-repos.json` | Adding a project with the GitHub repository combobox open on sample repositories |
+| `projects-repos-filtered.png`, `projects-repos-filtered.json` | The combobox filtered by `ham`, with the matches marked |
+| `projects-repos-chosen.png`, `projects-repos-chosen.json` | A repository chosen: its address in the message |
+| `projects-repos-missing.png`, `projects-repos-missing.json` | No `gh` installed: how to install it and sign in, and **Try again** |
+| `projects-repos-signed-out.png`, `projects-repos-signed-out.json` | `gh` not signed in: how to sign in, and **Try again** |
 | `formatted.png`, `formatted.json` | A reply that once showed raw `**` asterisks, formatted |
 | `formatted-all.png`, `formatted-all.json` | Every Markdown construct the chat formats, and HTML shown as text |
 | `formatted-streaming.png`, `formatted-streaming.json` | A reply still arriving, with its bold not yet closed |
@@ -393,7 +402,9 @@ scenes have the fake `claude` use Read and Bash on the files in `scripts/fixture
 they need no Claude account; each waits for the fake's real processes before rendering. The
 firstmate and projects scenes run `git` on a scratch upstream repository under `target/`, so
 they need no network; the projects scenes write the registry firstmate's procedure would write,
-because the fake `claude` cannot run that procedure. The
+because the fake `claude` cannot run that procedure. The `projects-repos` scenes list sample
+repositories through a stand-in for `gh`, except `projects-repos-missing`, which runs a `gh` that
+does not exist. The
 walkthrough runs on the stub's `chat` scene. The `.json` files are Rune element trees. The script then checks them for the keys and text each
 state must or must not have (for example `needs-input`, `input-1`, `for-you-empty`, `peek`) and
 exits non-zero if any check fails.
