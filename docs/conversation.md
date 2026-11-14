@@ -40,6 +40,13 @@ it, a reply when it ends, a tool use when its result arrives.
 - **Rotation.** When the file passes 8 MB, the app moves it to `history.jsonl.1` (replacing an
   older one) when it next opens and starts a new file. Only the current file is read back, and at
   most its last 2,000 messages.
+- **Turning it off and clearing it.** The **Conversation history** section of Settings (Cmd+,
+  on macOS) has **Keep the conversation** (recommended, the default) and **Do not keep the
+  conversation**, which writes nothing new and shows nothing kept the next time the app opens.
+  **Clear history** asks first, then deletes `history.jsonl` and `history.jsonl.1` and takes the
+  earlier sessions off the chat; this session's messages stay on screen until you quit. The
+  choice is kept in `history.json`; if that file cannot be read, nothing is kept until you
+  choose again.
 - **After a restart.** The kept messages show above a divider: "Earlier sessions above. Your
   chief of staff does not remember them unless you link to one." The chief of staff starts each
   session fresh (`--no-session-persistence`), and nothing kept is sent to it on its own.
@@ -52,3 +59,5 @@ it, a reply when it ends, a tool use when its result arrives.
 | The third match current after stepping, scrolled into view | [find-stepped.png](screens/conversation/find-stepped.png) |
 | A query with no matches | [find-none.png](screens/conversation/find-none.png) |
 | After a restart: the earlier session above its divider, found by find | [history.png](screens/conversation/history.png) |
+| Settings, with the conversation history section | [settings.png](screens/settings/settings.png) |
+| Clear history asking before it deletes anything | [settings-clear.png](screens/settings/settings-clear.png) |

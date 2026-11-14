@@ -35,14 +35,12 @@ been tested yet (see [Trying the real sign-in](#trying-the-real-sign-in)).
 
 ## What works today
 
-The window has three columns:
+The window has three columns, and every setting is in **Settings** (see
+[Settings and menus](#settings-and-menus)):
 
 - **Agents** (left): the subagents the chief of staff manages. Selecting one opens a peek at its
   transcript in place of the chat; **Back to chat** closes it. Under them, **Projects** lists the
-  projects in firstmate's records with **Add project**. A **Firstmate** card at the bottom
-  shows the state of the managed firstmate clone and opens a page for installing and updating it.
-  Above it, **Visual replies**, **Firstmate rules** and **Tool approval** cards show each
-  setting in a few words and open its page; the tool-approval page links to the activity log.
+  projects in firstmate's records with **Add project**.
 - **Chief of staff** (middle): the conversation, with a message field and a **Send** button. A
   line under the heading says what runs it, such as "Claude Code · signed in with your Claude Max
   plan". When Claude Code is not ready, a sign-in screen takes the conversation's place. With no
@@ -72,6 +70,42 @@ The window has three columns:
   [Views in the chat](docs/json-render.md).
 - **Needs your input** and **For you to do** (right): questions the agents are waiting on, each
   with answer buttons, and steps only you can take, each with a **Done** button.
+
+## Settings and menus
+
+Configuration is out of the main window, behind the platform's Settings menu item:
+
+- **macOS** has native menus. **Settings…** (Cmd+,) is in the application menu. The Edit menu has
+  the standard text actions (Undo, Redo, Cut, Copy, Paste, Select All) and then **Find…**
+  (Cmd+F), **Find Next** (Cmd+G) and **Find Previous** (Shift+Cmd+G). The Window menu has
+  Minimize and Close, and Help has **Velvet Hammer Help**, which opens this README on GitHub.
+  Run from `cargo`, the application menu is titled with the binary's name, `velvet-hammer`; an
+  app bundle would give it the app's name.
+- **Windows and Linux** get no native menu bar, because Rune has none there. The window draws the
+  closest equivalent along its top instead: **File › Settings** (Ctrl+,) on Windows, **Edit ›
+  Preferences** (Ctrl+,) on Linux, as GNOME and KDE apps say, **Edit › Find…** (Ctrl+F), **Find
+  Next** (Ctrl+G) and **Find Previous** (Ctrl+Shift+G), **Window › Minimize** and **Help ›
+  Velvet Hammer Help**. Text actions stay on the usual keys; the drawn Edit menu does not list
+  them.
+
+**Settings** shows each section with its setting in a few words: **Tool approval**, **Visual
+replies**, **Firstmate rules** and **Firstmate** (the managed clone) each open their page, which
+works as before and has **All settings** to come back. **Conversation history** is set on the
+Settings page itself: **Keep the conversation** (recommended, the default) or **Do not keep the
+conversation**, and **Clear history**, which asks before it deletes anything (see
+[The conversation: find and history](docs/conversation.md#history)). The settings are kept in
+`history.json` beside the other settings files.
+
+The main window keeps what you use all the time: the agents and projects, the chat, **Needs your
+input** and **For you to do**.
+
+| State | Screenshot |
+| --- | --- |
+| The native Edit menu on macOS, from the running app | [macos-edit-menu.png](docs/screens/settings/macos-edit-menu.png) |
+| Settings, every section | [settings.png](docs/screens/settings/settings.png) |
+| **Clear history** asking first | [settings-clear.png](docs/screens/settings/settings-clear.png) |
+| The drawn menu bar on Windows, **File › Settings** open | [menu-windows.png](docs/screens/settings/menu-windows.png) |
+| The drawn menu bar on Linux, **Edit › Preferences** and Find open | [menu-linux.png](docs/screens/settings/menu-linux.png) |
 
 ## Layout of the code
 
@@ -116,11 +150,14 @@ The window has three columns:
   that turns it off.
 - `src/links.rs`: message links: their form, the chips they draw as, and the quotes the chief
   of staff gets for the messages the captain links to (see [docs/links.md](docs/links.md)).
+- `src/menus.rs`: the menus on each platform, native on macOS and drawn in the window elsewhere,
+  and the commands they share with the keyboard shortcuts.
 - `src/markdown.rs`: prepares the chief of staff's Markdown for Rune's Markdown view, keeping
   line breaks and showing HTML as text.
 - `src/view.rs`: the Rune view, with the tool-use views in `src/view/tool.rs`, the
-  json-render views in `src/view/ui.rs`, and the visual-replies and firstmate-rules pages in
-  `src/view/policy.rs`. Every element a
+  json-render views in `src/view/ui.rs`, the visual-replies and firstmate-rules pages in
+  `src/view/policy.rs`, and the Settings page and the drawn menu bar in
+  `src/view/settings.rs`. Every element a
   test or script reaches has a key.
 - `src/main.rs`: the `App` state (workspace, chief of staff, sign-in status, firstmate clone,
   message draft, what the middle column shows), the headless scenes, and the tests.
@@ -185,8 +222,7 @@ check the terms again for that case.
 ### Tool approval
 
 Every tool use of the chief of staff goes through the app's PreToolUse hook, which decides it
-with settings you choose on the **Tool approval** page (the card above **Firstmate** in the
-agents column). While the chief of staff runs as firstmate, [firstmate's rules](docs/firstmate-rules.md)
+with settings you choose on the **Tool approval** page (in **Settings**). While the chief of staff runs as firstmate, [firstmate's rules](docs/firstmate-rules.md)
 are checked first; a rule's deny is final, and its question is asked whatever these settings say.
 
 - **Mode.** **Run without asking** (recommended, and what a fresh install uses): the chief of
@@ -341,6 +377,11 @@ It writes these files to `OUT_DIR`:
 | `link-context.png`, `link-context.json` | A link in the captain's message as a chip, and the fake echoing the quote it was sent |
 | `link-missing.png`, `link-missing.json` | A link to a message that is not in the chat |
 | `open-link.png`, `open-link-*.json` | `scripts/open-link.json`: a link the system opened with the app, then the highlight fading |
+| `settings.png`, `settings.json` | Settings: every section, with conversation history set in place |
+| `settings-clear.png`, `settings-clear.json` | **Clear history** asking before it deletes the kept conversation |
+| `menu-windows.png`, `menu-windows.json` | The menu bar the window draws on Windows, with **File › Settings** open |
+| `menu-linux.png`, `menu-linux.json` | The same on Linux, with **Edit › Preferences** and Find open |
+| `menus-*.json` | `scripts/menus.json`: Settings and Find picked from the menu bar, then Cmd+, |
 | `walk-sent.json` | `scripts/walkthrough.json` after typing and sending a message |
 | `walk-end.png`, `walk-end.json` | The same script after answering an item, finishing the task and opening a peek |
 

@@ -8,7 +8,6 @@ use rune::{Cx, El, ScrollSpec, TextEdit, TextHighlight, col, el, row, text, text
 use rune_kit::{Highlight, Kit, Markdown};
 
 use crate::approval::{self, Effect, Mode};
-use crate::guard;
 
 use crate::find::{self, Hits};
 use crate::firstmate::{Checkout, Distro, Firstmate, Standing, Work};
@@ -17,9 +16,11 @@ use crate::model::{Action, Agent, Author, Item, ItemKind, Message, Plan, Status}
 use crate::projects::Project;
 
 mod policy;
+mod settings;
 mod tool;
 mod ui;
 use policy::{rules_page, visuals_page};
+use settings::{all_settings, menu_bar, settings_page};
 use tool::{picture_page, tool_use};
 
 pub fn view(s: &App, cx: &mut Cx<App>) -> El {
@@ -30,7 +31,8 @@ pub fn view(s: &App, cx: &mut Cx<App>) -> El {
     };
     let main = match (&s.showing, peeked, &s.status) {
         (Showing::Crew(id), ..) => crew_peek(s, id, t, cx.system_dark()),
-        (Showing::Firstmate, ..) => firstmate_page(&s.firstmate, t, cx.system_dark()),
+        (Showing::Settings, ..) => settings_page(s, t, cx.system_dark()),
+        (Showing::Firstmate, ..) => firstmate_page(s, t, cx.system_dark()),
         (Showing::Approvals, ..) => approvals_page(s, t, cx.system_dark()),
         (Showing::Activity, ..) => activity_page(s, t, cx.system_dark()),
         (Showing::Visuals, ..) => visuals_page(s, t, cx.system_dark()),
@@ -38,15 +40,14 @@ pub fn view(s: &App, cx: &mut Cx<App>) -> El {
         (Showing::Picture(id), ..) => picture_page(s, id, t, cx.system_dark()),
         (_, Some(agent), _) => peek(s, agent, t, cx.system_dark()),
         // A chief of staff that runs in the managed clone cannot chat until it is installed.
-        (_, None, Status::Ready(_)) if !s.chat_ready() => {
-            firstmate_page(&s.firstmate, t, cx.system_dark())
-        }
+        (_, None, Status::Ready(_)) if !s.chat_ready() => firstmate_page(s, t, cx.system_dark()),
         (_, None, Status::Ready(plan)) => chat(s, plan, t, cx.system_dark()),
         (_, None, status) => sign_in(status, t, cx.system_dark()),
     };
-    row()
+    let window = row()
         .w_full()
-        .h_full()
+        .grow(1.0)
+        .min_h(0.0)
         .fill(t.bg)
         .child(agents(s, t, cx.system_dark()))
         .child(main)
@@ -60,7 +61,13 @@ pub fn view(s: &App, cx: &mut Cx<App>) -> El {
                 .gap(space::S3)
                 .child(needs_input(s, t, cx.system_dark()))
                 .child(for_you(s, t)),
-        )
+        );
+    col()
+        .w_full()
+        .h_full()
+        .fill(t.bg)
+        .children(s.in_window_menus.then(|| menu_bar(s, t)))
+        .child(window)
 }
 
 fn agents(s: &App, t: Theme, dark: bool) -> El {
@@ -130,65 +137,7 @@ fn agents(s: &App, t: Theme, dark: bool) -> El {
     if let Some(projects) = &s.projects {
         list = list.child(project_list(s, projects, t, dark));
     }
-    let on = guard::Rule::ALL
-        .iter()
-        .filter(|r| s.rules.settings().on(**r))
-        .count();
-    list.child(el().grow(1.0))
-        .child(nav_card(
-            s,
-            "visuals",
-            "Visual replies",
-            s.visuals.settings().label().to_string(),
-            &[Showing::Visuals],
-            t,
-        ))
-        .child(nav_card(
-            s,
-            "rules",
-            "Firstmate rules",
-            format!("{on} of {} on", guard::Rule::ALL.len()),
-            &[Showing::Rules],
-            t,
-        ))
-        .child(nav_card(
-            s,
-            "approvals",
-            "Tool approval",
-            s.approvals.settings().mode.label().to_string(),
-            &[Showing::Approvals, Showing::Activity],
-            t,
-        ))
-        .child(nav_card(
-            s,
-            "firstmate",
-            "Firstmate",
-            firstmate_summary(&s.firstmate).to_string(),
-            &[Showing::Firstmate],
-            t,
-        ))
-}
-
-/// A card at the bottom of the agents column that opens the first of `pages`, and is
-/// highlighted while any of them shows. Its summary is keyed `<key>-summary`.
-fn nav_card(s: &App, key: &str, title: &str, summary: String, pages: &[Showing], t: Theme) -> El {
-    let open = pages[0].clone();
-    col()
-        .key(key)
-        .role("button")
-        .label(title.to_string())
-        .focusable(true)
-        .padding(space::S2)
-        .gap(2.0)
-        .radius(radius::SM)
-        .fill(if pages.contains(&s.showing) {
-            t.control_off
-        } else {
-            t.card
-        })
-        .on_press(move |s: &mut App| s.showing = open.clone())
-        .child(text(title.to_string()).font(type_::TITLE).color(t.text))
-        .child(note(&format!("{key}-summary"), &summary, t))
+    list
 }
 
 /// The projects in firstmate's records, and the way to add one.
@@ -268,7 +217,8 @@ fn firstmate_summary(fm: &Firstmate) -> &'static str {
 }
 
 /// The managed firstmate clone: how it stands against upstream, and installing and updating it.
-fn firstmate_page(fm: &Firstmate, t: Theme, dark: bool) -> El {
+fn firstmate_page(s: &App, t: Theme, dark: bool) -> El {
+    let fm = &s.firstmate;
     let path = fm.clone_dir().display().to_string();
     let mut body = col().key("firstmate-status").gap(space::S3).max_w(560.0);
     let mut buttons = row().gap(space::S2).flex_wrap();
@@ -361,9 +311,11 @@ fn firstmate_page(fm: &Firstmate, t: Theme, dark: bool) -> El {
         }
     }
     body = body.child(
-        buttons.child(button("firstmate-close", "Back to chat", t, |s| {
-            s.showing = Showing::Chat
-        })),
+        buttons
+            .child(all_settings("firstmate-all-settings", s, t))
+            .child(button("firstmate-close", "Back to chat", t, |s| {
+                s.showing = Showing::Chat
+            })),
     );
     if matches!(fm.distro(), Distro::Installed(_)) {
         body = body.child(note(
@@ -674,6 +626,7 @@ fn approvals_page(s: &App, t: Theme, dark: bool) -> El {
     ));
     let actions = row()
         .gap(space::S2)
+        .child(all_settings("approvals-all-settings", s, t))
         .child(button("approvals-activity", "Activity log", t, |s| {
             s.showing = Showing::Activity
         }))
@@ -736,7 +689,7 @@ fn activity_page(s: &App, t: Theme, dark: bool) -> El {
     );
     let actions = row()
         .gap(space::S2)
-        .child(button("activity-settings", "Settings", t, |s| {
+        .child(button("activity-settings", "Tool approval", t, |s| {
             s.showing = Showing::Approvals
         }))
         .child(button("activity-close", "Back to chat", t, |s| {

@@ -33,7 +33,8 @@ for scene in chat replied empty peek signed-out signing-in signed-in expired cli
   formatted formatted-all formatted-streaming tool-image tool-image-broken tool-video tool-generic tool-picture \
   view-static view-streaming view-state view-action view-unknown view-too-large \
   visuals-settings visuals-enforced visuals-capped rules-settings rules-merge-ask rules-project-ask \
-  find find-stepped find-none history link-copied link-opened link-context link-missing; do
+  find find-stepped find-none history link-copied link-opened link-context link-missing \
+  settings settings-clear menu-windows menu-linux; do
   headless --scene "$scene" --snap "$out/$scene.png"
   headless --scene "$scene" --tree "$out/$scene.json"
 done
@@ -59,6 +60,13 @@ for mark in opened faded; do
   headless --scene long-chat --script "$links" --at "mark:$mark" --tree "$out/open-link-$mark.json"
 done
 headless --scene long-chat --script "$links" --at mark:opened --snap "$out/open-link.png"
+
+# The menus: Settings and Find picked from the menu bar (macOS's native items, which headless
+# runs keep on every platform), then Settings again with Cmd+, (Ctrl+, off macOS).
+menus=$root/scripts/menus.json
+for mark in settings find shortcut; do
+  headless --scene chat --script "$menus" --at "mark:$mark" --tree "$out/menus-$mark.json"
+done
 
 failures=0
 check() { # check FILE yes|no PATTERN
@@ -143,8 +151,8 @@ check approved.json yes '"key": "needs-input-empty"'
 # Tool approval: the settings page with the recommended mode, three rules and an example; an ask
 # rule bringing up the full-input question while running without asking; the activity log of
 # the fake's real tool uses; and a settings file the app could not read.
-check chat.json yes '"key": "approvals"'
-check chat.json yes '"text": "Run without asking"'
+check settings.json yes '"key": "approvals"'
+check settings.json yes '"text": "Run without asking"'
 check approval-settings.json yes '"key": "approvals-page"'
 check approval-settings.json yes '"text": "● Run without asking (Recommended)"'
 check approval-settings.json yes 'will edit files, run commands and use tools without stopping for you, and every tool use is still logged'
@@ -169,13 +177,12 @@ check approval-activity.json no  '"key": "activity-empty"'
 check approval-corrupt.json yes '"key": "approvals-problem"'
 check approval-corrupt.json yes 'so every tool use asks you'
 check approval-corrupt.json yes '"text": "● Ask every time"'
-# The managed firstmate clone: a card under the agents, and its page in each state.
-check chat.json yes '"key": "firstmate"'
-check chat.json yes '"text": "up to date"'
+# The managed firstmate clone: a card in Settings, and its page in each state.
+check settings.json yes '"key": "firstmate"'
+check settings.json yes '"text": "up to date"'
 check chat.json no  '"key": "firstmate-page"'
 check firstmate-missing.json yes '"text": "Firstmate is not installed"'
 check firstmate-missing.json yes '"key": "firstmate-install"'
-check firstmate-missing.json yes '"text": "not installed"'
 check firstmate-missing.json no  '"key": "firstmate-check"'
 check firstmate-missing.json no  '"key": "chat"'
 check firstmate-installing.json yes '"text": "Installing firstmate"'
@@ -195,7 +202,6 @@ check firstmate-modified.json no  '"key": "firstmate-update"'
 check firstmate-blocked.json yes '"text": "The firstmate update is blocked"'
 check firstmate-blocked.json yes '"key": "firstmate-conflicts"'
 check firstmate-blocked.json yes '"text": "AGENTS.md"'
-check firstmate-blocked.json yes '"text": "update blocked"'
 check firstmate-blocked.json no  '"key": "firstmate-update"'
 # The chat running as firstmate: in the managed clone, with its own operational home.
 check firstmate-session.json yes '"key": "chat-input"'
@@ -309,8 +315,8 @@ check view-too-large.json yes 'more than the limit of 200, so it is not shown.'
 check view-too-large.json no  '"key": "tool-1-ui-main"'
 # Visual replies: the settings page, a list sent back once and shown as a view, and a reply that
 # ignored the feedback, sent back only once.
-check chat.json yes '"key": "visuals"'
-check chat.json yes '"text": "Enforce"'
+check settings.json yes '"key": "visuals"'
+check settings.json yes '"text": "Enforce"'
 check visuals-settings.json yes '"key": "visuals-page"'
 check visuals-settings.json yes '"text": "● Enforce (Recommended)"'
 check visuals-settings.json yes '"key": "visual-mode-nudge"'
@@ -327,10 +333,35 @@ check visuals-capped.json yes 'the reply lists 3 items.'
 check visuals-capped.json yes '"text": "Left as text."'
 check visuals-capped.json no  'looped'
 check visuals-capped.json no  '"text": "Chief of staff'"'"'s view"'
+# Settings: every section moved off the main window, the history controls, the confirmation
+# before clearing, and the in-window menus.
+check settings.json yes '"key": "settings-page"'
+check settings.json yes '"key": "approvals"'
+check settings.json yes '"key": "visuals"'
+check settings.json yes '"key": "rules"'
+check settings.json yes '"key": "firstmate"'
+check settings.json yes '"key": "history-section"'
+check settings.json yes '"text": "● Keep the conversation (Recommended)"'
+check settings.json yes '"key": "history-clear"'
+check settings.json no  '"key": "history-clear-confirm"'
+check settings-clear.json yes '"key": "history-clear-confirm"'
+check settings-clear.json yes '"key": "history-clear-cancel"'
+check chat.json no  '"key": "approvals"'
+check chat.json no  '"key": "history-section"'
+check menu-windows.json yes '"key": "menu-bar"'
+check menu-windows.json yes '"key": "menu-item-settings"'
+check menu-windows.json yes '"text": "Ctrl+,"'
+check menu-windows.json yes '"text": "Settings"'
+check menu-linux.json yes '"text": "Preferences"'
+check menu-linux.json yes '"key": "menu-item-find"'
+check menus-settings.json yes '"key": "settings-page"'
+check menus-find.json yes '"key": "find-bar"'
+check menus-find.json yes '"text": "1 of 1"'
+check menus-shortcut.json yes '"key": "settings-page"'
 # Firstmate's rules: the page with what two rules did, a merge question that names the pull
 # request, and a write into a project waiting for the captain.
-check chat.json yes '"key": "rules"'
-check chat.json yes '"text": "7 of 7 on"'
+check settings.json yes '"key": "rules"'
+check settings.json yes '"text": "7 of 7 on"'
 check rules-settings.json yes '"key": "rules-page"'
 check rules-settings.json yes '"key": "guard-merge-through-script"'
 check rules-settings.json yes '"key": "guard-publish-asks-captain-toggle"'

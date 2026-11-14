@@ -39,8 +39,9 @@ reports that. The app leaves the directory untouched; move it away and install a
 
 ## The Firstmate page
 
-The card at the bottom of the agents column shows the clone's state in a few words. Select it to
-open the Firstmate page, which shows one of these states:
+The **Firstmate** section in Settings (Cmd+, on macOS) shows the clone's state in a few words.
+Select it to open the Firstmate page, which shows one of these states (the chat shows it too
+while the clone is not installed):
 
 | State | Meaning | What you can do |
 | --- | --- | --- |

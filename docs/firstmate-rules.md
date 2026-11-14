@@ -6,7 +6,7 @@ publishing. Firstmate follows them as instructions. Velvet Hammer also checks th
 shows, in its PreToolUse hook (`src/guard.rs`, served by `src/bridge.rs`), before every tool use
 of the chief of staff.
 
-The **Firstmate rules** card in the agents column opens a page that lists each rule with what it
+The **Firstmate rules** section in Settings (Cmd+, on macOS) opens a page that lists each rule with what it
 enforces, what it matches and what it does, a switch to turn it off, and what it decided lately.
 All rules are on by default.
 
