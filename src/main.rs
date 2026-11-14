@@ -160,16 +160,7 @@ impl App {
         let visuals = store::Store::<visual::Mode>::open(data);
         let rules = store::Store::<guard::Settings>::open(data);
         let home = firstmate.home_dir();
-        let mut nicknames = store::Store::<crew::Nicknames>::open(&home.join("config"));
-        // A firstmate home starts with the example nickname written out, so the registry is
-        // there to read and edit. A file that exists is never rewritten here.
-        if chief.workplace().is_some()
-            && home.is_dir()
-            && !nicknames.path().exists()
-            && nicknames.problem().is_none()
-        {
-            nicknames.change(|_| {});
-        }
+        let nicknames = store::Store::<crew::Nicknames>::open(&home.join("config"));
         let mut runtime = pi::Runtime::open(data, pi::Release::official());
         runtime.list_models();
         chief.approve_with(bridge::Policies {
@@ -1466,6 +1457,22 @@ mod tests {
         for _ in 0..30 {
             rt.frame(1.0 / 60.0);
         }
+    }
+
+    #[test]
+    fn opening_the_app_writes_nothing_into_the_firstmate_home() {
+        let root = scratch("quiet-home");
+        let firstmate = Firstmate::showing(
+            root.join("clone"),
+            firstmate::UPSTREAM,
+            Distro::Installed(Checkout::default()),
+            None,
+        );
+        let home = firstmate.home_dir();
+        std::fs::create_dir_all(&home).unwrap();
+        let app = App::new(Box::new(Stub::default()), firstmate, &root.join("data"));
+        assert_eq!(std::fs::read_dir(&home).unwrap().count(), 0);
+        assert_eq!(app.nicknames.settings().presets.len(), 1);
     }
 
     #[test]

@@ -277,8 +277,8 @@ fn install(release: &Release, dir: &Path) -> Result<(), String> {
     let parent = dir.parent().expect("the runtime directory has a parent");
     fs::create_dir_all(parent)
         .map_err(|e| format!("Could not create {}: {e}", parent.display()))?;
-    let download = dir.with_extension("download");
-    let partial = dir.with_extension("partial");
+    let download = crate::store::suffixed(dir, ".download");
+    let partial = crate::store::suffixed(dir, ".partial");
     let _ = fs::remove_file(&download);
     let _ = fs::remove_dir_all(&partial);
     let result = (|| {
@@ -538,12 +538,9 @@ mod tests {
             runtime.models().read().unwrap().clone(),
             parse_models(lab::LISTING)
         );
-        assert!(
-            !root
-                .join("data/runtime")
-                .join(format!("pi-{VERSION}.partial"))
-                .exists()
-        );
+        let dir = runtime.dir();
+        assert!(!crate::store::suffixed(&dir, ".partial").exists());
+        assert!(!crate::store::suffixed(&dir, ".download").exists());
 
         let root = scratch("tampered");
         let mut runtime = Runtime::open(
