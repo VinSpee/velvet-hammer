@@ -1,0 +1,5 @@
+{"events": [
+  {"t": 0.3, "open_url": "velvet-hammer://message/000000000005"},
+  {"t": 0.8, "type": "mark", "name": "opened"},
+  {"t": 3.6, "type": "mark", "name": "faded"}
+]}

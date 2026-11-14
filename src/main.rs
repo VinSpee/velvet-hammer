@@ -8,12 +8,17 @@ mod bearings;
 mod bridge;
 mod claude;
 mod crew;
+mod find;
 mod firstmate;
 mod guard;
+mod history;
+mod links;
 mod markdown;
+mod menus;
 mod model;
 mod pi;
 mod projects;
+mod secondmates;
 mod store;
 mod tools;
 mod ui;
@@ -26,7 +31,7 @@ use std::sync::mpsc::{Receiver, channel};
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
-use rune::{AppSpec, Image, ImageCache, Player, TextEdit, Tx, Waker};
+use rune::{AppSpec, Image, ImageCache, Key, KeyEvent, Player, TextEdit, Tx, Waker};
 
 use agent::{ChiefOfStaff, Event, Stub};
 use approval::{Activity, Mode, Store};
@@ -35,6 +40,7 @@ use claude::Claude;
 use firstmate::{Checkout, Distro, Firstmate, Work, lab::Lab};
 use model::{Action, Author, Id, Message, Status, Workspace};
 use projects::Project;
+use secondmates::Step;
 use tools::{Handler, Picture};
 
 /// All app state: the workspace the agent layer fills, plus what only the UI needs.
@@ -68,6 +74,12 @@ pub struct App {
     pub key_check: fn() -> pi::Key,
     /// Why firstmate's pi account setting could not be written.
     pub pin_problem: Option<String>,
+    /// Whether the conversation is kept across restarts.
+    pub keeping: store::Store<history::Keeping>,
+    /// The conversation as kept across restarts.
+    pub history: history::History,
+    /// The find bar over the conversation.
+    pub find: find::Find,
     /// Keeps `captain` current from firstmate's records, when the chief of staff is firstmate.
     watcher: Option<bearings::Watcher>,
     /// What firstmate's records say waits on the captain.
@@ -90,10 +102,33 @@ pub struct App {
     picking: Option<Receiver<Result<Option<PathBuf>, String>>>,
     /// Why the folder dialog could not open.
     pub pick_problem: Option<String>,
+    /// Firstmate's second mates: their records, the flow that adds one, and the actions on them.
+    pub mates: secondmates::Mates,
     wake: Option<Waker>,
     /// The captain hold the next message answers, by its key.
     pub answering: Option<String>,
     pub draft: TextEdit,
+    /// The chat message under the pointer, whose link button shows.
+    pub hovered: Option<usize>,
+    /// The element that has focus, as of the last frame.
+    pub focused: Option<String>,
+    /// The message whose link was just copied, by its id.
+    pub copied: Option<String>,
+    /// The message a link just went to, highlighted until the time given, or the id of one that
+    /// is not in the chat.
+    pub flash: Option<(Result<String, String>, f64)>,
+    /// Seconds since the app started, as of the last frame.
+    pub now: f64,
+    /// An element to scroll to on the next frame, once the view shows it.
+    pub scroll_to: Option<String>,
+    /// Whose menu conventions the app follows.
+    pub platform: menus::Platform,
+    /// The window draws its own menu bar, as where Rune has no native one.
+    pub in_window_menus: bool,
+    /// The in-window menu that is open, by its title.
+    pub open_menu: Option<&'static str>,
+    /// Clear history was pressed and waits for the captain to confirm.
+    pub confirm_clear: bool,
     pub showing: Showing,
     /// The chat message the chief of staff is still writing.
     pub replying: Option<usize>,
@@ -131,6 +166,10 @@ pub enum Showing {
     Peek(Id),
     /// A firstmate crewmate's terminal, by its task id.
     Crew(String),
+    /// A second mate's page, by its id.
+    Mate(String),
+    /// The guided flow for adding a second mate.
+    AddMate,
     /// The managed firstmate clone: its state, and installing and updating it.
     Firstmate,
     /// The tool-approval settings.
@@ -143,6 +182,8 @@ pub enum Showing {
     Rules,
     /// Workers on other providers: the pi runtime, the key, and the worker nicknames.
     Workers,
+    /// Every setting, by section.
+    Settings,
     /// One image from the chat, enlarged, by its tool use's id.
     Picture(String),
 }
@@ -156,6 +197,8 @@ impl App {
         let project_watcher = chief
             .workplace()
             .map(|_| projects::Watcher::start(&firstmate.home_dir()));
+        let home = firstmate.home_dir();
+        let mates = secondmates::Mates::new(chief.workplace().map(|_| home.as_path()), data);
         let approvals = Store::open(data);
         let visuals = store::Store::<visual::Mode>::open(data);
         let rules = store::Store::<guard::Settings>::open(data);
@@ -163,6 +206,8 @@ impl App {
         let nicknames = store::Store::<crew::Nicknames>::open(&home.join("config"));
         let mut runtime = pi::Runtime::open(data, pi::Release::official());
         runtime.list_models();
+        let keeping = store::Store::<history::Keeping>::open(data);
+        let mut history = history::History::new(data);
         chief.approve_with(bridge::Policies {
             approval: approvals.shared(),
             visual: visuals.shared(),
@@ -179,8 +224,14 @@ impl App {
                 }
             }
         });
+        let mut ws = chief.open();
+        if keeping.settings().0 {
+            let earlier = history.load();
+            ws.earlier = earlier.len();
+            ws.chat.splice(0..0, earlier);
+        }
         let mut app = App {
-            ws: chief.open(),
+            ws,
             chief,
             status: Status::Checking,
             firstmate,
@@ -196,6 +247,9 @@ impl App {
             key: None,
             key_check: pi::key_state,
             pin_problem: None,
+            keeping,
+            history,
+            find: find::Find::default(),
             watcher,
             captain: Bearings::default(),
             captain_problem: None,
@@ -206,9 +260,20 @@ impl App {
             picker: projects::pick_folder,
             picking: None,
             pick_problem: None,
+            mates,
             wake: None,
             answering: None,
             draft: TextEdit::default(),
+            hovered: None,
+            focused: None,
+            copied: None,
+            flash: None,
+            now: 0.0,
+            scroll_to: None,
+            platform: menus::Platform::current(),
+            in_window_menus: menus::Platform::current() != menus::Platform::Mac,
+            open_menu: None,
+            confirm_clear: false,
             showing: Showing::Chat,
             replying: None,
             media: HashMap::new(),
@@ -219,8 +284,38 @@ impl App {
             window_wake,
             media_wake,
         };
+        // A tool use kept from an earlier session shows as it did, but for its image bytes.
+        for i in 0..app.ws.earlier {
+            if let Some(tool) = app.ws.chat[i].tool.clone()
+                && tool.result.is_some()
+            {
+                let media = app.media_for(&tools::handler(&tool));
+                app.media.insert(tool.id, media);
+            }
+        }
         app.drain();
         app
+    }
+
+    /// Deletes the kept conversation and takes the earlier sessions off the chat. This
+    /// session's messages stay until the app quits.
+    pub fn clear_history(&mut self) {
+        self.confirm_clear = false;
+        self.history.clear();
+        let earlier = std::mem::take(&mut self.ws.earlier);
+        self.ws.chat.drain(..earlier);
+        self.replying = self.replying.map(|i| i - earlier);
+        self.find.current = 0;
+        self.hovered = None;
+    }
+
+    /// Writes the finished chat message `i` to the history, if the captain keeps it.
+    fn keep(&mut self, i: usize) {
+        if self.keeping.settings().0
+            && let Some(message) = self.ws.chat.get(i)
+        {
+            self.history.record(message);
+        }
     }
 
     /// Applies what the agent layer reported; true when anything changed.
@@ -229,6 +324,7 @@ impl App {
         let mut changed = self.firstmate.poll() | !events.is_empty();
         changed |= self.runtime.poll();
         changed |= self.follow_peek();
+        changed |= self.drain_mates();
         if let Some(projects) = self.project_watcher.as_mut().and_then(|w| w.poll()) {
             self.projects = Some(projects);
             changed = true;
@@ -277,18 +373,36 @@ impl App {
                         self.replying = Some(self.ws.chat.len() - 1);
                     }
                 }
-                if done {
-                    self.replying = None;
+                if done && let Some(i) = self.replying.take() {
+                    self.keep(i);
                 }
             }
             Event::Problem(text) => {
-                self.replying = None;
+                // A reply cut short is kept as far as it got.
+                if let Some(i) = self.replying.take() {
+                    self.keep(i);
+                }
                 self.ws.chat.push(Message::new(Author::Problem, text));
+                self.keep(self.ws.chat.len() - 1);
             }
             Event::Item(item) => self.ws.items.push(item),
             Event::Withdrawn(id) => self.ws.items.retain(|i| i.id != id),
             Event::Activity(entry) => self.activity.record(entry),
-            Event::Notice(text) => self.ws.chat.push(Message::new(Author::App, text)),
+            Event::Notice(text) => {
+                self.ws.chat.push(Message::new(Author::App, text));
+                self.keep(self.ws.chat.len() - 1);
+            }
+            Event::AddMate(scope) => {
+                let words = if self.add_mate(Some(scope)) {
+                    "Your chief of staff opened Add a second mate. Answer its questions there; \
+                     nothing is created until you say yes."
+                } else {
+                    "Your chief of staff tried to open Add a second mate, but firstmate is busy. \
+                     Try again when it finishes."
+                };
+                self.ws.chat.push(Message::new(Author::App, words));
+                self.keep(self.ws.chat.len() - 1);
+            }
             // A view tool use arrives first as it starts streaming, then whole.
             Event::Tool(tool) => {
                 let id = tool.id.clone();
@@ -311,7 +425,15 @@ impl App {
                 tool.result = Some(result);
                 let handler = tools::handler(tool);
                 let media = self.media_for(&handler);
-                self.media.insert(id, media);
+                self.media.insert(id.clone(), media);
+                if let Some(i) = self
+                    .ws
+                    .chat
+                    .iter()
+                    .position(|m| m.tool.as_ref().is_some_and(|t| t.id == id))
+                {
+                    self.keep(i);
+                }
             }
         }
     }
@@ -480,6 +602,9 @@ impl App {
 
     pub fn act(&mut self, action: Action) {
         self.ws.apply(&action);
+        if matches!(action, Action::Say(_) | Action::Ui(_)) {
+            self.keep(self.ws.chat.len() - 1);
+        }
         self.chief.act(&self.ws, &action);
         self.drain();
     }
@@ -798,8 +923,77 @@ fn replied(s: &App) -> bool {
             .is_some_and(|m| m.author != Author::Captain)
 }
 
-fn poll(s: &mut App, _: f64, _: &mut Tx) -> bool {
-    s.drain()
+fn poll(s: &mut App, now: f64, tx: &mut Tx) -> bool {
+    s.now = now;
+    let mut changed = s.drain() | s.follow_find(tx);
+    if let Some(key) = s.scroll_to.take() {
+        tx.scroll_center(key);
+    }
+    if s.flash.as_ref().is_some_and(|(_, until)| *until <= now) {
+        s.flash = None;
+        changed = true;
+    }
+    let focused = tx.focused().map(str::to_string);
+    if focused != s.focused {
+        s.focused = focused;
+        changed = true;
+    }
+    changed
+}
+
+/// How long a message a link went to stays highlighted, in seconds.
+const FLASH: f64 = 2.5;
+
+impl App {
+    /// Goes to the message a message link names: shows the chat, scrolls to the message and
+    /// highlights it briefly, or says the message is not in the chat. Any other link opens in the
+    /// browser. `url` may come from outside the app (a link the system opened), so it is parsed
+    /// and nothing else is done with it.
+    pub fn open_link(&mut self, url: &str, tx: &mut Tx) {
+        match links::parse(url.trim()) {
+            Some(id) => {
+                let id = id.to_string();
+                self.go_to(&id);
+                tx.wake_after(Duration::from_secs_f64(FLASH));
+            }
+            None => {
+                let _ = tx.open_url(url);
+            }
+        }
+    }
+
+    pub fn go_to(&mut self, id: &str) {
+        self.showing = Showing::Chat;
+        let target = match self.ws.message(id) {
+            Some((i, m)) => {
+                self.scroll_to = Some(view::message_key(i, m));
+                Ok(id.to_string())
+            }
+            None => Err(id.to_string()),
+        };
+        self.flash = Some((target, self.now + FLASH));
+    }
+}
+
+/// The app's keyboard shortcuts, heard when the focused control does not take the key. Cmd is
+/// Ctrl off macOS.
+fn on_key(s: &mut App, key: &KeyEvent, tx: &mut Tx) -> bool {
+    if key.is_command('f') {
+        s.command(menus::Command::Find, tx);
+    } else if key.is_command('g') && key.mods.shift {
+        s.command(menus::Command::FindPrevious, tx);
+    } else if key.is_command('g') {
+        s.command(menus::Command::FindNext, tx);
+    } else if key.is_command(',') {
+        s.command(menus::Command::Settings, tx);
+    } else if key.key == Key::Escape && s.open_menu.is_some() {
+        s.open_menu = None;
+    } else if key.key == Key::Escape && s.find.open {
+        s.close_find(tx);
+    } else {
+        return false;
+    }
+    true
 }
 
 fn setup(s: &mut App, wake: Waker) {
@@ -811,13 +1005,14 @@ fn setup(s: &mut App, wake: Waker) {
         watcher.connect(wake.clone());
     }
     s.runtime.connect(wake.clone());
+    s.mates.connect(wake.clone());
     s.wake = Some(wake.clone());
     let _ = s.window_wake.set(wake.clone());
     s.chief.connect(wake);
 }
 
 fn main() {
-    rune::run(AppSpec::<App> {
+    let mut app = rune::App::new(AppSpec::<App> {
         scenes: &[
             ("chat", |s| *s = stub()),
             ("replied", |s| {
@@ -1160,6 +1355,68 @@ fn main() {
                 *s = fake_in_firstmate(&lab, true);
                 s.settle(|s| s.captain.crew.iter().any(|c| c.runs.is_some()));
             }),
+            // Find in the conversation: a long chat for scripts/find.json, matches with the first
+            // current, the third current after stepping, a query with none, and the history kept
+            // from an earlier session.
+            ("long-chat", |s| *s = long_chat(40)),
+            ("find", |s| *s = finding("release", 0)),
+            ("find-stepped", |s| *s = finding("release", 2)),
+            ("find-none", |s| *s = finding("zebra", 0)),
+            ("history", |s| {
+                *s = reopened("history");
+                s.find.open = true;
+                s.find.query.text = "zeppelin".into();
+            }),
+            // Message links: a link copied, one opened scrolling to its message, a link in the
+            // captain's message quoted to the chief of staff, and one to a missing message.
+            ("link-copied", |s| {
+                *s = stub();
+                s.hovered = Some(1);
+                s.copied = Some(s.ws.chat[1].id.clone());
+            }),
+            ("link-opened", |s| {
+                *s = long_chat(40);
+                s.ws.items.clear();
+                s.go_to("000000000005");
+            }),
+            ("link-context", |s| {
+                *s = fake_in(Mode::Run);
+                say(s, "Plan: merge the docs PR first, then tag the release.");
+                let answer = links::url(&s.ws.chat[s.ws.chat.len() - 1].id);
+                say(s, &format!("do what this answer says: {answer}"));
+            }),
+            ("link-missing", |s| {
+                *s = fake_in(Mode::Run);
+                say(s, &format!("what did {} say?", links::url("0000deadbeef")));
+            }),
+            // Settings: every section, the confirmation before clearing the kept conversation,
+            // and the menus the window draws where Rune has no native menu bar (Windows' File
+            // menu, Linux's Edit menu).
+            ("settings", |s| {
+                *s = App::new(
+                    Box::new(Stub::default()),
+                    installed_firstmate(),
+                    &shown_dir("settings"),
+                );
+                s.showing = Showing::Settings;
+            }),
+            ("settings-clear", |s| {
+                *s = reopened("settings-clear");
+                s.showing = Showing::Settings;
+                s.confirm_clear = true;
+            }),
+            ("menu-windows", |s| {
+                *s = stub();
+                s.in_window_menus = true;
+                s.platform = menus::Platform::Windows;
+                s.open_menu = Some("File");
+            }),
+            ("menu-linux", |s| {
+                *s = stub();
+                s.in_window_menus = true;
+                s.platform = menus::Platform::Linux;
+                s.open_menu = Some("Edit");
+            }),
             ("rules-project-ask", |s| {
                 *s = rules_lab("rules-project-ask");
                 let file = s.firstmate.home_dir().join("projects/site/README.md");
@@ -1167,12 +1424,300 @@ fn main() {
                 s.send();
                 s.settle(|s| s.ws.needs_input().next().is_some());
             }),
+            // Second mates, on the fake `claude` running as firstmate in a lab home whose
+            // stand-in scripts behave as firstmate's did in a scratch home: none yet, five in
+            // each state, each one's page, a peek at one's terminal, the guided add at each
+            // step, its outcome and a refusal, a refused retirement, a message and its reply,
+            // an escalation answered, work the chief of staff routed, and the add opened from
+            // the chat.
+            ("mates-none", |s| {
+                let lab = Lab::at(&Path::new("/tmp/velvet-hammer").join("mates-none"));
+                *s = fake_in_firstmate(&lab, true);
+                s.settle(|s| s.mates.records.is_some() && s.projects.is_some());
+            }),
+            ("mates-listed", |s| *s = mates_lab("mates-listed").0),
+            ("mate-idle", |s| {
+                *s = mates_lab("mate-idle").0;
+                s.open_mate("docs");
+            }),
+            ("mate-working", |s| {
+                *s = mates_lab("mate-working").0;
+                s.open_mate("billing");
+            }),
+            ("mate-stopped", |s| {
+                *s = mates_lab("mate-stopped").0;
+                s.open_mate("infra");
+            }),
+            ("mate-mismatch", |s| {
+                *s = mates_lab("mate-mismatch").0;
+                s.open_mate("web");
+            }),
+            ("mate-peek", |s| {
+                let (app, lab) = mates_lab("mate-peek");
+                lab.pane("docs", "$ bin/fm-watch.sh\nno routed work; waiting quietly");
+                *s = app;
+                s.showing = Showing::Crew("docs".into());
+                s.settle(|s| s.peek.as_ref().is_some_and(|p| p.pane.is_some()));
+            }),
+            ("add-mate-scope", |s| {
+                *s = adding_mate("add-mate-scope", Step::Scope).0
+            }),
+            ("add-mate-projects", |s| {
+                *s = adding_mate("add-mate-projects", Step::Projects).0
+            }),
+            ("add-mate-name", |s| {
+                *s = adding_mate("add-mate-name", Step::Name).0
+            }),
+            ("add-mate-runtime", |s| {
+                *s = adding_mate("add-mate-runtime", Step::Runtime).0
+            }),
+            ("add-mate-confirm", |s| {
+                *s = adding_mate("add-mate-confirm", Step::Confirm).0
+            }),
+            ("add-mate-created", |s| {
+                let (app, lab) = adding_mate("add-mate-created", Step::Confirm);
+                *s = app;
+                s.create_mate();
+                s.settle_mates();
+                // Firstmate's snapshot now reports the new mate, idle in its new session.
+                lab.bearings(&with_mate(bearings::MATES, "payments"));
+                s.settle(|s| s.captain.mate("payments").is_some() && replied(s));
+            }),
+            ("add-mate-refused", |s| {
+                let (app, lab) = adding_mate("add-mate-refused", Step::Confirm);
+                lab.refuse("fm-home-seed.sh", SEED_REFUSAL);
+                *s = app;
+                s.create_mate();
+                s.settle_mates();
+            }),
+            ("mate-retire-confirm", |s| {
+                *s = mates_lab("mate-retire-confirm").0;
+                s.open_mate("billing");
+                s.confirm_mate(secondmates::Op::Retire("billing".into()));
+            }),
+            ("mate-retire-refused", |s| {
+                let (app, lab) = mates_lab("mate-retire-refused");
+                lab.mate_child("billing", "invoice-retries");
+                *s = app;
+                s.open_mate("billing");
+                s.confirm_mate(secondmates::Op::Retire("billing".into()));
+                s.confirmed_mate();
+                s.settle_mates();
+            }),
+            ("mate-message", |s| {
+                *s = mates_lab("mate-message").0;
+                message_docs(s);
+            }),
+            ("mate-replied", |s| {
+                let (app, lab) = mates_lab("mate-replied");
+                *s = app;
+                message_docs(s);
+                lab.mate_says("docs", &docs_reply());
+                s.settle(|s| {
+                    s.mates
+                        .channel("docs")
+                        .is_some_and(|c| c.conversation().len() == 4)
+                });
+            }),
+            ("mate-escalation", |s| {
+                *s = mates_lab("mate-escalation").0;
+                s.answer_mate_hold("support", "refund-window");
+            }),
+            ("mate-escalation-answered", |s| {
+                *s = mates_lab("mate-escalation-answered").0;
+                s.answer_mate_hold("support", "refund-window");
+                s.mates.draft("support").text = "30 days, counted from delivery.".into();
+                s.send_to_mate("support");
+                s.settle_mates();
+                s.settle(|s| {
+                    s.mates
+                        .channel("support")
+                        .is_some_and(|c| !c.sent.is_empty())
+                });
+            }),
+            ("mate-routed", |s| {
+                *s = mates_lab("mate-routed").0;
+                say(
+                    s,
+                    "shell: bin/fm-send.sh docs Add a search page to the docs",
+                );
+            }),
+            ("mate-from-chat", |s| {
+                *s = mates_lab("mate-from-chat").0;
+                s.draft.text = "mate: the billing service, its invoices and payment retries".into();
+                s.send();
+                s.settle(|s| s.showing == Showing::AddMate);
+            }),
         ],
         min_size: Some((900.0, 560.0)),
         setup: Some(setup),
         poll: Some(poll),
+        on_key: Some(on_key),
         ..AppSpec::new("Velvet Hammer", (1100.0, 720.0), init, view::view)
-    });
+    })
+    // A message link the system opened with the app; macOS needs the app bundle to declare the
+    // scheme first (see docs/links.md).
+    .on_open_url(|s: &mut App, url: &str, tx: &mut Tx| s.open_link(url, tx))
+    // The Mac's Edit and Window menus, with Settings, Find and Help added. Rune has no native
+    // menu bar elsewhere, where the window draws its own (see menus.rs); headless runs keep the
+    // native items so scripts can pick them.
+    .standard_menus();
+    if cfg!(target_os = "macos") || rune::is_headless() {
+        for item in menus::native() {
+            app = app.menu_item(item);
+        }
+    }
+    app.run();
+}
+
+/// The projects in the second-mate scenes: the sample registry and one local-only project.
+const MATE_PROJECTS: &str = "# Projects\n\n\
+    - velvet-hammer [no-mistakes-prod-only] - The desktop app (added 2026-11-13)\n\
+    - site [direct-PR +yolo branch=web/] - The marketing site (added 2026-11-02)\n\
+    - scratch [local-only] - Experiments (added 2026-11-10)\n";
+
+/// A refusal `bin/fm-home-seed.sh` prints, in its own words.
+const SEED_REFUSAL: &str = "error: seeded project site at /tmp/velvet-hammer/add-mate-refused/\
+    data/secondmates/payments/projects/site is not initialized for no-mistakes; refusing to \
+    mutate preexisting clone";
+
+/// The reply the docs mate appends to its parent channel, as `bin/fm-secondmate-report.sh`
+/// appends one, answering the message `message_docs` sends a moment before.
+fn docs_reply() -> String {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs());
+    format!(
+        "done [corr=0000000000000002] [at={}]: Not yet. The search page is **built** and \
+         waits for its pull request to merge. (via-helper)",
+        now + 60
+    )
+}
+
+/// [`mates_app`] in a lab at `/tmp/velvet-hammer/<name>`, a short path for screenshots.
+fn mates_lab(name: &str) -> (App, Lab) {
+    let lab = Lab::at(&Path::new("/tmp/velvet-hammer").join(name));
+    (mates_app(&lab), lab)
+}
+
+/// The app on the fake `claude` running as firstmate in `lab`, with five second mates, one in
+/// each state the bearings fixture reports, a conversation with `docs` and a hold `support`
+/// escalated.
+fn mates_app(lab: &Lab) -> App {
+    lab.registry(MATE_PROJECTS);
+    lab.bearings(bearings::MATES);
+    for (id, charter, scope, projects) in [
+        (
+            "billing",
+            "Owns the billing service: invoices, payment retries and dashboards.",
+            "billing service work",
+            &["site"][..],
+        ),
+        (
+            "docs",
+            "Keeps the documentation site accurate and current.",
+            "documentation site work: pages, examples and the docs build",
+            &["velvet-hammer"][..],
+        ),
+        (
+            "infra",
+            "Looks after deploys and the build machines.",
+            "deploy and CI infrastructure",
+            &["site"][..],
+        ),
+        (
+            "web",
+            "Runs the marketing site.",
+            "marketing site pages and copy",
+            &["site"][..],
+        ),
+        (
+            "support",
+            "Handles customer support tooling and refunds.",
+            "support tooling and refund policy",
+            &[][..],
+        ),
+    ] {
+        lab.second_mate(id, charter, scope, projects);
+    }
+    lab.mate_inbox(
+        "docs",
+        1,
+        "2026-11-14T00:58:32Z",
+        "ebbe292e407ab6f6",
+        "Please check whether the docs build passes on main.",
+        true,
+    );
+    lab.mate_says(
+        "docs",
+        "done [corr=ebbe292e407ab6f6] [at=1794617925]: The docs build passes on main; the last \
+         run took 41 seconds. (via-helper)",
+    );
+    lab.mate_says(
+        "support",
+        "needs-decision [key=captain-hold-refund-window-1] [at=1794617854]: captain hold \
+         refund-window: Refund within 14 days or 30 days of purchase?",
+    );
+    let mut app = fake_in_firstmate(lab, true);
+    app.settle(|s| s.mates.list().len() == 5 && s.captain.mates.len() == 5 && s.projects.is_some());
+    app
+}
+
+/// The add flow in `mates_lab`, answered up to `step`.
+fn adding_mate(name: &str, step: Step) -> (App, Lab) {
+    let (app, lab) = mates_lab(name);
+    (answered(app, &lab, step), lab)
+}
+
+/// The add flow in `app`, answered up to `step`. The lab's firstmate names two runtimes, so the
+/// flow asks which one.
+fn answered(mut app: App, lab: &Lab, step: Step) -> App {
+    lab.harness("secondmate", "codex");
+    app.add_mate(None);
+    let answers: [&dyn Fn(&mut App); 4] = [
+        &|s| s.mates.adding.charter.text = "Payments: card retries, refunds and payouts.".into(),
+        &|s| s.toggle_mate_project("site"),
+        &|s| s.mates.adding.name.text = "payments".into(),
+        &|s| s.mates.adding.runtime = 1,
+    ];
+    for answer in answers {
+        if app.mates.adding.step() == step {
+            break;
+        }
+        answer(&mut app);
+        app.add_mate_next();
+    }
+    app
+}
+
+/// The bearings snapshot `json` with one more second mate, idle in a running session.
+fn with_mate(json: &str, id: &str) -> String {
+    let mut doc: serde_json::Value = serde_json::from_str(json).expect("a bearings snapshot");
+    doc["secondmates"]
+        .as_array_mut()
+        .expect("secondmates")
+        .push(serde_json::json!({
+            "id": id, "state": "no_active_work", "doing": "No active child work",
+            "provenance": "structured-home", "freshness": "fresh", "age_seconds": 0,
+            "contradiction": false, "reason": "-"
+        }));
+    doc["endpoints"]
+        .as_array_mut()
+        .expect("endpoints")
+        .push(serde_json::json!({
+            "id": id, "backend": "tmux", "target": format!("firstmate:fm-{id}"),
+            "exists": true, "agent": "alive"
+        }));
+    doc.to_string()
+}
+
+/// The captain writes to the docs mate from its page and the message is delivered.
+fn message_docs(s: &mut App) {
+    s.open_mate("docs");
+    s.mates.draft("docs").text = "Is the search page live yet?".into();
+    s.send_to_mate("docs");
+    s.settle_mates();
+    s.settle(|s| s.mates.channel("docs").is_some_and(|c| c.sent.len() == 2));
 }
 
 /// The list the visual-replies scenes and tests have the fake send as text.
@@ -1403,6 +1948,55 @@ fn press(s: &mut App, id: &str) {
     s.fire(VIEW, &trigger, did);
 }
 
+/// The stub's chat with `n` more messages from the chief of staff, every tenth naming the
+/// release, so the matches are far apart.
+fn long_chat(n: usize) -> App {
+    let mut app = stub();
+    for i in 0..n {
+        let words = if i % 10 == 0 {
+            format!("Reply {i}: the **release** is on track.")
+        } else {
+            format!("Reply {i}: nothing new.")
+        };
+        let mut reply = Message::new(Author::ChiefOfStaff, words);
+        // Fixed ids, so scripts can link to them (scripts/open-link.json).
+        reply.id = format!("{i:012x}");
+        app.ws.chat.push(reply);
+    }
+    app
+}
+
+/// The stub's chat with the find bar open on `query`, at match `current`.
+fn finding(query: &str, current: usize) -> App {
+    let mut app = long_chat(40);
+    app.ws.items.clear();
+    app.find.open = true;
+    app.find.query.text = query.into();
+    app.find.searched = query.into();
+    app.find.current = current;
+    app.find.reveal = true;
+    app
+}
+
+/// The stub on a data directory where an earlier session asked about the zeppelin plan.
+fn reopened(name: &str) -> App {
+    let data = shown_dir(name);
+    let mut first = App::new(Box::new(Stub::default()), installed_firstmate(), &data);
+    first.draft.text = "Remember the zeppelin plan for the launch.".into();
+    first.send();
+    drop(first);
+    App::new(Box::new(Stub::default()), installed_firstmate(), &data)
+}
+
+/// An empty data directory at `/tmp/velvet-hammer/NAME`, for scenes whose screenshots show where
+/// a file is kept, so they name no one's home directory.
+fn shown_dir(name: &str) -> PathBuf {
+    let dir = Path::new("/tmp/velvet-hammer").join(name);
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("scene directory");
+    dir
+}
+
 /// Sends `text` and waits for the reply, for scenes.
 fn say(s: &mut App, text: &str) {
     s.draft.text = text.into();
@@ -1440,6 +2034,7 @@ mod tests {
         };
         let mut rt = Runtime::new(app, view::view, (1100.0, 720.0), env);
         rt.poll = Some(poll);
+        rt.on_key = Some(on_key);
         rt.frame(0.0);
         rt
     }
@@ -1984,7 +2579,7 @@ mod tests {
     fn the_firstmate_card_opens_its_page_until_closed() {
         let mut rt = runtime();
         assert!(rt.find("firstmate-page").is_none());
-        tap(&mut rt, "firstmate");
+        open_setting(&mut rt, "firstmate");
         assert_eq!(rt.state.showing, Showing::Firstmate);
         assert!(rt.find("firstmate-page").is_some());
         assert!(rt.find("firstmate-check").is_some());
@@ -2542,16 +3137,16 @@ mod tests {
         let home = scratch("signed-in");
         let mut rt = runtime_with(on_fake(FAKE_CLAUDE, &home, &[]));
         wait(&mut rt, settled);
-        tap(&mut rt, "approvals");
+        open_setting(&mut rt, "approvals");
         assert_eq!(rt.state.showing, Showing::Approvals);
         assert!(rt.find("mode-run-without-asking").is_some());
         assert!(rt.find("rules-empty").is_some());
-        tap(&mut rt, "mode-ask-every-time");
+        tap_scrolled(&mut rt, "mode-ask-every-time");
         assert_eq!(rt.state.approvals.settings().mode, Mode::Ask);
-        tap(&mut rt, "rule-effect-deny");
+        tap_scrolled(&mut rt, "rule-effect-deny");
         rt.state.form.tool.text = "Bash".into();
         rt.state.form.pattern.text = "git push".into();
-        tap(&mut rt, "rule-save");
+        tap_scrolled(&mut rt, "rule-save");
         assert!(rt.find("rule-0").is_some());
         assert_eq!(
             rt.state.approvals.settings().rules[0].describe(),
@@ -2579,7 +3174,7 @@ mod tests {
     fn reset_asks_first_then_restores_the_recommended_default() {
         let mut rt = runtime_with(fake_in(Mode::Ask));
         rt.state.approvals.change(|s| s.rules = sample_rules());
-        tap(&mut rt, "approvals");
+        open_setting(&mut rt, "approvals");
         assert!(rt.find("rule-2").is_some());
         tap(&mut rt, "rule-2-up");
         assert_eq!(rt.state.approvals.settings().rules[1].tool, "Edit");
@@ -2605,7 +3200,7 @@ mod tests {
         let mut rt = runtime_with(on_fake(FAKE_CLAUDE, &home, &[]));
         wait(&mut rt, settled);
         assert_eq!(rt.state.approvals.settings().mode, Mode::Ask);
-        tap(&mut rt, "approvals");
+        open_setting(&mut rt, "approvals");
         assert!(rt.find("approvals-problem").is_some());
         tap(&mut rt, "approvals-close");
         rt.state.draft.text = "run: ls".into();
@@ -2620,13 +3215,13 @@ mod tests {
     fn the_activity_page_lists_tool_uses_newest_first() {
         let mut rt = runtime_with(fake_in(Mode::Run));
         wait(&mut rt, settled);
-        tap(&mut rt, "approvals");
+        open_setting(&mut rt, "approvals");
         tap(&mut rt, "approvals-activity");
         assert!(rt.find("activity-empty").is_some());
         tap(&mut rt, "activity-close");
         send_and_wait(&mut rt, "run: cargo test");
         send_and_wait(&mut rt, "write: /tmp/notes.txt hello");
-        tap(&mut rt, "approvals");
+        open_setting(&mut rt, "approvals");
         tap(&mut rt, "approvals-activity");
         assert!(rt.find("activity-0").is_some());
         assert!(rt.find("activity-1").is_some());
@@ -3193,7 +3788,7 @@ mod tests {
             send_and_wait(&mut rt, "context?"),
             "You said: context: the app asked for views"
         );
-        tap(&mut rt, "visuals");
+        open_setting(&mut rt, "visuals");
         assert_eq!(rt.state.showing, Showing::Visuals);
         tap(&mut rt, "visual-mode-off");
         assert_eq!(*rt.state.visuals.settings(), visual::Mode::Off);
@@ -3218,7 +3813,7 @@ mod tests {
     #[test]
     fn the_visuals_page_tries_a_reply_and_keeps_its_mode() {
         let mut rt = runtime();
-        tap(&mut rt, "visuals");
+        open_setting(&mut rt, "visuals");
         assert!(
             texts(&rt)
                 .iter()
@@ -3243,7 +3838,8 @@ mod tests {
             *store::Store::<visual::Mode>::open(&dir).settings(),
             visual::Mode::Nudge
         );
-        assert!(texts(&rt).iter().any(|t| t == "Nudge only"));
+        tap(&mut rt, "visuals-all-settings");
+        assert_eq!(texts_under(&rt, "visuals-summary"), ["Nudge only"]);
     }
 
     // Firstmate's rules, on the fake `claude` running as firstmate.
@@ -3278,7 +3874,7 @@ mod tests {
             format!("You said: Bash was allowed to run {MERGE}")
         );
         // The page shows what each rule did.
-        tap(&mut rt, "rules");
+        open_setting(&mut rt, "rules");
         assert_eq!(rt.state.showing, Showing::Rules);
         assert!(rt.find("guard-no-force-push-recent-0").is_some());
         assert!(rt.find("guard-merge-asks-captain-recent-0").is_some());
@@ -3334,6 +3930,351 @@ mod tests {
         );
     }
 
+    fn calls(lab: &Lab, script: &str) -> Vec<String> {
+        lab.calls()
+            .lines()
+            .filter(|l| l.starts_with(script))
+            .map(str::to_string)
+            .collect()
+    }
+
+    fn mates_idle(s: &App) -> bool {
+        s.mates.running().is_none()
+    }
+
+    #[test]
+    fn with_no_second_mates_the_list_says_so_and_offers_to_add_one() {
+        let lab = Lab::new();
+        let mut rt = runtime_with(fake_in_firstmate(&lab, true));
+        wait(&mut rt, |s| s.mates.records.is_some());
+        assert!(rt.find("mates-none").is_some());
+        tap_scrolled(&mut rt, "add-mate");
+        assert_eq!(rt.state.showing, Showing::AddMate);
+        assert!(rt.find("add-mate-scope").is_some());
+        // A chief of staff that is not firstmate has no second mates to show.
+        let rt = runtime();
+        assert!(rt.find("mates").is_none());
+    }
+
+    #[test]
+    fn each_mate_shows_its_session_its_work_and_where_the_records_disagree() {
+        let lab = Lab::new();
+        let mut rt = runtime_with(mates_app(&lab));
+        let standing =
+            |rt: &Runtime<App>, id: &str| texts_under(rt, &format!("mate-{id}-standing"));
+        assert_eq!(standing(&rt, "docs"), ["running \u{b7} idle"]);
+        assert_eq!(standing(&rt, "billing"), ["running \u{b7} working"]);
+        assert_eq!(standing(&rt, "infra"), ["stopped \u{b7} idle"]);
+        assert_eq!(standing(&rt, "support"), ["running \u{b7} waiting on you"]);
+        assert!(rt.find("mate-web-mismatch").is_some());
+        assert!(rt.find("mate-docs-mismatch").is_none());
+
+        tap(&mut rt, "mate-billing");
+        assert_eq!(rt.state.showing, Showing::Mate("billing".into()));
+        assert!(rt.find("mate-child-invoice-retries").is_some());
+        assert!(rt.find("mate-child-billing-dashboard").is_some());
+        assert!(rt.find("mate-interrupt").is_some());
+        assert!(rt.find("mate-start").is_none());
+
+        tap(&mut rt, "mate-infra");
+        assert!(rt.find("mate-start").is_some());
+        assert!(rt.find("mate-interrupt").is_none());
+        assert!(rt.find("mate-children-none").is_some());
+
+        tap(&mut rt, "mate-web");
+        let mismatch = texts_under(&rt, "mate-mismatch").join(" ");
+        assert!(
+            mismatch.contains("invalid home: not a seeded secondmate home"),
+            "{mismatch}"
+        );
+        assert!(rt.find("mate-edit-note").is_some());
+    }
+
+    #[test]
+    fn the_guided_add_asks_one_question_at_a_time_and_creates_nothing_before_the_yes() {
+        let lab = Lab::new();
+        lab.harness("secondmate", "codex");
+        let mut rt = runtime_with(mates_app(&lab));
+        tap_scrolled(&mut rt, "add-mate");
+        tap_scrolled(&mut rt, "add-mate-next");
+        assert!(rt.find("add-mate-problem").is_some(), "a scope is required");
+        rt.state.mates.adding.charter.text = "Payments: card retries and refunds.".into();
+        tap_scrolled(&mut rt, "add-mate-next");
+        assert_eq!(rt.state.mates.adding.step(), Step::Projects);
+        // A local-only project stays with the main firstmate.
+        tap_scrolled(&mut rt, "add-mate-project-scratch");
+        assert!(rt.state.mates.adding.projects.is_empty());
+        tap_scrolled(&mut rt, "add-mate-project-site");
+        tap_scrolled(&mut rt, "add-mate-next");
+        assert_eq!(rt.state.mates.adding.step(), Step::Name);
+        assert_eq!(rt.state.mates.adding.name.text, "site");
+        rt.state.mates.adding.name.text = "docs".into();
+        tap_scrolled(&mut rt, "add-mate-next");
+        assert!(texts_under(&rt, "add-mate-problem")[0].contains("already a second mate"));
+        rt.state.mates.adding.name.text = "payments".into();
+        tap_scrolled(&mut rt, "add-mate-next");
+        assert_eq!(rt.state.mates.adding.step(), Step::Runtime);
+        tap_scrolled(&mut rt, "add-mate-runtime-1");
+        tap_scrolled(&mut rt, "add-mate-next");
+        assert_eq!(rt.state.mates.adding.step(), Step::Confirm);
+        let plan = texts_under(&rt, "add-mate-plan").join("\n");
+        assert!(plan.contains("bin/fm-home-seed.sh payments"), "{plan}");
+        assert!(plan.contains("--harness claude"), "{plan}");
+        assert!(plan.contains("Nothing remote is created"), "{plan}");
+        assert!(calls(&lab, "fm-home-seed.sh").is_empty());
+        assert!(calls(&lab, "fm-spawn.sh").is_empty());
+
+        tap_scrolled(&mut rt, "add-mate-yes");
+        wait(&mut rt, |s| s.showing == Showing::Mate("payments".into()));
+        let home = lab.data.join("secondmates/payments");
+        assert_eq!(
+            calls(&lab, "fm-home-seed.sh"),
+            [format!("fm-home-seed.sh payments {} site", home.display())]
+        );
+        assert_eq!(
+            calls(&lab, "fm-spawn.sh"),
+            ["fm-spawn.sh payments --secondmate --harness claude"]
+        );
+        // The chief of staff is asked to do the rest of firstmate's procedure.
+        let asked = rt
+            .state
+            .ws
+            .chat
+            .iter()
+            .find(|m| m.author == Author::Captain);
+        assert!(
+            asked.is_some_and(|m| m.text.contains("I added the second mate payments")
+                && m.text.contains("bin/fm-backlog-handoff.sh")),
+            "{:?}",
+            rt.state.ws.chat
+        );
+        wait(&mut rt, |s| s.mates.get("payments").is_some());
+        assert!(texts_under(&rt, "mate-outcome")[0].contains("created payments"));
+    }
+
+    #[test]
+    fn a_refused_seed_is_shown_in_firstmates_words_and_starts_nothing() {
+        let lab = Lab::new();
+        let app = answered(mates_app(&lab), &lab, Step::Confirm);
+        lab.refuse(
+            "fm-home-seed.sh",
+            "error: project site not found at /h/projects/site",
+        );
+        let mut rt = runtime_with(app);
+        tap_scrolled(&mut rt, "add-mate-yes");
+        wait(&mut rt, mates_idle);
+        let problem = texts_under(&rt, "add-mate-problem").join(" ");
+        assert!(
+            problem.contains("Firstmate refused to create payments"),
+            "{problem}"
+        );
+        assert!(
+            problem.contains("error: project site not found"),
+            "{problem}"
+        );
+        assert!(calls(&lab, "fm-spawn.sh").is_empty());
+        assert_eq!(rt.state.showing, Showing::AddMate);
+    }
+
+    #[test]
+    fn the_chief_of_staff_opens_the_guided_add_from_the_chat() {
+        let lab = Lab::new();
+        let mut rt = runtime_with(mates_app(&lab));
+        rt.state.draft.text = "mate: the billing service and its refunds".into();
+        rt.state.send();
+        wait(&mut rt, |s| s.showing == Showing::AddMate);
+        assert_eq!(
+            rt.state.mates.adding.charter.text,
+            "the billing service and its refunds"
+        );
+        assert!(notices(&rt)[0].contains("opened Add a second mate"));
+        assert!(calls(&lab, "fm-home-seed.sh").is_empty());
+    }
+
+    #[test]
+    fn the_chief_of_staff_keeps_answers_already_given_and_only_fills_an_empty_scope() {
+        let lab = Lab::new();
+        let mut app = mates_app(&lab);
+        app.add_mate(None);
+        assert!(app.add_mate(Some("billing".into())));
+        assert_eq!(app.mates.adding.charter.text, "billing");
+        assert!(app.add_mate(Some("something else".into())));
+        assert_eq!(app.mates.adding.charter.text, "billing");
+    }
+
+    #[test]
+    fn the_chief_of_staff_says_so_when_firstmate_is_busy_and_nothing_opens() {
+        let lab = Lab::new();
+        let mut app = mates_app(&lab);
+        app.confirm_mate(secondmates::Op::Start("docs".into()));
+        app.confirmed_mate();
+        assert!(app.mates.running().is_some());
+        app.take(Event::AddMate("billing".into()));
+        assert_ne!(app.showing, Showing::AddMate);
+        let note = &app.ws.chat.last().unwrap().text;
+        assert!(note.contains("busy"), "{note}");
+        assert!(!note.contains("opened"), "{note}");
+        app.settle_mates();
+    }
+
+    #[test]
+    fn a_message_firstmate_would_read_as_an_option_is_kept_and_not_sent() {
+        let lab = Lab::new();
+        let mut app = mates_app(&lab);
+        app.open_mate("docs");
+        for text in [
+            "--key abc hello",
+            "--fire-and-forget now",
+            "--resolve-key=k go",
+        ] {
+            app.mates.draft("docs").text = text.into();
+            app.send_to_mate("docs");
+            assert_eq!(app.mates.draft("docs").text, text);
+            assert!(app.mates.outcomes["docs"].words.contains("option"));
+        }
+        assert!(calls(&lab, "fm-send.sh").is_empty());
+    }
+
+    #[test]
+    fn actions_run_firstmates_scripts_only_after_a_yes_and_never_force() {
+        let lab = Lab::new();
+        let mut rt = runtime_with(mates_app(&lab));
+        tap(&mut rt, "mate-docs");
+        tap_scrolled(&mut rt, "mate-interrupt");
+        assert!(rt.find("mate-confirm").is_some());
+        tap_scrolled(&mut rt, "mate-confirm-cancel");
+        assert!(calls(&lab, "fm-control.sh").is_empty());
+        tap_scrolled(&mut rt, "mate-interrupt");
+        tap_scrolled(&mut rt, "mate-confirm-yes");
+        wait(&mut rt, mates_idle);
+        tap_scrolled(&mut rt, "mate-relaunch");
+        tap_scrolled(&mut rt, "mate-confirm-yes");
+        wait(&mut rt, mates_idle);
+        assert_eq!(
+            calls(&lab, "fm-control.sh"),
+            [
+                "fm-control.sh docs interrupt",
+                "fm-control.sh docs relaunch --note Relaunched by the captain from Velvet Hammer."
+            ]
+        );
+        tap(&mut rt, "mate-infra");
+        tap_scrolled(&mut rt, "mate-start");
+        tap_scrolled(&mut rt, "mate-confirm-yes");
+        wait(&mut rt, mates_idle);
+        assert_eq!(
+            calls(&lab, "fm-spawn.sh"),
+            ["fm-spawn.sh infra --secondmate"]
+        );
+
+        // Retiring a mate with work in its home is refused, and the app never forces it.
+        lab.mate_child("billing", "invoice-retries");
+        tap(&mut rt, "mate-billing");
+        tap_scrolled(&mut rt, "mate-retire");
+        tap_scrolled(&mut rt, "mate-confirm-yes");
+        wait(&mut rt, mates_idle);
+        let refused = texts_under(&rt, "mate-outcome").join(" ");
+        assert!(
+            refused.contains("REFUSED: secondmate billing still has in-flight work"),
+            "{refused}"
+        );
+        assert!(!refused.contains("WARNING"), "{refused}");
+        assert!(rt.state.mates.get("billing").is_some());
+        // An idle mate retires, and leaves firstmate's registry.
+        tap(&mut rt, "mate-infra");
+        tap_scrolled(&mut rt, "mate-retire");
+        tap_scrolled(&mut rt, "mate-confirm-yes");
+        wait(&mut rt, |s| s.mates.get("infra").is_none());
+        let retired = calls(&lab, "fm-teardown.sh");
+        assert_eq!(retired, ["fm-teardown.sh billing", "fm-teardown.sh infra"]);
+        assert!(retired.iter().all(|c| !c.contains("--force")));
+    }
+
+    #[test]
+    fn a_message_goes_through_firstmates_send_and_its_reply_comes_back_on_the_parent_channel() {
+        let lab = Lab::new();
+        let mut rt = runtime_with(mates_app(&lab));
+        tap(&mut rt, "mate-docs");
+        assert_eq!(
+            texts_under(&rt, "mate-msg-0")[0].split(' ').next(),
+            Some("Firstmate")
+        );
+        rt.state.mates.draft("docs").text = "Is the search page live yet?".into();
+        tap_scrolled(&mut rt, "mate-send");
+        wait(&mut rt, |s| {
+            s.mates.channel("docs").is_some_and(|c| c.sent.len() == 2)
+        });
+        assert_eq!(
+            calls(&lab, "fm-send.sh"),
+            ["fm-send.sh docs Is the search page live yet?"]
+        );
+        assert!(texts_under(&rt, "mate-msg-2")[0].starts_with("You"));
+        lab.mate_says("docs", &docs_reply());
+        wait(&mut rt, |s| {
+            s.mates
+                .channel("docs")
+                .is_some_and(|c| c.conversation().len() == 4)
+        });
+        let reply = texts_under(&rt, "mate-msg-3").join(" ");
+        assert!(reply.contains("waits for its pull request"), "{reply}");
+        // The reply is Markdown, drawn like the chief of staff's.
+        assert!(!reply.contains("**"), "{reply}");
+    }
+
+    #[test]
+    fn an_escalation_is_answered_to_the_mate_that_holds_it() {
+        let lab = Lab::new();
+        let mut rt = runtime_with(mates_app(&lab));
+        assert!(rt.find("hold-support-refund-window").is_some());
+        tap(&mut rt, "answer-support-refund-window");
+        assert_eq!(rt.state.showing, Showing::Mate("support".into()));
+        assert!(rt.find("mate-answering").is_some());
+        rt.state.mates.draft("support").text = "30 days.".into();
+        tap_scrolled(&mut rt, "mate-send");
+        wait(&mut rt, |s| s.mates.answering.is_none() && mates_idle(s));
+        assert_eq!(
+            calls(&lab, "fm-send.sh"),
+            [
+                "fm-send.sh support The captain's answer to your captain hold refund-window: 30 days."
+            ]
+        );
+        // The chief of staff was not asked: the hold is the mate's own.
+        assert!(rt.state.ws.chat.is_empty());
+    }
+
+    #[test]
+    fn work_the_chief_of_staff_routes_shows_which_mate_took_it() {
+        let lab = Lab::new();
+        let mut rt = runtime_with(mates_app(&lab));
+        send_and_wait(
+            &mut rt,
+            "shell: bin/fm-send.sh docs Add a search page to the docs",
+        );
+        let routed = rt
+            .elements()
+            .iter()
+            .filter_map(|e| e.key.clone())
+            .find(|k| k.ends_with("-routed"))
+            .expect("a routed tool use");
+        assert_eq!(texts_under(&rt, &routed)[0], "Routed to second mate docs");
+        tap(&mut rt, &format!("{routed}-open"));
+        assert_eq!(rt.state.showing, Showing::Mate("docs".into()));
+    }
+
+    #[test]
+    fn a_mates_terminal_peek_returns_to_its_page() {
+        let lab = Lab::new();
+        lab.pane("docs", "waiting quietly");
+        let mut rt = runtime_with(mates_app(&lab));
+        tap(&mut rt, "mate-docs");
+        tap_scrolled(&mut rt, "mate-peek");
+        wait(&mut rt, |s| {
+            s.peek.as_ref().is_some_and(|p| p.pane.is_some())
+        });
+        assert_eq!(texts_under(&rt, "crew-pane"), ["waiting quietly"]);
+        tap(&mut rt, "peek-close");
+        assert_eq!(rt.state.showing, Showing::Mate("docs".into()));
+    }
+
     #[test]
     fn a_chief_of_staff_that_is_not_firstmate_has_no_firstmate_rules() {
         let mut rt = runtime_with(fake_in(Mode::Run));
@@ -3347,6 +4288,7 @@ mod tests {
     #[test]
     fn the_rules_page_lists_every_rule_on_by_default() {
         let mut rt = runtime();
+        chord(&mut rt, ',', false);
         assert_eq!(texts_under(&rt, "rules-summary"), ["8 of 8 on"]);
         tap(&mut rt, "rules");
         for rule in guard::Rule::ALL {
@@ -3357,8 +4299,486 @@ mod tests {
             assert!(rt.find(&format!("guard-{}-toggle", rule.key())).is_some());
         }
         tap_scrolled(&mut rt, "guard-publish-asks-captain-toggle");
+        tap(&mut rt, "rules-all-settings");
         assert_eq!(texts_under(&rt, "rules-summary"), ["7 of 8 on"]);
+        tap(&mut rt, "rules");
         tap(&mut rt, "rules-activity");
         assert_eq!(rt.state.showing, Showing::Activity);
+    }
+
+    /// Opens Settings with Cmd+, (Ctrl+, off macOS), then the section keyed `key`.
+    fn open_setting(rt: &mut Runtime<App>, key: &str) {
+        chord(rt, ',', false);
+        assert_eq!(rt.state.showing, Showing::Settings);
+        tap(rt, key);
+    }
+
+    /// Presses `key` with Cmd (Ctrl off macOS) held, and Shift when `shift`.
+    fn chord(rt: &mut Runtime<App>, c: char, shift: bool) {
+        let mac = cfg!(target_os = "macos");
+        let mods = rune::Mods {
+            cmd: true,
+            shift,
+            ctrl: !mac,
+            logo: mac,
+            ..rune::Mods::default()
+        };
+        rt.key(KeyEvent {
+            key: Key::Command(c),
+            mods,
+        });
+        settle(rt);
+    }
+
+    fn press_key(rt: &mut Runtime<App>, key: Key, shift: bool) {
+        let mods = rune::Mods {
+            shift,
+            ..rune::Mods::default()
+        };
+        rt.key(KeyEvent { key, mods });
+        settle(rt);
+    }
+
+    fn type_text(rt: &mut Runtime<App>, words: &str) {
+        for c in words.chars() {
+            rt.key(KeyEvent {
+                key: Key::Text(c.to_string()),
+                mods: rune::Mods::default(),
+            });
+        }
+        settle(rt);
+    }
+
+    fn settle(rt: &mut Runtime<App>) {
+        for _ in 0..30 {
+            rt.frame(1.0 / 60.0);
+        }
+    }
+
+    fn find_count(rt: &Runtime<App>) -> Vec<String> {
+        texts_under(rt, "find-count")
+    }
+
+    /// Whether the element keyed `key` is drawn inside the window.
+    fn on_screen(rt: &Runtime<App>, key: &str) -> bool {
+        rt.find(key).is_some_and(|(_, y)| (0.0..720.0).contains(&y))
+    }
+
+    #[test]
+    fn cmd_f_opens_find_over_the_conversation_and_counts_matches() {
+        let mut rt = runtime_with(long_chat(40));
+        tap(&mut rt, "chat-input");
+        assert!(rt.find("find-bar").is_none());
+        chord(&mut rt, 'f', false);
+        assert!(rt.find("find-bar").is_some());
+        // The cursor is in the find field, not the message field.
+        type_text(&mut rt, "RELEASE");
+        assert_eq!(rt.state.find.query.text, "RELEASE");
+        assert!(rt.state.draft.text.is_empty());
+        assert_eq!(find_count(&rt), ["1 of 4"]);
+        assert!(rt.find(&find::match_key(0)).is_some());
+        assert!(on_screen(&rt, &find::match_key(0)));
+    }
+
+    #[test]
+    fn a_query_with_no_matches_says_so() {
+        let mut rt = runtime_with(long_chat(5));
+        chord(&mut rt, 'f', false);
+        type_text(&mut rt, "zebra");
+        assert_eq!(find_count(&rt), ["No matches"]);
+        assert!(rt.find(&find::match_key(0)).is_none());
+        // Stepping with nothing to step to changes nothing.
+        press_key(&mut rt, Key::Enter, false);
+        assert_eq!(rt.state.find.current, 0);
+    }
+
+    #[test]
+    fn enter_and_cmd_g_step_through_the_matches_and_scroll_to_each() {
+        let mut rt = runtime_with(long_chat(40));
+        chord(&mut rt, 'f', false);
+        type_text(&mut rt, "release");
+        assert_eq!(find_count(&rt), ["1 of 4"]);
+        press_key(&mut rt, Key::Enter, false);
+        assert_eq!(find_count(&rt), ["2 of 4"]);
+        assert!(on_screen(&rt, &find::match_key(1)));
+        chord(&mut rt, 'g', false);
+        chord(&mut rt, 'g', false);
+        assert_eq!(find_count(&rt), ["4 of 4"]);
+        assert!(on_screen(&rt, &find::match_key(3)));
+        assert!(!on_screen(&rt, &find::match_key(0)));
+        // Past the last it wraps to the first, and back.
+        press_key(&mut rt, Key::Enter, false);
+        assert_eq!(find_count(&rt), ["1 of 4"]);
+        assert!(on_screen(&rt, &find::match_key(0)));
+        press_key(&mut rt, Key::Enter, true);
+        assert_eq!(find_count(&rt), ["4 of 4"]);
+        chord(&mut rt, 'g', true);
+        assert_eq!(find_count(&rt), ["3 of 4"]);
+        tap(&mut rt, "find-previous");
+        assert_eq!(find_count(&rt), ["2 of 4"]);
+        tap(&mut rt, "find-next");
+        assert_eq!(find_count(&rt), ["3 of 4"]);
+    }
+
+    #[test]
+    fn escape_closes_find_and_returns_to_the_message_field() {
+        let mut rt = runtime_with(long_chat(5));
+        chord(&mut rt, 'f', false);
+        type_text(&mut rt, "release");
+        press_key(&mut rt, Key::Escape, false);
+        assert!(rt.find("find-bar").is_none());
+        assert!(rt.find(&find::match_key(0)).is_none());
+        type_text(&mut rt, "hi");
+        assert_eq!(rt.state.draft.text, "hi");
+        // Opening it again keeps the query.
+        chord(&mut rt, 'f', false);
+        assert_eq!(find_count(&rt), ["1 of 1"]);
+    }
+
+    #[test]
+    fn find_is_case_insensitive_and_searches_captain_messages() {
+        let mut rt = runtime();
+        chord(&mut rt, 'f', false);
+        type_text(&mut rt, "desktop SKELETON");
+        assert_eq!(find_count(&rt), ["1 of 1"]);
+        assert_eq!(
+            find::search(&rt.state, "desktop SKELETON")[0].message,
+            0,
+            "the captain's first message"
+        );
+    }
+
+    #[test]
+    fn find_searches_tool_uses_and_the_words_in_views() {
+        let mut rt = runtime_with(viewing(spec("ui-release.json"), true));
+        chord(&mut rt, 'f', false);
+        let hits = find::search(&rt.state, "release");
+        assert!(hits.iter().any(|h| h.card), "the view's card");
+        type_text(&mut rt, "release");
+        assert!(rt.find("find-count").is_some());
+        assert_ne!(find_count(&rt), ["No matches"]);
+
+        let mut rt = runtime_with(fake_in(Mode::Run));
+        send_and_wait(&mut rt, "shell: ls");
+        let hits = find::search(&rt.state, "three");
+        assert_eq!(hits.len(), 1, "the command's output");
+        assert!(hits[0].card);
+    }
+
+    #[test]
+    fn the_conversation_is_kept_across_a_restart_and_find_searches_it() {
+        let data = scratch("unused");
+        let mut first = App::new(Box::new(Stub::default()), installed_firstmate(), &data);
+        first.draft.text = "Remember the zeppelin plan.".into();
+        first.send();
+        let said = first.ws.chat[first.ws.chat.len() - 2].clone();
+        let replied = first.ws.chat.last().unwrap().clone();
+        drop(first);
+
+        let mut rt = runtime_with(App::new(
+            Box::new(Stub::default()),
+            installed_firstmate(),
+            &data,
+        ));
+        assert_eq!(rt.state.ws.earlier, 2);
+        assert_eq!(rt.state.ws.chat[0], said);
+        assert_eq!(rt.state.ws.chat[1], replied);
+        assert!(rt.find("earlier-divider").is_some());
+        chord(&mut rt, 'f', false);
+        type_text(&mut rt, "zeppelin");
+        assert_eq!(find_count(&rt), ["1 of 2"]);
+        assert!(on_screen(&rt, &find::match_key(0)));
+    }
+
+    #[test]
+    fn a_messages_link_button_copies_its_link() {
+        let mut rt = runtime();
+        let board = rune::clipboard::memory();
+        rt.use_clipboard(&board);
+        let id = rt.state.ws.chat[1].id.clone();
+        assert_eq!(rt.state.hovered, None);
+        // The button shows once the pointer is over its message.
+        let (x, y) = rt.find("msg-1-link").unwrap();
+        rt.pointer_move(x, y);
+        settle(&mut rt);
+        assert_eq!(rt.state.hovered, Some(1));
+        tap(&mut rt, "msg-1-link");
+        assert_eq!(rt.state.copied.as_deref(), Some(id.as_str()), "pressed");
+        assert_eq!(
+            board.text().as_deref().map(|t| t.as_str()),
+            Some(links::url(&id).as_str())
+        );
+        assert_eq!(texts_under(&rt, "msg-1-link"), ["Link copied"]);
+        assert_eq!(rt.state.hovered, Some(1));
+    }
+
+    #[test]
+    fn opening_a_message_link_scrolls_to_the_message_and_highlights_it_briefly() {
+        let mut rt = runtime_with(long_chat(40));
+        settle(&mut rt);
+        assert!(!on_screen(&rt, "msg-5"));
+        let url = links::url(&rt.state.ws.chat[5].id);
+        rt.update(|s, tx| s.open_link(&url, tx));
+        settle(&mut rt);
+        assert!(on_screen(&rt, "msg-5"));
+        assert!(matches!(&rt.state.flash, Some((Ok(_), _))));
+        for _ in 0..200 {
+            rt.frame(1.0 / 60.0);
+        }
+        assert_eq!(rt.state.flash, None, "the highlight fades");
+        // From another page, the link comes back to the chat.
+        rt.state.showing = Showing::Approvals;
+        let url = links::url(&rt.state.ws.chat[0].id);
+        rt.update(|s, tx| s.open_link(&url, tx));
+        settle(&mut rt);
+        assert_eq!(rt.state.showing, Showing::Chat);
+        assert!(on_screen(&rt, "msg-0"));
+    }
+
+    #[test]
+    fn a_link_pasted_into_find_goes_to_its_message() {
+        let mut rt = runtime_with(long_chat(40));
+        let url = links::url(&rt.state.ws.chat[3].id);
+        chord(&mut rt, 'f', false);
+        type_text(&mut rt, &url);
+        assert!(on_screen(&rt, "msg-3"));
+        assert_eq!(find_count(&rt), ["Went to the linked message"]);
+        rt.state.find.query.text = links::url("0000deadbeef");
+        settle(&mut rt);
+        assert_eq!(find_count(&rt), ["Message not found"]);
+    }
+
+    #[test]
+    fn links_in_messages_show_as_chips_naming_their_message() {
+        let mut rt = runtime();
+        let answer = rt.state.ws.chat[1].id.clone();
+        let words = format!(
+            "Do what this says: {} and {}",
+            links::url(&answer),
+            links::url("0000deadbeef")
+        );
+        rt.update(|s, _| {
+            let first = links::url(&s.ws.chat[0].id);
+            s.ws.chat.push(Message::new(Author::Captain, words));
+            s.ws.chat.push(Message::new(
+                Author::ChiefOfStaff,
+                format!("As you asked in {first}."),
+            ));
+        });
+        settle(&mut rt);
+        let all = texts(&rt).join("\n");
+        assert!(
+            all.contains(
+                "Do what this says: \u{21aa} Chief of staff: On it. I've split the work between \
+                 two crewmates. Two questi… and \u{26a0} Message not found"
+            ),
+            "{all}"
+        );
+        assert!(all.contains("\u{21aa} You: Get the desktop skeleton building and check it"));
+        assert!(
+            !all.contains("velvet-hammer://"),
+            "links show as chips: {all}"
+        );
+    }
+
+    #[test]
+    fn a_link_in_the_captains_message_reaches_the_chief_of_staff_quoted() {
+        let mut rt = runtime_with(fake_in(Mode::Run));
+        assert_eq!(send_and_wait(&mut rt, "links?"), "You said: links: told");
+        assert_eq!(
+            send_and_wait(&mut rt, "links?"),
+            "You said: links: not told",
+            "told once per session"
+        );
+        send_and_wait(&mut rt, "Plan: merge the docs PR first.");
+        let answer = rt.state.ws.chat.last().unwrap().id.clone();
+        let words = format!(
+            "do what this answer says: {} {}",
+            links::url(&answer),
+            links::url("0000deadbeef")
+        );
+        let reply = send_and_wait(&mut rt, &words);
+        assert!(reply.starts_with(&format!("You said: {words}")), "{reply}");
+        assert!(
+            reply.contains(&format!(
+                "<<< {}, written by you, the chief of staff:\nYou said: Plan: merge the docs PR \
+                 first.\n>>>",
+                links::url(&answer)
+            )),
+            "{reply}"
+        );
+        assert!(reply.contains(&format!(
+            "<<< {}: message not found.",
+            links::url("0000deadbeef")
+        )));
+        // The captain's own message keeps their words, with the links as chips.
+        let said = &rt.state.ws.chat[rt.state.ws.chat.len() - 2];
+        assert_eq!(said.text, words);
+    }
+
+    #[test]
+    fn nothing_kept_from_an_earlier_session_reaches_the_chief_of_staff_unless_linked() {
+        let home = scratch("signed-in");
+        let mut first = runtime_with(on_fake(FAKE_CLAUDE, &home, &[]));
+        wait(&mut first, settled);
+        send_and_wait(&mut first, "The zeppelin code is 42.");
+        let kept = first.state.ws.chat[first.state.ws.chat.len() - 2]
+            .id
+            .clone();
+        drop(first);
+
+        let mut rt = runtime_with(on_fake(FAKE_CLAUDE, &home, &[]));
+        wait(&mut rt, settled);
+        assert_eq!(rt.state.ws.earlier, 2);
+        assert_eq!(send_and_wait(&mut rt, "hello"), "You said: hello");
+        let reply = send_and_wait(&mut rt, &format!("what was {}", links::url(&kept)));
+        assert!(
+            reply.contains("written by the captain:\nThe zeppelin code is 42."),
+            "{reply}"
+        );
+    }
+
+    #[test]
+    fn the_main_window_keeps_its_panels_and_settings_hold_every_setting() {
+        let mut rt = runtime();
+        for key in ["agents", "chat", "needs-input", "for-you"] {
+            assert!(rt.find(key).is_some(), "{key}");
+        }
+        for key in [
+            "approvals",
+            "visuals",
+            "rules",
+            "firstmate",
+            "history-section",
+        ] {
+            assert!(
+                rt.find(key).is_none(),
+                "{key} is in Settings, not the main window"
+            );
+        }
+        chord(&mut rt, ',', false);
+        assert_eq!(rt.state.showing, Showing::Settings);
+        for key in [
+            "approvals",
+            "visuals",
+            "rules",
+            "firstmate",
+            "history-section",
+        ] {
+            assert!(rt.find(key).is_some(), "{key}");
+        }
+        assert_eq!(
+            texts_under(&rt, "approvals-summary"),
+            ["Run without asking"]
+        );
+        // Each section opens its page, which comes back to Settings and to the chat.
+        for (card, page) in [
+            ("approvals", Showing::Approvals),
+            ("visuals", Showing::Visuals),
+            ("rules", Showing::Rules),
+            ("firstmate", Showing::Firstmate),
+        ] {
+            tap(&mut rt, card);
+            assert_eq!(rt.state.showing, page);
+            tap(&mut rt, &format!("{card}-all-settings"));
+            assert_eq!(rt.state.showing, Showing::Settings);
+        }
+        tap(&mut rt, "settings-close");
+        assert_eq!(rt.state.showing, Showing::Chat);
+    }
+
+    #[test]
+    fn turning_history_off_keeps_nothing_new_and_on_again_keeps_it() {
+        let data = scratch("unused");
+        let open = || App::new(Box::new(Stub::default()), installed_firstmate(), &data);
+        let mut rt = runtime_with(open());
+        assert_eq!(*rt.state.keeping.settings(), history::Keeping(true));
+        chord(&mut rt, ',', false);
+        assert!(
+            texts(&rt)
+                .iter()
+                .any(|t| t == "\u{25cf} Keep the conversation (Recommended)")
+        );
+        tap_scrolled(&mut rt, "history-off");
+        assert_eq!(*rt.state.keeping.settings(), history::Keeping(false));
+        rt.state.draft.text = "Not kept.".into();
+        rt.update(|s, _| s.send());
+        drop(rt);
+        let mut rt = runtime_with(open());
+        assert_eq!(
+            rt.state.ws.earlier, 0,
+            "nothing was kept, and nothing is shown"
+        );
+        chord(&mut rt, ',', false);
+        tap_scrolled(&mut rt, "history-keep");
+        rt.update(|s, _| {
+            s.draft.text = "Kept.".into();
+            s.send();
+        });
+        drop(rt);
+        let rt = runtime_with(open());
+        assert_eq!(rt.state.ws.earlier, 2);
+        assert_eq!(rt.state.ws.chat[0].text, "Kept.");
+    }
+
+    #[test]
+    fn clearing_history_asks_first_then_deletes_it_and_the_earlier_sessions() {
+        let mut rt = runtime_with(reopened(&format!("clear-{}", std::process::id())));
+        let path = rt.state.history.path().to_path_buf();
+        assert!(path.exists());
+        assert_eq!(rt.state.ws.earlier, 2);
+        chord(&mut rt, ',', false);
+        tap_scrolled(&mut rt, "history-clear");
+        assert!(
+            path.exists(),
+            "nothing is deleted before the captain confirms"
+        );
+        tap_scrolled(&mut rt, "history-clear-cancel");
+        assert!(rt.find("history-clear-confirm").is_none());
+        tap_scrolled(&mut rt, "history-clear");
+        tap_scrolled(&mut rt, "history-clear-confirm");
+        assert!(!path.exists());
+        assert_eq!(rt.state.ws.earlier, 0);
+        assert!(
+            rt.state
+                .ws
+                .chat
+                .iter()
+                .all(|m| !m.text.contains("zeppelin")),
+            "the earlier session left the chat"
+        );
+        assert_eq!(rt.state.ws.chat.len(), 2, "this session's messages stay");
+    }
+
+    #[test]
+    fn the_in_window_menus_reach_settings_and_find() {
+        let mut app = long_chat(5);
+        app.in_window_menus = true;
+        app.platform = menus::Platform::Windows;
+        let mut rt = runtime_with(app);
+        assert!(rt.find("menu-bar").is_some());
+        tap(&mut rt, "menu-file");
+        assert!(rt.find("menu-item-settings").is_some());
+        assert_eq!(
+            texts_under(&rt, "menu-item-settings"),
+            ["Settings", "Ctrl+,"]
+        );
+        tap(&mut rt, "menu-item-settings");
+        assert_eq!(rt.state.showing, Showing::Settings);
+        assert_eq!(rt.state.open_menu, None);
+        tap(&mut rt, "menu-edit");
+        tap(&mut rt, "menu-item-find");
+        assert_eq!(rt.state.showing, Showing::Chat);
+        type_text(&mut rt, "release");
+        assert_eq!(find_count(&rt), ["1 of 1"]);
+        // Linux calls it Preferences, in the Edit menu.
+        rt.update(|s, _| s.platform = menus::Platform::Linux);
+        tap(&mut rt, "menu-edit");
+        assert_eq!(
+            texts_under(&rt, "menu-item-settings"),
+            ["Preferences", "Ctrl+,"]
+        );
+        press_key(&mut rt, Key::Escape, false);
+        assert_eq!(rt.state.open_menu, None);
     }
 }

@@ -20,12 +20,16 @@
 # about a Bash command far larger than the app will show, and "abandon: COMMAND" asks about
 # COMMAND but hangs up after a second, as Claude Code does when it stops waiting.
 #
+# A message "mate: SCOPE" calls the `app_secondmate` tool the same way, with SCOPE as the scope.
+#
 # A message "show: PATH" uses the Read tool on PATH, the way the real `claude` reports it: a
 # tool_use record, then a tool_result with the image as a base64 block for a .png, or a line of
 # text for anything else. "shell: COMMAND" uses Bash, whose result is three lines of text.
 #
 # Each message first goes to the UserPromptSubmit hook, as the real `claude` sends it. A message
-# "context?" is answered with whether that hook added the app's instruction about views.
+# "context?" is answered with whether that hook added the app's instruction about views, and
+# "links?" with whether it said how message links work. The line the app ends each message with,
+# giving its link, is dropped before the message is read; any other message is echoed whole.
 #
 # A message "list: A, B, C" is answered with a Markdown list of A, B and C, then the Stop hook is
 # asked about it with the list as `last_assistant_message`. If the hook sends the reply back with
@@ -128,12 +132,20 @@ auth)
   # stream-json in and out: one user record per line, one turn per record.
   while IFS= read -r line; do
     text=$(printf '%s' "$line" | sed -E 's/.*"content":"(([^"\\]|\\.)*)".*/\1/')
+    # The line the app adds giving the message's own link; the commands below ignore it.
+    text=${text%%'\n\n[Velvet Hammer: this message'*}
     context=$(post "$hook_base/hooks/user-prompt-submit" "$hook_auth" "{\"hook_event_name\":\"UserPromptSubmit\",\"prompt\":\"\"}" 30 || true)
     case $text in
     'context?')
       case $context in
       *app_ui*) text="context: the app asked for views" ;;
       *) text="context: none" ;;
+      esac
+      ;;
+    'links?')
+      case $context in
+      *velvet-hammer://message/*) text="links: told" ;;
+      *) text="links: not told" ;;
       esac
       ;;
     *envcheck*) text="api-key:${ANTHROPIC_API_KEY:+reached} token:${ANTHROPIC_AUTH_TOKEN:+reached}" ;;
@@ -150,6 +162,15 @@ auth)
         text="I noted it for you: $note"
       else
         text="the app_note tool did not answer"
+      fi
+      ;;
+    mate:*)
+      scope=${text#mate: }
+      post "$mcp_url" "$mcp_auth" '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"fake-claude","version":"9.9.9"}}}' >/dev/null
+      if post "$mcp_url" "$mcp_auth" "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\"params\":{\"name\":\"app_secondmate\",\"arguments\":{\"scope\":\"$scope\"}}}" | grep -q '"content"'; then
+        text="I opened Add a second mate for you, with that scope filled in."
+      else
+        text="the app_secondmate tool did not answer"
       fi
       ;;
     run:* | abandon:* | big:* | write:* | read:*)
@@ -243,9 +264,11 @@ auth)
     esac
     echo '{"type":"stream_event","event":{"type":"message_start","message":{"role":"assistant","content":[]}}}'
     echo '{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"You said: "}}}'
-    echo "{\"type\":\"stream_event\",\"event\":{\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"$text\"}}}"
-    echo "{\"type\":\"assistant\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"You said: $text\"}]}}"
-    echo "{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"result\":\"You said: $text\"}"
+    # printf, not echo: a message's \n escapes, such as a quoted linked message's, must reach the
+    # app as written.
+    printf '%s\n' "{\"type\":\"stream_event\",\"event\":{\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"$text\"}}}"
+    printf '%s\n' "{\"type\":\"assistant\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"You said: $text\"}]}}"
+    printf '%s\n' "{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"result\":\"You said: $text\"}"
     case $text in
     wake:*)
       sleep 0.3

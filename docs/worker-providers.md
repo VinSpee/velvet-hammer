@@ -11,7 +11,7 @@ The captain can also give a worker setting a nickname. "Send a hacker to look in
 test" sends the `hacker` preset; "send an opencode go deepseek 4.1 flash worker to investigate"
 names a provider and model directly.
 
-The **Workers** card in the agents column opens the page for all of this.
+The **Workers** section of Settings opens the page for all of this.
 
 ## How it fits together
 
@@ -60,7 +60,9 @@ the request is ambiguous or unknown, never start another harness's command-line 
 candidate, and never edit account pin files.
 
 When the message asks for a worker ("send", or "dispatch", then the words up to "worker",
-"crewmate", "agent", "to" or "and"), the app resolves those words and adds what it found:
+"crewmate", "agent", "to" or "and"), the app resolves those words and adds what it found. When
+the words end at "to" or "and" rather than at a worker noun, only a nickname or a model counts,
+so "send the report to Alice" adds nothing:
 
 1. A nickname, matched with spaces read as hyphens.
 2. A Claude model, for any of the words claude, anthropic, sonnet, opus, haiku or fable: send it

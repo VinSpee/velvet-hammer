@@ -344,10 +344,21 @@ pub enum Resolved {
     Unknown,
 }
 
-/// The words of a worker request in the captain's message: "send an opencode go deepseek 4.1
-/// flash worker to investigate" gives "opencode go deepseek 4.1 flash", and "send a hacker to
-/// look" gives "hacker". None when the message asks for no worker.
-pub fn request(message: &str) -> Option<String> {
+/// A worker request in the captain's message.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Request {
+    /// The words naming the worker: "send an opencode go deepseek 4.1 flash worker to
+    /// investigate" gives "opencode go deepseek 4.1 flash", and "send a hacker to look" gives
+    /// "hacker".
+    pub phrase: String,
+    /// Whether the words ended at "worker", "crewmate" or "agent". Without one, as in "send the
+    /// report to Alice", the message may not ask for a worker at all.
+    pub worker: bool,
+}
+
+/// The worker request in the captain's message, if it reads as one: "send" or "dispatch", then
+/// the words up to "worker", "crewmate", "agent", "to" or "and".
+pub fn request(message: &str) -> Option<Request> {
     let words: Vec<String> = message
         .split_whitespace()
         .map(|w| {
@@ -357,18 +368,24 @@ pub fn request(message: &str) -> Option<String> {
         .collect();
     let send = words.iter().position(|w| w == "send" || w == "dispatch")?;
     let rest = &words[send + 1..];
-    let end = rest.iter().position(|w| {
+    let is_worker = |w: &str| {
         matches!(
-            w.as_str(),
-            "worker" | "workers" | "crewmate" | "crewmates" | "agent" | "agents" | "to" | "and"
+            w,
+            "worker" | "workers" | "crewmate" | "crewmates" | "agent" | "agents"
         )
-    })?;
+    };
+    let end = rest
+        .iter()
+        .position(|w| is_worker(w) || w == "to" || w == "and")?;
     let phrase: Vec<&str> = rest[..end]
         .iter()
         .map(String::as_str)
         .filter(|w| !matches!(*w, "a" | "an" | "the" | "one" | "out" | "off" | ""))
         .collect();
-    (!phrase.is_empty()).then(|| phrase.join(" "))
+    (!phrase.is_empty()).then(|| Request {
+        phrase: phrase.join(" "),
+        worker: is_worker(&rest[end]),
+    })
 }
 
 /// The words a phrase or a model id is matched on: lowercase, split at spaces, slashes, hyphens
@@ -454,10 +471,16 @@ pub fn context(message: &str, nicknames: &Nicknames, models: &[String]) -> Strin
          question. Never start another harness's command-line tool to judge a candidate, and \
          never edit account pin files."
     );
-    let Some(phrase) = request(message) else {
+    let Some(Request { phrase, worker }) = request(message) else {
         return text;
     };
-    let read = match resolve(&phrase, nicknames, models) {
+    let resolved = resolve(&phrase, nicknames, models);
+    // Without "worker", "crewmate" or "agent", only a nickname or a model pi lists makes the
+    // message a worker request; "send the report to Alice" is not one.
+    if !worker && !matches!(resolved, Resolved::Preset(_) | Resolved::Model(_)) {
+        return text;
+    }
+    let read = match resolved {
         Resolved::Preset(p) => format!(
             "the nickname {}: send the worker with {}.",
             p.nickname,
@@ -649,7 +672,11 @@ mod tests {
             ("send it", None),
         ];
         for (message, want) in cases {
-            assert_eq!(request(message).as_deref(), want, "{message}");
+            assert_eq!(
+                request(message).map(|r| r.phrase).as_deref(),
+                want,
+                "{message}"
+            );
         }
     }
 
@@ -738,5 +765,19 @@ mod tests {
 
         let bare = context("send a kimi k3 worker to look", &nicknames, &[]);
         assert!(bare.contains("lists no models yet"), "{bare}");
+
+        // Without a worker noun, only a nickname or a model makes it a request.
+        for message in [
+            "send the report to Alice",
+            "send the deepseek flash notes to Bob",
+            "send sonnet and the draft",
+        ] {
+            let text = context(message, &nicknames, &models());
+            assert!(!text.contains("read the request"), "{message}: {text}");
+        }
+        assert!(
+            context("send kimi k3 to look at it", &nicknames, &models())
+                .contains("as the model opencode-go/kimi-k3")
+        );
     }
 }

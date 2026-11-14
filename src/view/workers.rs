@@ -6,11 +6,11 @@ use rune::tok::{self, Theme, radius, space, type_};
 use rune::{El, col, el, row, text};
 
 use super::policy::quote;
-use super::{button, field, note, page, section, small_button, warning};
+use super::{all_settings, button, field, note, page, section, small_button, warning};
 use crate::crew::{self, Harness};
 use crate::{App, Showing, pi};
 
-/// The Workers card's summary: how many nicknames, and whether pi is ready.
+/// The Workers section's summary: how many nicknames, and whether pi is ready.
 pub fn workers_summary(s: &App) -> String {
     let n = s.nicknames.settings().presets.len();
     let names = format!("{n} nickname{}", if n == 1 { "" } else { "s" });
@@ -39,9 +39,12 @@ pub fn workers_page(s: &App, t: Theme, dark: bool) -> El {
         .child(key_section(s, t, dark))
         .child(account_section(s, t, dark))
         .child(nicknames_section(s, t, dark));
-    let actions = row().child(button("workers-close", "Back to chat", t, |s| {
-        s.showing = Showing::Chat
-    }));
+    let actions = row()
+        .gap(space::S2)
+        .child(all_settings("workers-all-settings", s, t))
+        .child(button("workers-close", "Back to chat", t, |s| {
+            s.showing = Showing::Chat
+        }));
     page("workers-page", "Workers", actions, body, t)
 }
 
