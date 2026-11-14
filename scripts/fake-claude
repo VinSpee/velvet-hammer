@@ -145,7 +145,9 @@ auth)
   # stream-json in and out: one user record per line, one turn per record.
   while IFS= read -r line; do
     text=$(printf '%s' "$line" | sed -E 's/.*"content":"(([^"\\]|\\.)*)".*/\1/')
-    if [ -n "$replay" ]; then
+    # The line the app adds giving the message's own link; the commands below ignore it.
+    text=${text%%'\n\n[Velvet Hammer: this message'*}
+    if [ -n "$replay" ] && [ "${text#swallow:}" = "$text" ]; then
       printf '%s\n' "{\"type\":\"user\",\"isReplay\":true,\"message\":{\"role\":\"user\",\"content\":\"$text\"},\"parent_tool_use_id\":null}"
     fi
     # The line the app adds giving the message's own link; the commands below ignore it.

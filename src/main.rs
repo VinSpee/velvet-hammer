@@ -6034,6 +6034,37 @@ mod tests {
     }
 
     #[test]
+    fn a_message_claude_code_never_echoes_does_not_keep_the_app_working() {
+        for mode in [messages::Delivery::Now, messages::Delivery::Queue] {
+            let mut rt = runtime_with(fake("signed-in", &[]));
+            rt.state.delivery.change(|d| *d = mode);
+            wait(&mut rt, settled);
+            rt.state.draft.text = "swallow: merged".into();
+            tap(&mut rt, "send");
+            wait(&mut rt, |s| {
+                !s.working
+                    && s.ws
+                        .chat
+                        .last()
+                        .is_some_and(|m| m.text == "You said: swallow: merged")
+            });
+            rt.state.draft.text = "after".into();
+            tap(&mut rt, "send");
+            assert!(
+                !said(&rt.state).last().unwrap().1,
+                "{mode:?}: sent as if working"
+            );
+            wait(&mut rt, |s| {
+                !s.working
+                    && s.ws
+                        .chat
+                        .last()
+                        .is_some_and(|m| m.text == "You said: after")
+            });
+        }
+    }
+
+    #[test]
     fn in_queue_mode_a_message_waits_for_claude_codes_turn_to_end() {
         let mut rt = runtime_with(fake("signed-in", &[]));
         rt.state.delivery.change(|d| *d = messages::Delivery::Queue);

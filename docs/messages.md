@@ -41,7 +41,9 @@ Claude Code has not echoed back yet, and notes when a turn runs: from an echoed 
 session starting a turn on its own (a firstmate hook can wake it) to the turn's `result`. The
 chief of staff is working while a turn runs or a message has not been taken in. This matters
 because one turn can answer two messages (the first case above) or two turns can follow each
-other with no pause (the second), so counting `result` records alone would be wrong.
+other with no pause (the second), so counting `result` records alone would be wrong. The end of a turn is still the last word: a
+`result` clears the count of messages awaiting an echo, so an echo that never comes (Claude Code
+may merge a held message into another's turn) cannot leave the app working, or a queue stuck.
 
 ## Queue mode
 

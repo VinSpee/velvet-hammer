@@ -431,6 +431,7 @@ impl Claude {
                 }
                 self.replied = false;
                 self.turn = false;
+                self.unread = 0;
             }
             _ => {}
         }
@@ -1068,7 +1069,7 @@ mod tests {
     }
 
     #[test]
-    fn it_works_until_every_message_written_was_taken_in_and_answered() {
+    fn it_works_while_a_turn_runs_or_a_message_awaits_its_echo_and_a_turn_end_clears_both() {
         let mut claude = Claude::new("unused");
         // Two messages written: the second arrived during the first's turn.
         claude.unread = 2;
@@ -1079,10 +1080,10 @@ mod tests {
         };
         let result = json!({"type": "result", "subtype": "success", "result": "ok"});
         claude.record(&replay("first"));
+        assert_eq!(claude.unread, 1);
+        // The second was merged into the first turn and never echoed: the turn's end is final.
         claude.record(&result);
-        // The second was held for the next turn, so the first turn's end is not the end.
-        claude.record(&replay("second"));
-        claude.record(&result);
+        assert_eq!(claude.unread, 0);
         // A turn the session starts on its own is work too.
         claude.record(&json!({"type": "stream_event", "event": {"type": "message_start"}}));
         claude.record(&result);
