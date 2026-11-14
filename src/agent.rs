@@ -14,6 +14,7 @@ use crate::model::{
     Action, Agent, AgentStatus, Author, Id, Item, ItemKind, Message, Plan, Status, Workspace,
 };
 use crate::tools::{ToolResult, ToolUse};
+use crate::ui::Sent;
 
 /// Something the agent layer reports. The app drains these each frame.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -50,6 +51,9 @@ pub enum Event {
     Activity(Entry),
     /// Something Velvet Hammer itself did in the conversation, shown in the chat in its words.
     Notice(String),
+    /// The chief of staff opened the guided flow for adding a second mate, with the scope the
+    /// captain described.
+    AddMate(String),
 }
 
 pub trait ChiefOfStaff {
@@ -118,6 +122,7 @@ impl ChiefOfStaff for Stub {
             chat: seed_chat(),
             items: seed_items(),
             agents: seed_agents(),
+            ..Workspace::default()
         }
     }
 
@@ -152,7 +157,17 @@ impl ChiefOfStaff for Stub {
                 format!("Thanks. Going with \u{201c}{choice}\u{201d}.")
             }
             Action::Done { .. } => "Thanks, I've let the team know that's done.".to_string(),
-            Action::Ui(ui) => format!("Thanks. I got your submit with {}.", ui.params),
+            Action::Ui(ui) => match &ui.sent {
+                Sent::Submit { params, .. } => format!("Thanks. I got your submit with {params}."),
+                Sent::Answer { answer, .. } => {
+                    let values: Vec<&str> =
+                        answer.picked.iter().map(|o| o.value.as_str()).collect();
+                    format!(
+                        "Thanks. I got the values {values:?} and the words \u{201c}{}\u{201d}.",
+                        answer.other
+                    )
+                }
+            },
         };
         self.queued.push(Event::Reply { text, done: true });
     }

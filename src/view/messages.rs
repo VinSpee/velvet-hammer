@@ -5,7 +5,7 @@
 use rune::tok::{Theme, radius, space, type_};
 use rune::{El, col, row, text};
 
-use super::{button, choice, field, note, page, section, small_button, warning};
+use super::{all_settings, button, choice, field, note, page, section, small_button, warning};
 use crate::messages::{self, Delivery};
 use crate::{App, Showing};
 
@@ -74,6 +74,7 @@ pub fn messages_page(s: &App, t: Theme, dark: bool) -> El {
     ));
     let actions = row()
         .gap(space::S2)
+        .child(all_settings("messages-all-settings", s, t))
         .child(button("messages-close", "Back to chat", t, |s| {
             s.showing = Showing::Chat
         }));

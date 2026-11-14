@@ -23,6 +23,9 @@ pub enum Author {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Message {
+    /// Names the message in its link (see [`crate::links`]). It is random, so it never names
+    /// another message, and the history keeps it, so it lasts across restarts.
+    pub id: String,
     pub author: Author,
     pub text: String,
     /// The tool use an [`Author::Tool`] message shows.
@@ -35,6 +38,7 @@ pub struct Message {
 impl Message {
     pub fn new(author: Author, text: impl Into<String>) -> Self {
         Message {
+            id: new_id(),
             author,
             text: text.into(),
             tool: None,
@@ -44,12 +48,26 @@ impl Message {
 
     pub fn tool(tool: ToolUse) -> Self {
         Message {
+            id: new_id(),
             author: Author::Tool,
             text: String::new(),
             tool: Some(tool),
             while_working: false,
         }
     }
+}
+
+/// A new message id: 12 random hexadecimal digits.
+pub fn new_id() -> String {
+    let mut bytes = [0u8; 6];
+    // Without the system's randomness the clock still keeps ids apart.
+    if getrandom::fill(&mut bytes).is_err() {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_nanos());
+        bytes.copy_from_slice(&nanos.to_le_bytes()[..6]);
+    }
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
 /// Whether the chief of staff can talk, as the agent layer reports it. Claude Code owns the
@@ -132,7 +150,10 @@ pub struct Agent {
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Workspace {
+    /// The conversation, oldest first. The first [`Workspace::earlier`] messages are kept from
+    /// earlier sessions (see [`crate::history`]); the chief of staff does not remember them.
     pub chat: Vec<Message>,
+    pub earlier: usize,
     pub items: Vec<Item>,
     pub agents: Vec<Agent>,
 }
@@ -165,6 +186,11 @@ impl Workspace {
 
     pub fn item(&self, id: Id) -> Option<&Item> {
         self.items.iter().find(|i| i.id == id)
+    }
+
+    /// The chat message with this id, by its index.
+    pub fn message(&self, id: &str) -> Option<(usize, &Message)> {
+        self.chat.iter().enumerate().find(|(_, m)| m.id == id)
     }
 
     pub fn agent(&self, id: Id) -> Option<&Agent> {

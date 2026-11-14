@@ -38,6 +38,8 @@ pub enum Kind {
     Texts,
     /// An array of arrays of strings.
     Rows,
+    /// An array of `{value, label, hint?}` objects.
+    Options,
 }
 
 pub struct Prop {
@@ -215,6 +217,24 @@ pub static CATALOG: &[Component] = &[
         events: &["change"],
         about: "A checkbox; bind checked with $bindState or $bindItem",
     },
+    Component {
+        name: "Choice",
+        props: &[
+            needs("question", Kind::Text),
+            needs("options", Kind::Options),
+            prop("recommended", Kind::Text),
+            prop("multiple", Kind::Bool),
+            prop("other", Kind::Bool),
+        ],
+        children: false,
+        events: &[],
+        about: "A question with a fixed set of answers (yes or no, pick one, pick several). \
+                Each option is {value, label, hint?}; recommended is the value of the option you \
+                recommend; multiple lets the captain pick several and press Send; other (default \
+                true) adds a field for an answer of their own. The captain's pick comes back to \
+                you as the option's exact value, so ask such a question with a Choice and not in \
+                text",
+    },
 ];
 
 pub static ACTIONS: &[ActionDef] = &[
@@ -271,6 +291,7 @@ pub fn description() -> String {
                     Kind::Choice(options) => options.join("|"),
                     Kind::Texts => "string[]".to_string(),
                     Kind::Rows => "string[][]".to_string(),
+                    Kind::Options => "{value, label, hint?}[]".to_string(),
                 };
                 format!("{}{}: {kind}", p.name, if p.required { "" } else { "?" })
             })
@@ -509,6 +530,9 @@ pub fn check(input: &Value) -> Result<Vec<String>, String> {
                 c.name, p.name
             ));
         }
+        if c.name == "Choice" {
+            choice_warnings(id, element, &mut warnings);
+        }
         for child in &element.children {
             if !spec.elements.contains_key(child) {
                 warnings.push(format!(
@@ -518,6 +542,38 @@ pub fn check(input: &Value) -> Result<Vec<String>, String> {
         }
     }
     Ok(warnings)
+}
+
+/// What is wrong with a `Choice`'s literal options and recommendation.
+fn choice_warnings(id: &str, element: &Element, warnings: &mut Vec<String>) {
+    let Some(Value::Array(options)) = element.props.get("options") else {
+        return;
+    };
+    let mut values = Vec::new();
+    for (i, raw) in options.iter().enumerate() {
+        match option(raw) {
+            Some(o) => values.push(o.value),
+            None if expression(raw) => {}
+            None => warnings.push(format!(
+                "Element \"{id}\": option {} needs a string \"value\" and \"label\", so it is \
+                 left out.",
+                i + 1
+            )),
+        }
+    }
+    if values.len() < 2 && !options.iter().any(expression) {
+        warnings.push(format!(
+            "Element \"{id}\": a Choice needs at least two options."
+        ));
+    }
+    if let Some(Value::String(recommended)) = element.props.get("recommended")
+        && !values.contains(recommended)
+    {
+        warnings.push(format!(
+            "Element \"{id}\": recommended is \"{recommended}\", which is not the value of an \
+             option, so no option is marked."
+        ));
+    }
 }
 
 /// The tool's answer to the model: what it tells the model once the view is shown, or why
@@ -564,7 +620,25 @@ fn fits(kind: Kind, value: &Value) -> bool {
         Kind::Bool => value.is_boolean(),
         Kind::Choice(options) => value.as_str().is_some_and(|v| options.contains(&v)),
         Kind::Texts | Kind::Rows => value.is_array(),
+        // Each option is checked on its own, so one written wrongly drops only itself.
+        Kind::Options => value.is_array(),
     }
+}
+
+/// One option of a `Choice`, or None when it lacks a string `value` or `label`.
+fn option(raw: &Value) -> Option<Opt> {
+    Some(Opt {
+        value: raw["value"].as_str()?.to_string(),
+        label: raw["label"].as_str()?.to_string(),
+        hint: raw["hint"].as_str().unwrap_or_default().to_string(),
+    })
+}
+
+/// Whether a spec asks the captain a question with a [`What::Choice`].
+pub fn asks(input: &Value) -> bool {
+    input["elements"]
+        .as_object()
+        .is_some_and(|elements| elements.values().any(|e| e["type"] == "Choice"))
 }
 
 /// The value a JSON text still arriving would have if it ended at its last complete value:
@@ -963,8 +1037,26 @@ pub enum What {
         checked: bool,
         change: Option<Trigger>,
     },
+    /// A question with a fixed set of answers. It sends the captain's answer itself.
+    Choice {
+        question: String,
+        options: Vec<Opt>,
+        /// The value of the recommended option.
+        recommended: String,
+        multiple: bool,
+        other: bool,
+    },
     /// A type the catalog lacks, drawn as a placeholder naming it.
     Unknown(String),
+}
+
+/// One answer a [`What::Choice`] offers.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Opt {
+    /// What comes back to the chief of staff, exactly as the spec wrote it.
+    pub value: String,
+    pub label: String,
+    pub hint: String,
 }
 
 /// The actions one control fires, and where it was drawn, so their params resolve against the
@@ -1170,6 +1262,22 @@ fn what(element: &Element, state: &Value, scope: &Scope, out: &mut Tree) -> What
                 change: trigger("change"),
             }
         }
+        "Choice" => {
+            // An option still streaming, or written wrongly, is left out.
+            let options = value("options")
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(option)
+                .collect();
+            What::Choice {
+                question: text("question"),
+                options,
+                recommended: text("recommended"),
+                multiple: truthy(Some(&value("multiple"))),
+                other: raw("other").is_none() || truthy(Some(&value("other"))),
+            }
+        }
         other => What::Unknown(other.to_string()),
     }
 }
@@ -1276,6 +1384,10 @@ pub struct Live {
     local: Option<Value>,
     pub edits: HashMap<String, TextEdit>,
     ids: u64,
+    /// The options picked so far in each `Choice` that takes several, by its node key.
+    pub picks: HashMap<String, Vec<String>>,
+    /// Each `Choice` the captain answered, by its node key, so it is not answered twice.
+    pub answered: HashMap<String, Answer>,
 }
 
 impl Live {
@@ -1328,6 +1440,71 @@ impl Live {
     }
 }
 
+/// The captain's answer to a `Choice`: the options they picked, and their own words in its
+/// Other field.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Answer {
+    pub picked: Vec<Opt>,
+    pub other: String,
+}
+
+impl Answer {
+    /// What the captain did, as the chat shows it: "Chose “yolo off”".
+    pub fn did(&self) -> String {
+        let labels = quoted(
+            self.picked
+                .iter()
+                .map(|o| format!("\u{201c}{}\u{201d}", o.label)),
+        );
+        let own = format!("\u{201c}{}\u{201d}", self.other);
+        match (labels.is_empty(), self.other.is_empty()) {
+            (true, true) => "Chose none of the options".into(),
+            (false, true) => format!("Chose {labels}"),
+            (true, false) => format!("Answered {own}"),
+            (false, false) => format!("Chose {labels}, and answered {own}"),
+        }
+    }
+
+    /// The answer as the chief of staff reads it, each option by its exact value.
+    fn words(&self) -> String {
+        let values = quoted(self.picked.iter().map(|o| {
+            format!(
+                "{} (\u{201c}{}\u{201d})",
+                Value::String(o.value.clone()),
+                o.label
+            )
+        }));
+        let options = match self.picked.len() {
+            0 => String::new(),
+            1 => format!("the option {values}"),
+            _ => format!("the options {values}"),
+        };
+        let own = format!("my own words, \u{201c}{}\u{201d}", self.other);
+        match (options.is_empty(), self.other.is_empty()) {
+            (true, true) => "none of the options".into(),
+            (false, true) => options,
+            (true, false) => own,
+            (false, false) => format!("{options}, and {own}"),
+        }
+    }
+}
+
+/// `a`, `a and b`, `a, b and c`.
+fn quoted(items: impl Iterator<Item = String>) -> String {
+    let items: Vec<String> = items.collect();
+    match items.split_last() {
+        None => String::new(),
+        Some((last, [])) => last.clone(),
+        Some((last, rest)) => format!("{} and {last}", rest.join(", ")),
+    }
+}
+
+/// The key of a `Choice`'s Other field among a view's text fields. It does not start with `/`,
+/// so it stays out of the view's state.
+pub fn other_field(node: &str) -> String {
+    format!("#other-{node}")
+}
+
 /// What the captain did in a view, which goes to the chief of staff as a message.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct UiAction {
@@ -1335,23 +1512,40 @@ pub struct UiAction {
     pub tool: String,
     /// What the captain did, in a few words, such as "Pressed “Approve”".
     pub did: String,
-    /// The `submit` params, resolved.
-    pub params: Value,
-    /// The value of every bound input, by its state path.
-    pub inputs: Value,
+    pub sent: Sent,
+}
+
+/// What a control in a view sends.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Sent {
+    /// A `submit` action.
+    Submit {
+        /// The `submit` params, resolved.
+        params: Value,
+        /// The value of every bound input, by its state path.
+        inputs: Value,
+    },
+    /// The answer to a `Choice`.
+    Answer { question: String, answer: Answer },
 }
 
 impl UiAction {
     /// The message the chief of staff receives.
     pub fn message(&self) -> String {
-        format!(
-            "In the view you showed with {TOOL} (tool use {}), I {}. It sent the action \"submit\" \
-             with the params {} and these input values: {}.",
-            self.tool,
-            lowercase_first(&self.did),
-            self.params,
-            self.inputs
-        )
+        match &self.sent {
+            Sent::Submit { params, inputs } => format!(
+                "In the view you showed with {TOOL} (tool use {}), I {}. It sent the action \
+                 \"submit\" with the params {params} and these input values: {inputs}.",
+                self.tool,
+                lowercase_first(&self.did),
+            ),
+            Sent::Answer { question, answer } => format!(
+                "In the view you showed with {TOOL} (tool use {}), I answered your question \
+                 \u{201c}{question}\u{201d} with {}.",
+                self.tool,
+                answer.words()
+            ),
+        }
     }
 }
 
@@ -1587,6 +1781,98 @@ mod tests {
     }
 
     #[test]
+    fn a_choice_reads_its_options_and_names_what_is_wrong_with_them() {
+        let input: Value = serde_json::from_str(&fixture("ui-choice.json")).unwrap();
+        assert_eq!(check(&input), Ok(vec![]));
+        assert!(asks(&input));
+        let (spec, _) = parse(&input).unwrap();
+        let What::Choice {
+            options,
+            recommended,
+            multiple,
+            other,
+            ..
+        } = tree(&spec, &spec.state).root.unwrap().what
+        else {
+            panic!("not a Choice");
+        };
+        assert_eq!(options[0].value, "yolo-off");
+        assert_eq!(options[1].hint, "I merge green pull requests on my own.");
+        assert_eq!(recommended, "yolo-off");
+        assert!(!multiple && other, "one pick, and Other unless turned off");
+        let wrong = json!({"root": "c", "elements": {"c": {"type": "Choice", "props": {
+            "question": "Ship?", "options": [{"value": "yes", "label": "Yes"}, {"label": "No"}],
+            "recommended": "maybe", "other": false}}}});
+        let warnings = check(&wrong).unwrap();
+        assert!(
+            warnings.iter().any(|w| w.contains("option 2 needs")),
+            "{warnings:?}"
+        );
+        assert!(
+            warnings.iter().any(|w| w.contains("at least two")),
+            "{warnings:?}"
+        );
+        assert!(
+            warnings.iter().any(|w| w.contains("\"maybe\"")),
+            "{warnings:?}"
+        );
+        let (spec, _) = parse(&wrong).unwrap();
+        let What::Choice { options, other, .. } = tree(&spec, &spec.state).root.unwrap().what
+        else {
+            panic!("not a Choice");
+        };
+        assert_eq!(options.len(), 1);
+        assert!(!other);
+        assert!(!asks(&fixture_value("ui-todos.json")));
+    }
+
+    fn fixture_value(name: &str) -> Value {
+        serde_json::from_str(&fixture(name)).unwrap()
+    }
+
+    #[test]
+    fn an_answer_reaches_the_chief_of_staff_by_its_exact_values() {
+        let opt = |value: &str, label: &str| Opt {
+            value: value.into(),
+            label: label.into(),
+            hint: String::new(),
+        };
+        let action = |answer: Answer| UiAction {
+            tool: "toolu_1".into(),
+            did: answer.did(),
+            sent: Sent::Answer {
+                question: "Do you want it off?".into(),
+                answer,
+            },
+        };
+        let one = action(Answer {
+            picked: vec![opt("yolo-off", "yolo off")],
+            other: String::new(),
+        });
+        assert_eq!(one.did, "Chose \u{201c}yolo off\u{201d}");
+        assert_eq!(
+            one.message(),
+            "In the view you showed with app_ui (tool use toolu_1), I answered your question \
+             \u{201c}Do you want it off?\u{201d} with the option \"yolo-off\" (\u{201c}yolo off\u{201d})."
+        );
+        let several = action(Answer {
+            picked: vec![opt("a", "A"), opt("b\"c", "B"), opt("d", "D")],
+            other: "E".into(),
+        });
+        assert_eq!(
+            several.did,
+            "Chose \u{201c}A\u{201d}, \u{201c}B\u{201d} and \u{201c}D\u{201d}, and answered \u{201c}E\u{201d}"
+        );
+        assert!(several.message().ends_with(
+            "with the options \"a\" (\u{201c}A\u{201d}), \"b\\\"c\" (\u{201c}B\u{201d}) and \"d\" \
+             (\u{201c}D\u{201d}), and my own words, \u{201c}E\u{201d}."
+        ));
+        let none = action(Answer::default());
+        assert_eq!(none.did, "Chose none of the options");
+        assert!(none.message().ends_with("with none of the options."));
+    }
+
+    #[test]
     fn the_description_names_every_component_and_action() {
         let text = description();
         for c in CATALOG {
@@ -1595,7 +1881,12 @@ mod tests {
         for a in ACTIONS {
             assert!(text.contains(&format!("- {} ", a.name)), "{}", a.name);
         }
-        for fixture_name in ["ui-release.json", "ui-todos.json"] {
+        for fixture_name in [
+            "ui-release.json",
+            "ui-todos.json",
+            "ui-choice.json",
+            "ui-choice-multiple.json",
+        ] {
             let input: Value = serde_json::from_str(&fixture(fixture_name)).unwrap();
             assert_eq!(check(&input), Ok(vec![]), "{fixture_name}");
         }

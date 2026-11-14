@@ -1,0 +1,10 @@
+{"events": [
+  {"t": 0.2, "menu": "settings"},
+  {"t": 0.8, "type": "mark", "name": "settings"},
+  {"t": 1.0, "menu": "find"},
+  {"t": 1.2, "type": "type", "text": "skeleton"},
+  {"t": 1.8, "type": "mark", "name": "find"},
+  {"t": 2.0, "type": "key", "name": "Escape"},
+  {"t": 2.2, "type": "key", "name": ",", "cmd": true},
+  {"t": 2.8, "type": "mark", "name": "shortcut"}
+]}
