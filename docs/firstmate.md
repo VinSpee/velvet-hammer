@@ -382,7 +382,9 @@ Nothing remote is created, pushed or published: every clone is made from copies 
 
 **From the chat.** When you ask the chief of staff for a second mate, it can open the same flow
 with the app's `app_secondmate` tool, filling in the scope you described. The chat says that it
-opened, and nothing is created until you say yes in the flow.
+opened, and nothing is created until you say yes in the flow. If the flow already has your
+answers, they are kept and the scope is filled in only when it is still empty. While an action is
+running the flow cannot open, and the chat says that firstmate is busy.
 
 ### Managing one
 
@@ -418,6 +420,10 @@ correlation id, and the reply shows under your message. Replies are Markdown and
 the chief of staff's. Messages show who sent them: **You** for those you sent from the app
 (recorded by correlation id in `secondmate-sent.jsonl` in the app's data directory), and
 **Firstmate** for those the chief of staff or firstmate's scripts sent.
+
+`bin/fm-send.sh` reads a message that starts with `--key`, `--resolve-key` or `--fire-and-forget`
+as an option, so the app does not send one. It keeps your draft and warns you; begin the message
+with other words.
 
 Firstmate's main home owns the reply expectation, so its watcher also notices the reply, and
 recovers or escalates a missing one the way it does for its own requests.
