@@ -21,7 +21,10 @@ a tool call shows: a merge, a forced push, a teardown that discards work, a writ
 or a publish is denied or waits for your word (see
 [Firstmate's rules, enforced by hook](docs/firstmate-rules.md)). The chief of staff shows status
 digests, lists, choices and tables as views by default, and a reply of that kind that arrives as
-text is sent back once for a view (see [Visual replies](docs/visual-replies.md)). **For you to do** shows the notes Claude Code adds with the app's `app_note` tool. The
+text is sent back once for a view (see [Visual replies](docs/visual-replies.md)). A message you
+send while the chief of staff is working goes to it at once and is taken in at its next step;
+queueing such messages until it is done is a setting (see
+[Messages sent while the chief of staff works](docs/messages.md)). **For you to do** shows the notes Claude Code adds with the app's `app_note` tool. The
 agents list shows the tasks firstmate has in flight, and selecting one shows that crewmate's
 terminal. The **Projects** list shows the projects in firstmate's records, and **Add project**
 starts a guided conversation in which the chief of staff adds one with firstmate's own procedure;
@@ -41,7 +44,7 @@ The window has three columns:
   transcript in place of the chat; **Back to chat** closes it. Under them, **Projects** lists the
   projects in firstmate's records with **Add project**. A **Firstmate** card at the bottom
   shows the state of the managed firstmate clone and opens a page for installing and updating it.
-  Above it, **Visual replies**, **Firstmate rules** and **Tool approval** cards show each
+  Above it, **Messages**, **Visual replies**, **Firstmate rules** and **Tool approval** cards show each
   setting in a few words and open its page; the tool-approval page links to the activity log.
 - **Chief of staff** (middle): the conversation, with a message field and a **Send** button. A
   line under the heading says what runs it, such as "Claude Code · signed in with your Claude Max
@@ -49,6 +52,12 @@ The window has three columns:
   projects yet, a card above the conversation explains them and offers **Add a project**; while
   you add one, a row above the message field offers **Choose a folder…**, **Yes**, **No** and
   **Done adding**.
+  While the chief of staff works, a line over the message field says so. A message you send then
+  goes out at once, shows in the conversation in order, marked as sent while it was working, and
+  Claude Code takes it in at the turn's next step without stopping anything. With **Queue new
+  messages until the chief of staff is done** chosen on the **Messages** page, it waits in a list
+  under the field instead, where you can edit or delete it, and goes out when the chief of staff
+  is done, one at a time (see [docs/messages.md](docs/messages.md)).
   The chief of staff's messages are Markdown, shown formatted: bold, italic, strikethrough,
   inline code and code blocks, headings, lists, block quotes and links. A line break shows as
   written, HTML shows as text, and a reply still arriving never shows a half-written marker. A link
@@ -89,6 +98,9 @@ The window has three columns:
 - `src/visual.rs`: visual replies: the mode, the shapes of reply that read better as a view, the
   standing instruction and the stop check with its retry cap (see
   [docs/visual-replies.md](docs/visual-replies.md)).
+- `src/messages.rs`: the Messages setting, sending right away or queueing until the chief of
+  staff is done (see [docs/messages.md](docs/messages.md)). The queue lives in `App`; its page,
+  the working line and the queued list are in `src/view/messages.rs`.
 - `src/store.rs`: a settings file in the data directory, written whole and shared with the hooks;
   tool approval, visual replies and firstmate's rules each keep one.
 - `src/projects.rs`: the projects in firstmate's records (its registry `data/projects.md` and
@@ -129,8 +141,10 @@ talks to Anthropic:
   chat. You can also run `claude auth login` in a terminal yourself and choose **Check again**.
 - **Chatting.** The first message starts one long-lived
   `claude -p --input-format stream-json --output-format stream-json --verbose
-  --include-partial-messages --no-session-persistence` process. Each message is written to its
-  standard input, and the reply streams into the chat as Claude Code produces it. The process
+  --include-partial-messages --replay-user-messages --no-session-persistence` process. Each
+  message is written to its standard input as you send it, even mid-turn, and the reply streams
+  into the chat as Claude Code produces it. Claude Code echoes each message back as it takes it
+  in, which tells the app when the chief of staff is done. The process
   runs in the managed firstmate clone with `FM_HOME` set to the app's own firstmate home, so it
   starts as firstmate (see [The managed firstmate clone](docs/firstmate.md)).
 - **Tools and hooks.** The chat session also gets `--mcp-config` and `--settings` flags that point
@@ -317,11 +331,18 @@ It writes these files to `OUT_DIR`:
 | `rules-settings.png`, `rules-settings.json` | The Firstmate rules page after a forced push was denied and a merge was asked about and allowed |
 | `rules-merge-ask.png`, `rules-merge-ask.json` | A merge through firstmate's script waiting for you, naming the pull request |
 | `rules-project-ask.png`, `rules-project-ask.json` | A write into a project waiting for you, naming the file |
+| `send-while-working.png`, `send-while-working.json` | A message sent while the chief of staff works: sent at once, marked, with the working line |
+| `send-while-working-answered.png`, `send-while-working-answered.json` | The end of that turn, answering both messages |
+| `messages-settings.png`, `messages-settings.json` | The Messages page: Send right away recommended and chosen |
+| `queue-waiting.png`, `queue-waiting.json` | Queue mode: three messages waiting under the field, one being edited |
+| `queue-delivering.png`, `queue-delivering.json` | The turn ended: the first queued message went out, two still wait |
+| `queue-not-ready.png`, `queue-not-ready.json` | Queued messages kept while Claude Code is signed out |
 | `walk-sent.json` | `scripts/walkthrough.json` after typing and sending a message |
 | `walk-end.png`, `walk-end.json` | The same script after answering an item, finishing the task and opening a peek |
 
 The first four scenes, `approval-settings`, the `formatted` scenes, the `view` scenes and
-`visuals-settings` use the stub; the other `visuals` scenes have the fake `claude` call the prompt
+`visuals-settings` use the stub, as do the `send-while-working`, `messages` and `queue` scenes, on a
+stub that keeps working until the scene ends its turn; the other `visuals` scenes have the fake `claude` call the prompt
 and stop hooks; the `rules` scenes run the fake `claude` as firstmate in a scratch clone under
 `/tmp/velvet-hammer`; the `tool`
 scenes have the fake `claude` use Read and Bash on the files in `scripts/fixtures`. The sign-in scenes run the app on `scripts/fake-claude`, so
