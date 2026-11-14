@@ -32,7 +32,8 @@ for scene in chat replied empty peek signed-out signing-in signed-in expired cli
   projects-fresh projects-empty projects-adding projects-listed \
   formatted formatted-all formatted-streaming tool-image tool-image-broken tool-video tool-generic tool-picture \
   view-static view-streaming view-state view-action view-unknown view-too-large \
-  visuals-settings visuals-enforced visuals-capped rules-settings rules-merge-ask rules-project-ask; do
+  visuals-settings visuals-enforced visuals-capped rules-settings rules-merge-ask rules-project-ask \
+  workers-fresh workers-settings workers-claude-refused workers-crew; do
   headless --scene "$scene" --snap "$out/$scene.png"
   headless --scene "$scene" --tree "$out/$scene.json"
 done
@@ -313,7 +314,7 @@ check visuals-capped.json no  '"text": "Chief of staff'"'"'s view"'
 # Firstmate's rules: the page with what two rules did, a merge question that names the pull
 # request, and a write into a project waiting for the captain.
 check chat.json yes '"key": "rules"'
-check chat.json yes '"text": "7 of 7 on"'
+check chat.json yes '"text": "8 of 8 on"'
 check rules-settings.json yes '"key": "rules-page"'
 check rules-settings.json yes '"key": "guard-merge-through-script"'
 check rules-settings.json yes '"key": "guard-publish-asks-captain-toggle"'
@@ -326,6 +327,30 @@ check rules-merge-ask.json yes 'Firstmate'"'"'s hard rule 2: never merge a pull 
 check rules-merge-ask.json yes '"key": "answer-1-0"'
 check rules-project-ask.json yes 'Let the chief of staff edit /tmp/velvet-hammer/rules-project-ask/data/home/projects/site/README.md?'
 check rules-project-ask.json yes '"key": "answer-1-1"'
+# Workers on other providers: nothing set up, pi installed from a stand-in release with
+# firstmate pointed at it, a Claude model refused for pi, and what each worker runs on.
+check chat.json yes '"key": "workers"'
+check workers-fresh.json yes '"key": "workers-page"'
+check workers-fresh.json yes '"text": "pi 1.5.2 is not installed."'
+check workers-fresh.json yes '"key": "workers-install"'
+check workers-fresh.json yes '"text": "No opencode Go key is in the keychain yet."'
+check workers-fresh.json yes '"key": "workers-connect"'
+check workers-fresh.json yes '"key": "nickname-0"'
+check workers-fresh.json yes 'pi · opencode-go/deepseek-v4.1-flash'
+check workers-settings.json yes 'It lists 6 models for the keys it has.'
+check workers-settings.json yes '"text": "Your opencode Go key is in the keychain."'
+check workers-settings.json yes 'may spend only opencode Go.'
+check workers-settings.json no  '"key": "workers-connect"'
+check workers-settings.json yes '"key": "nickname-1"'
+check workers-settings.json yes 'claude · opus · effort high'
+check workers-settings.json yes '"text": "2 nicknames · pi ready"'
+check workers-claude-refused.json yes '"key": "nickname-problem"'
+check workers-claude-refused.json yes 'never through pi. Choose Claude Code for a Claude model.'
+check workers-claude-refused.json no  '"key": "nickname-2"'
+check workers-crew.json yes '"key": "crew-lab-verify-runs"'
+check workers-crew.json yes '"text": "pi · opencode-go/deepseek-v4.1-flash"'
+check workers-crew.json yes '"text": "claude · claude-sonnet-5-5"'
+check rules-settings.json yes '"key": "guard-claude-on-subscription"'
 # The scripted run.
 check walk-sent.json yes '"text": "Ship it when CI is green."'
 check walk-sent.json yes 'Got it:'

@@ -44,6 +44,10 @@ pub struct Crew {
     pub state: String,
     /// One line on what it is doing now.
     pub doing: String,
+    /// What the worker runs on, such as "pi · opencode-go/deepseek-v4.1-flash", from the
+    /// `harness=` and `model=` lines of firstmate's `state/<id>.meta`. The snapshot does not
+    /// carry it.
+    pub runs: Option<String>,
 }
 
 /// A task held for the captain: firstmate's one record of a captain call.
@@ -102,6 +106,7 @@ impl Bearings {
                     name: word(row, "name"),
                     state: word(row, "state"),
                     doing: word(row, "doing"),
+                    runs: None,
                 })
                 .collect(),
         })
@@ -300,7 +305,32 @@ fn snapshot(script: &PathBuf, clone: &Path, home: &Path) -> Result<Bearings, Str
             said
         });
     }
-    Bearings::parse(&output.stdout)
+    let mut bearings = Bearings::parse(&output.stdout)?;
+    for crew in &mut bearings.crew {
+        crew.runs = runs(home, &crew.id);
+    }
+    Ok(bearings)
+}
+
+/// What task `id` runs on, from its `state/<id>.meta`: the harness, and the model when firstmate
+/// recorded one other than `default`.
+pub fn runs(home: &Path, id: &str) -> Option<String> {
+    if id.is_empty() || id.contains('/') || id.starts_with('.') {
+        return None;
+    }
+    let meta = std::fs::read_to_string(home.join("state").join(format!("{id}.meta"))).ok()?;
+    let field = |key: &str| {
+        meta.lines()
+            .rev()
+            .find_map(|l| l.strip_prefix(key))
+            .map(str::trim)
+            .filter(|v| !v.is_empty() && *v != "default" && *v != "-")
+    };
+    let harness = field("harness=")?;
+    Some(match field("model=") {
+        Some(model) => format!("{harness} \u{b7} {model}"),
+        None => harness.to_string(),
+    })
 }
 
 /// What `bin/fm-bearings-snapshot.sh --json` printed for a lab home with two captain holds
@@ -341,6 +371,7 @@ mod tests {
                 name: "Render every state headlessly".into(),
                 state: "working".into(),
                 doing: "rendering chat, empty and peek scenes".into(),
+                runs: None,
             }
         );
         assert_eq!(bearings.crew.len(), 2);
@@ -353,6 +384,28 @@ mod tests {
                 reason: "checks green; merge approval needed".into(),
             }]
         );
+    }
+
+    #[test]
+    fn what_a_worker_runs_on_is_read_from_its_meta_record() {
+        let home = std::env::temp_dir().join(format!("vh-bearings-runs-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        std::fs::create_dir_all(home.join("state")).unwrap();
+        let meta = |id: &str, text: &str| {
+            std::fs::write(home.join(format!("state/{id}.meta")), text).unwrap()
+        };
+        meta(
+            "hack",
+            "harness=pi\nmodel=opencode-go/deepseek-v4.1-flash\neffort=default\n",
+        );
+        meta("plain", "harness=claude\nmodel=default\n");
+        assert_eq!(
+            runs(&home, "hack").as_deref(),
+            Some("pi \u{b7} opencode-go/deepseek-v4.1-flash")
+        );
+        assert_eq!(runs(&home, "plain").as_deref(), Some("claude"));
+        assert_eq!(runs(&home, "gone"), None);
+        assert_eq!(runs(&home, "../state/hack"), None);
     }
 
     #[test]

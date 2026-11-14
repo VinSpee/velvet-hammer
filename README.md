@@ -66,6 +66,12 @@ The window has three columns:
   [Views in the chat](docs/json-render.md).
 - **Needs your input** and **For you to do** (right): questions the agents are waiting on, each
   with answer buttons, and steps only you can take, each with a **Done** button.
+- **Workers** (a card in the agents column): crewmates on models other than Claude, such as
+  DeepSeek V4.1 Flash on an opencode Go plan. They run on pi, which the app installs and checks
+  itself, with the provider key kept in the macOS keychain; Claude workers stay on Claude Code
+  and your subscription. The page also edits worker nicknames, so "send a hacker to look into
+  it" sends that preset, and each worker in the agents list shows what it runs on. See
+  [Workers on other providers](docs/worker-providers.md).
 
 ## Layout of the code
 
@@ -90,7 +96,13 @@ The window has three columns:
   standing instruction and the stop check with its retry cap (see
   [docs/visual-replies.md](docs/visual-replies.md)).
 - `src/store.rs`: a settings file in the data directory, written whole and shared with the hooks;
-  tool approval, visual replies and firstmate's rules each keep one.
+  tool approval, visual replies and firstmate's rules each keep one, and the worker nicknames
+  keep one in the firstmate home's `config/`.
+- `src/crew.rs`: worker nicknames, reading a "send a … worker" request and resolving it against
+  the nicknames and the models pi lists, and what the hook tells the chief of staff (see
+  [docs/worker-providers.md](docs/worker-providers.md)).
+- `src/pi.rs`: the pi runtime the app installs for workers on other providers, the keychain
+  check, and firstmate's pi account setting.
 - `src/projects.rs`: the projects in firstmate's records (its registry `data/projects.md` and
   the clones under `projects/`), re-read every two seconds, and the system folder dialog the add
   flow uses.
@@ -107,8 +119,8 @@ The window has three columns:
 - `src/markdown.rs`: prepares the chief of staff's Markdown for Rune's Markdown view, keeping
   line breaks and showing HTML as text.
 - `src/view.rs`: the Rune view, with the tool-use views in `src/view/tool.rs`, the
-  json-render views in `src/view/ui.rs`, and the visual-replies and firstmate-rules pages in
-  `src/view/policy.rs`. Every element a
+  json-render views in `src/view/ui.rs`, the visual-replies and firstmate-rules pages in
+  `src/view/policy.rs`, and the Workers page in `src/view/workers.rs`. Every element a
   test or script reaches has a key.
 - `src/main.rs`: the `App` state (workspace, chief of staff, sign-in status, firstmate clone,
   message draft, what the middle column shows), the headless scenes, and the tests.
@@ -317,13 +329,18 @@ It writes these files to `OUT_DIR`:
 | `rules-settings.png`, `rules-settings.json` | The Firstmate rules page after a forced push was denied and a merge was asked about and allowed |
 | `rules-merge-ask.png`, `rules-merge-ask.json` | A merge through firstmate's script waiting for you, naming the pull request |
 | `rules-project-ask.png`, `rules-project-ask.json` | A write into a project waiting for you, naming the file |
+| `workers-fresh.png`, `workers-fresh.json` | The Workers page before anything is set up, with the example nickname |
+| `workers-settings.png`, `workers-settings.json` | pi installed from a stand-in release, the key found, firstmate pointed at the runtime, and a second nickname |
+| `workers-claude-refused.png`, `workers-claude-refused.json` | A Claude model refused for a pi nickname |
+| `workers-crew.png`, `workers-crew.json` | The agents list showing what each worker runs on |
 | `walk-sent.json` | `scripts/walkthrough.json` after typing and sending a message |
 | `walk-end.png`, `walk-end.json` | The same script after answering an item, finishing the task and opening a peek |
 
 The first four scenes, `approval-settings`, the `formatted` scenes, the `view` scenes and
 `visuals-settings` use the stub; the other `visuals` scenes have the fake `claude` call the prompt
-and stop hooks; the `rules` scenes run the fake `claude` as firstmate in a scratch clone under
-`/tmp/velvet-hammer`; the `tool`
+and stop hooks; the `rules` and `workers` scenes run the fake `claude` as firstmate in a scratch clone under
+`/tmp/velvet-hammer`, and the `workers` scenes install a stand-in pi release from a `file://` URL
+there; the `tool`
 scenes have the fake `claude` use Read and Bash on the files in `scripts/fixtures`. The sign-in scenes run the app on `scripts/fake-claude`, so
 they need no Claude account; each waits for the fake's real processes before rendering. The
 firstmate and projects scenes run `git` on a scratch upstream repository under `target/`, so

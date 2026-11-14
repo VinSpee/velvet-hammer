@@ -17,8 +17,10 @@ use crate::projects::Project;
 mod policy;
 mod tool;
 mod ui;
+mod workers;
 use policy::{rules_page, visuals_page};
 use tool::{picture_page, tool_use};
+use workers::{workers_page, workers_summary};
 
 pub fn view(s: &App, cx: &mut Cx<App>) -> El {
     let t = tok::theme(cx.system_dark());
@@ -33,6 +35,7 @@ pub fn view(s: &App, cx: &mut Cx<App>) -> El {
         (Showing::Activity, ..) => activity_page(s, t, cx.system_dark()),
         (Showing::Visuals, ..) => visuals_page(s, t, cx.system_dark()),
         (Showing::Rules, ..) => rules_page(s, t, cx.system_dark()),
+        (Showing::Workers, ..) => workers_page(s, t, cx.system_dark()),
         (Showing::Picture(id), ..) => picture_page(s, id, t, cx.system_dark()),
         (_, Some(agent), _) => peek(s, agent, t, cx.system_dark()),
         // A chief of staff that runs in the managed clone cannot chat until it is installed.
@@ -100,30 +103,34 @@ fn agents(s: &App, t: Theme, dark: bool) -> El {
     for crew in &s.captain.crew {
         let id = crew.id.clone();
         let selected = s.showing == Showing::Crew(id.clone());
-        list = list.child(
-            col()
-                .key(format!("crew-{id}"))
-                .role("button")
-                .label(format!("Peek at {}", crew.name))
-                .focusable(true)
-                .padding(space::S2)
-                .gap(2.0)
-                .radius(radius::SM)
-                .fill(if selected { t.control_off } else { t.card })
-                .on_press(move |s: &mut App| s.showing = Showing::Crew(id.clone()))
-                .child(
-                    text(crew.name.clone())
-                        .font(type_::TITLE)
-                        .color(t.text)
-                        .wrap(),
-                )
-                .child(
-                    text(format!("{} \u{b7} {}", crew.state, crew.doing))
-                        .font(type_::LABEL)
-                        .color(t.text_secondary)
-                        .wrap(),
-                ),
-        );
+        list =
+            list.child(
+                col()
+                    .key(format!("crew-{id}"))
+                    .role("button")
+                    .label(format!("Peek at {}", crew.name))
+                    .focusable(true)
+                    .padding(space::S2)
+                    .gap(2.0)
+                    .radius(radius::SM)
+                    .fill(if selected { t.control_off } else { t.card })
+                    .on_press(move |s: &mut App| s.showing = Showing::Crew(id.clone()))
+                    .child(
+                        text(crew.name.clone())
+                            .font(type_::TITLE)
+                            .color(t.text)
+                            .wrap(),
+                    )
+                    .child(
+                        text(format!("{} \u{b7} {}", crew.state, crew.doing))
+                            .font(type_::LABEL)
+                            .color(t.text_secondary)
+                            .wrap(),
+                    )
+                    .children(crew.runs.as_ref().map(|runs| {
+                        note(&format!("crew-{}-runs", crew.id), runs, t).wrap_anywhere()
+                    })),
+            );
     }
     if let Some(projects) = &s.projects {
         list = list.child(project_list(s, projects, t, dark));
@@ -133,6 +140,14 @@ fn agents(s: &App, t: Theme, dark: bool) -> El {
         .filter(|r| s.rules.settings().on(**r))
         .count();
     list.child(el().grow(1.0))
+        .child(nav_card(
+            s,
+            "workers",
+            "Workers",
+            workers_summary(s),
+            &[Showing::Workers],
+            t,
+        ))
         .child(nav_card(
             s,
             "visuals",
@@ -184,7 +199,10 @@ fn nav_card(s: &App, key: &str, title: &str, summary: String, pages: &[Showing],
         } else {
             t.card
         })
-        .on_press(move |s: &mut App| s.showing = open.clone())
+        .on_press(move |s: &mut App| match open {
+            Showing::Workers => s.open_workers(),
+            _ => s.showing = open.clone(),
+        })
         .child(text(title.to_string()).font(type_::TITLE).color(t.text))
         .child(note(&format!("{key}-summary"), &summary, t))
 }
