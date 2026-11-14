@@ -16,6 +16,7 @@ mod markdown;
 mod menus;
 mod model;
 mod projects;
+mod reminders;
 mod store;
 mod tools;
 mod ui;
@@ -25,7 +26,7 @@ mod visual;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, channel};
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use rune::{AppSpec, Image, ImageCache, Key, KeyEvent, Player, TextEdit, Tx, Waker};
@@ -37,6 +38,7 @@ use claude::Claude;
 use firstmate::{Checkout, Distro, Firstmate, Work, lab::Lab};
 use model::{Action, Author, Id, Message, Status, Workspace};
 use projects::Project;
+use reminders::{Reminder, Reminders, Unit, When};
 use tools::{Handler, Picture};
 
 /// All app state: the workspace the agent layer fills, plus what only the UI needs.
@@ -63,6 +65,18 @@ pub struct App {
     pub history: history::History,
     /// The find bar over the conversation.
     pub find: find::Find,
+    /// The captain's reminders, which the chief of staff's reminder tools set and list.
+    pub reminders: Reminders,
+    /// The times the reminder keywords stand for.
+    pub reminder_settings: store::Store<reminders::Settings>,
+    /// The reminders' change count when the window last showed them.
+    reminders_seen: u64,
+    /// The reminder whose snooze menu is open, and where: "banner", "panel" or "list".
+    pub snoozing: Option<(&'static str, u64)>,
+    /// The number typed into the open snooze menu.
+    pub snooze_amount: TextEdit,
+    /// Why the last snooze was not made.
+    pub snooze_problem: Option<String>,
     /// Keeps `captain` current from firstmate's records, when the chief of staff is firstmate.
     watcher: Option<bearings::Watcher>,
     /// What firstmate's records say waits on the captain.
@@ -159,13 +173,27 @@ pub enum Showing {
     Rules,
     /// Every setting, by section.
     Settings,
+    /// The captain's reminders: due, coming up, and the Later list.
+    Reminders,
+    /// The times the reminder keywords stand for.
+    ReminderSettings,
     /// One image from the chat, enlarged, by its tool use's id.
     Picture(String),
 }
 
 impl App {
-    /// The app on `chief`, keeping its tool-approval settings and activity log in `data`.
-    pub fn new(mut chief: Box<dyn ChiefOfStaff>, firstmate: Firstmate, data: &Path) -> Self {
+    /// The app on `chief`, keeping its settings, activity log and reminders in `data`.
+    pub fn new(chief: Box<dyn ChiefOfStaff>, firstmate: Firstmate, data: &Path) -> Self {
+        App::with_clock(chief, firstmate, data, reminders::system_clock())
+    }
+
+    /// The app with reminders on `clock`, a fixed one in scenes and tests.
+    pub fn with_clock(
+        mut chief: Box<dyn ChiefOfStaff>,
+        firstmate: Firstmate,
+        data: &Path,
+        clock: reminders::Clock,
+    ) -> Self {
         let watcher = chief
             .workplace()
             .map(|clone| bearings::Watcher::start(clone, &firstmate.home_dir()));
@@ -177,10 +205,13 @@ impl App {
         let rules = store::Store::<guard::Settings>::open(data);
         let keeping = store::Store::<history::Keeping>::open(data);
         let mut history = history::History::new(data);
+        let reminder_settings = store::Store::<reminders::Settings>::open(data);
+        let reminders = Reminders::open(data, reminder_settings.shared(), clock);
         chief.approve_with(bridge::Policies {
             approval: approvals.shared(),
             visual: visuals.shared(),
             rules: rules.shared(),
+            reminders: reminders.clone(),
         });
         let window_wake: Arc<OnceLock<Waker>> = Arc::new(OnceLock::new());
         let media_wake: Waker = Arc::new({
@@ -211,6 +242,12 @@ impl App {
             keeping,
             history,
             find: find::Find::default(),
+            reminders,
+            reminder_settings,
+            reminders_seen: 0,
+            snoozing: None,
+            snooze_amount: TextEdit::default(),
+            snooze_problem: None,
             watcher,
             captain: Bearings::default(),
             captain_problem: None,
@@ -316,7 +353,55 @@ impl App {
         for event in events {
             self.take(event);
         }
+        changed | self.remind()
+    }
+
+    /// Shows the reminders that came due, posting each as a system notification where the app
+    /// may; true when the reminders changed since the window last showed them.
+    fn remind(&mut self) -> bool {
+        for reminder in self.reminders.fire_due() {
+            notify(&reminder);
+        }
+        let version = self.reminders.version();
+        let changed = version != self.reminders_seen;
+        self.reminders_seen = version;
         changed
+    }
+
+    /// The captain dealt with the reminder.
+    pub fn reminder_done(&mut self, id: u64) {
+        self.reminders.done(id);
+        self.dealt_with(id);
+    }
+
+    pub fn delete_reminder(&mut self, id: u64) {
+        self.reminders.delete(id);
+        self.dealt_with(id);
+    }
+
+    /// Sets the reminder again for `when`, from now.
+    pub fn snooze(&mut self, id: u64, when: When) {
+        match self.reminders.snooze(id, when) {
+            Ok(_) => self.dealt_with(id),
+            Err(problem) => self.snooze_problem = Some(problem),
+        }
+    }
+
+    /// Snoozes for the number typed in the snooze menu, in `unit`.
+    pub fn snooze_for(&mut self, id: u64, unit: reminders::Unit) {
+        match self.snooze_amount.text.trim().parse() {
+            Ok(amount) => self.snooze(id, When::In(amount, unit)),
+            Err(_) => self.snooze_problem = Some("Type a whole number first.".into()),
+        }
+    }
+
+    /// Closes the snooze menu and takes the reminder's system notification back.
+    fn dealt_with(&mut self, id: u64) {
+        self.snoozing = None;
+        self.snooze_amount.clear();
+        self.snooze_problem = None;
+        rune_notify::remove(&[&notification_id(id)]);
+        self.remind();
     }
 
     /// Applies one thing the agent layer reported.
@@ -848,6 +933,10 @@ fn replied(s: &App) -> bool {
             .is_some_and(|m| m.author != Author::Captain)
 }
 
+/// The longest the app waits before looking at the reminders again: a timer may not count the
+/// time the computer slept.
+const RECHECK: Duration = Duration::from_secs(30);
+
 fn poll(s: &mut App, now: f64, tx: &mut Tx) -> bool {
     s.now = now;
     let mut changed = s.drain() | s.follow_find(tx);
@@ -862,6 +951,10 @@ fn poll(s: &mut App, now: f64, tx: &mut Tx) -> bool {
     if focused != s.focused {
         s.focused = focused;
         changed = true;
+    }
+    if let Some(due) = s.reminders.next_due() {
+        let left = due.duration_since(s.reminders.now().timestamp());
+        tx.wake_after(Duration::try_from(left).unwrap_or_default().min(RECHECK));
     }
     changed
 }
@@ -919,6 +1012,23 @@ fn on_key(s: &mut App, key: &KeyEvent, tx: &mut Tx) -> bool {
         return false;
     }
     true
+}
+
+fn notification_id(id: u64) -> String {
+    format!("reminder-{id}")
+}
+
+/// Posts a reminder that came due to the system's notifications, unless the window is in
+/// front, where the banner shows it. Only a bundled app may post on macOS, which asks the
+/// captain's permission the first time; otherwise, or if they refused, the window alone shows
+/// it.
+fn notify(reminder: &Reminder) {
+    if rune_notify::available() && !rune_notify::app_focused() {
+        rune_notify::post(
+            &rune_notify::Notification::new(notification_id(reminder.id), "Reminder")
+                .body(reminder.text.clone()),
+        );
+    }
 }
 
 fn setup(s: &mut App, wake: Waker) {
@@ -1317,6 +1427,19 @@ fn main() {
                 s.send();
                 s.settle(|s| s.ws.needs_input().next().is_some());
             }),
+            // Reminders on a fixed clock, Friday 2:30 PM: the Reminders page, two that came due
+            // (one overdue) with the banner and For you to do, the snooze menu, and the settings.
+            ("reminders-list", |s| *s = reminders_set().0),
+            ("reminder-fired", |s| *s = reminders_due().0),
+            ("reminder-snooze", |s| {
+                let (app, stretch) = reminders_due();
+                *s = app;
+                s.snoozing = Some(("banner", stretch));
+            }),
+            ("reminder-settings", |s| {
+                *s = on_clock(&scratch("unused"), friday(14, 30)).0;
+                s.showing = Showing::ReminderSettings;
+            }),
         ],
         min_size: Some((900.0, 560.0)),
         setup: Some(setup),
@@ -1337,6 +1460,82 @@ fn main() {
         }
     }
     app.run();
+}
+
+/// Friday, 2026-11-13, at `hour:minute` in US Eastern time, for the reminder scenes and tests.
+fn friday(hour: i8, minute: i8) -> jiff::Zoned {
+    let eastern = jiff::tz::TimeZone::posix("EST5EDT,M3.2.0,M11.1.0").expect("a POSIX zone");
+    jiff::civil::date(2026, 11, 13)
+        .at(hour, minute, 0, 0)
+        .to_zoned(eastern)
+        .expect("a time in the zone")
+}
+
+/// The hands of a clock the reminder scenes and tests move themselves.
+type Hands = Arc<Mutex<jiff::Zoned>>;
+
+fn clock(hands: &Hands) -> reminders::Clock {
+    let hands = hands.clone();
+    Arc::new(move || hands.lock().unwrap_or_else(|e| e.into_inner()).clone())
+}
+
+/// The stub app keeping its data in `data`, its reminders on a clock set to `now`.
+fn on_clock(data: &Path, now: jiff::Zoned) -> (App, Hands) {
+    let hands = Arc::new(Mutex::new(now));
+    let app = App::with_clock(
+        Box::new(Stub::default()),
+        installed_firstmate(),
+        data,
+        clock(&hands),
+    );
+    (app, hands)
+}
+
+/// Reminders set at 2:30 PM on Friday for each form, shown on the Reminders page.
+fn reminders_set() -> (App, Hands) {
+    let (mut app, hands) = on_clock(&scratch("unused"), friday(14, 30));
+    for (text, when) in [
+        ("Check the deploy", When::In(20, Unit::Minutes)),
+        ("Reply to the design review", When::LaterToday),
+        ("The standup", When::TomorrowMorning),
+        ("Send the invoice", When::In(3, Unit::Days)),
+        ("Plan the week", When::NextWeek),
+        ("Renew the velvet-hammer.dev domain", When::Later),
+        ("Read the Rune changelog", When::Later),
+    ] {
+        app.reminders.set(text, when).expect("a reminder");
+    }
+    app.showing = Showing::Reminders;
+    app.drain();
+    (app, hands)
+}
+
+/// Two reminders that came due at 2:32 PM: one set at 9:00 AM for 10:00 AM, which the app
+/// shows as overdue because it fired late, and one set at 2:30 PM for two minutes on, with the
+/// id of the second. Two more wait.
+fn reminders_due() -> (App, u64) {
+    let (mut app, hands) = on_clock(&scratch("unused"), friday(9, 0));
+    app.reminders
+        .set("Call the bank about the wire", When::In(1, Unit::Hours))
+        .expect("a reminder");
+    *hands.lock().unwrap() = friday(14, 30);
+    for (text, when) in [
+        ("Stretch", When::In(2, Unit::Minutes)),
+        ("Check the deploy", When::LaterToday),
+        ("Renew the velvet-hammer.dev domain", When::Later),
+    ] {
+        app.reminders.set(text, when).expect("a reminder");
+    }
+    *hands.lock().unwrap() = friday(14, 32);
+    app.drain();
+    let stretch = app
+        .reminders
+        .list()
+        .iter()
+        .find(|r| r.text == "Stretch")
+        .map(|r| r.id)
+        .expect("set above");
+    (app, stretch)
 }
 
 /// The list the visual-replies scenes and tests have the fake send as text.
@@ -2881,6 +3080,73 @@ mod tests {
         eprintln!("chat: {:?}", rt.state.ws.chat);
     }
 
+    /// The real `claude` on the Haiku model, told "remind me in 2 minutes to stretch": it calls
+    /// `app_remind` with the "in" form, and the reminder fires two minutes later, on a clock
+    /// moved forward rather than waited for. Run it with `cargo test real_claude -- --ignored`.
+    #[test]
+    #[ignore = "uses the real Claude account"]
+    fn real_claude_sets_a_reminder_that_fires() {
+        let ahead = Arc::new(Mutex::new(jiff::SignedDuration::ZERO));
+        let clock: reminders::Clock = {
+            let ahead = ahead.clone();
+            Arc::new(move || {
+                let now = jiff::Zoned::now();
+                now.checked_add(*ahead.lock().unwrap()).unwrap_or(now)
+            })
+        };
+        let claude = Claude::new("claude").env("ANTHROPIC_MODEL", "haiku");
+        let mut rt = runtime_with(App::with_clock(
+            Box::new(claude),
+            installed_firstmate(),
+            &scratch("unused"),
+            clock,
+        ));
+        wait(&mut rt, settled);
+        assert!(matches!(rt.state.status, Status::Ready(_)), "not signed in");
+        rt.state.draft.text = "remind me in 2 minutes to stretch".into();
+        tap(&mut rt, "send");
+        // A turn may load the deferred tool and say something first; it ends with words.
+        wait_for(&mut rt, Duration::from_secs(120), |s| {
+            !s.reminders.list().is_empty()
+                && replied(s)
+                && s.ws
+                    .chat
+                    .last()
+                    .is_some_and(|m| m.author == Author::ChiefOfStaff)
+        });
+        eprintln!("chat: {:?}", rt.state.ws.chat);
+        let call = rt
+            .state
+            .ws
+            .chat
+            .iter()
+            .filter_map(|m| m.tool.as_ref())
+            .find(|t| t.name == "mcp__velvet-hammer__app_remind")
+            .expect("app_remind was called")
+            .input
+            .clone();
+        assert_eq!(
+            (&call["when"], &call["amount"], &call["unit"]),
+            (
+                &serde_json::json!("in"),
+                &serde_json::json!(2),
+                &serde_json::json!("minutes")
+            )
+        );
+        assert!(
+            call["text"]
+                .as_str()
+                .unwrap()
+                .to_lowercase()
+                .contains("stretch")
+        );
+        let reminder = rt.state.reminders.list().pop().expect("a reminder");
+        assert!(reminder.fired.is_none());
+        *ahead.lock().unwrap() = jiff::SignedDuration::from_secs(121);
+        rt.frame(1.0 / 60.0);
+        assert!(rt.find("reminder-banner").is_some(), "the reminder fired");
+    }
+
     #[test]
     fn a_missing_claude_says_so() {
         let mut rt = runtime_with(fake_program("/nonexistent/claude", "signed-out", &[]));
@@ -3514,6 +3780,159 @@ mod tests {
             "You said: Bash was allowed to run git push --force"
         );
         assert!(last_entry(&rt).rule.is_none());
+    }
+
+    /// The fake `claude`, signed in, with the app's reminders on a clock set to `now`.
+    fn fake_on_clock(now: jiff::Zoned) -> (Runtime<App>, Hands) {
+        let home = scratch("signed-in");
+        let hands = Arc::new(Mutex::new(now));
+        let claude = Claude::new(FAKE_CLAUDE).env("FAKE_CLAUDE_HOME", home.to_string_lossy());
+        let app = App::with_clock(
+            Box::new(claude),
+            installed_firstmate(),
+            &home,
+            clock(&hands),
+        );
+        let mut rt = runtime_with(app);
+        wait(&mut rt, settled);
+        (rt, hands)
+    }
+
+    #[test]
+    fn a_reminder_set_through_claudes_tool_comes_due_with_a_banner() {
+        let (mut rt, hands) = fake_on_clock(friday(14, 30));
+        let reply = send_and_wait(&mut rt, "remind: in 2 minutes | Stretch");
+        assert_eq!(reply, "Reminder set for Today, 2:32 PM: Stretch");
+        assert_eq!(texts_under(&rt, "reminders-summary"), ["1 coming up"]);
+        assert!(rt.find("reminder-banner").is_none());
+        let reply = send_and_wait(&mut rt, "reminders?");
+        assert_eq!(
+            reply,
+            "It is now Today, 2:30 PM.\n- Today, 2:32 PM: Stretch (set Today, 2:30 PM)"
+        );
+        *hands.lock().unwrap() = friday(14, 32);
+        rt.frame(1.0 / 60.0);
+        assert_eq!(texts_under(&rt, "reminder-banner-text"), ["Stretch"]);
+        assert_eq!(
+            texts_under(&rt, "reminder-banner-when"),
+            ["Set Today, 2:30 PM \u{b7} due Today, 2:32 PM"]
+        );
+        assert!(rt.find("reminder-1").is_some(), "in For you to do");
+        tap(&mut rt, "banner-1-done");
+        assert!(rt.find("reminder-banner").is_none());
+        assert!(rt.find("reminder-1").is_none());
+        assert!(rt.state.reminders.list().is_empty());
+    }
+
+    #[test]
+    fn the_tool_refuses_what_it_cannot_set_and_says_why() {
+        let (mut rt, _) = fake_on_clock(friday(14, 30));
+        let reply = send_and_wait(&mut rt, "remind: soon | Stretch");
+        assert!(reply.starts_with("when must be one of"), "{reply}");
+        let reply = send_and_wait(&mut rt, "remind: in 0 minutes | Stretch");
+        assert!(reply.contains("1 or more"), "{reply}");
+        assert!(rt.state.reminders.list().is_empty());
+    }
+
+    #[test]
+    fn a_reminder_missed_while_closed_shows_as_overdue_at_launch() {
+        let data = scratch("unused");
+        let (app, _) = on_clock(&data, friday(9, 0));
+        app.reminders
+            .set("Call the bank", When::In(1, Unit::Hours))
+            .unwrap();
+        drop(app);
+        let (app, _) = on_clock(&data, friday(14, 30));
+        let rt = runtime_with(app);
+        assert_eq!(texts_under(&rt, "reminder-banner-text"), ["Call the bank"]);
+        assert!(texts(&rt).contains(&"Reminder \u{b7} overdue".to_string()));
+        assert!(
+            texts_under(&rt, "reminder-1-when")[0].starts_with("Reminder \u{b7} overdue \u{b7} ")
+        );
+    }
+
+    #[test]
+    fn snoozing_from_the_banner_sets_the_reminder_again() {
+        let (app, stretch) = reminders_due();
+        let mut rt = runtime_with(app);
+        tap(&mut rt, &format!("banner-{stretch}-snooze"));
+        assert!(rt.find(&format!("banner-{stretch}-snooze-menu")).is_some());
+        tap(&mut rt, &format!("banner-{stretch}-snooze-10m"));
+        assert_eq!(rt.state.snoozing, None);
+        let r = rt.state.reminders.list();
+        let r = r.iter().find(|r| r.id == stretch).unwrap();
+        assert_eq!(r.fired, None);
+        assert_eq!(r.due_words(&friday(14, 32)), "Today, 2:42 PM");
+        // The overdue one is still due, so the banner shows it.
+        assert_eq!(
+            texts_under(&rt, "reminder-banner-text"),
+            ["Call the bank about the wire"]
+        );
+        // A typed number of hours, and a typed word that is not a number.
+        let bank = rt.state.reminders.list()[0].id;
+        tap(&mut rt, &format!("panel-{bank}-snooze"));
+        rt.state.snooze_amount.text = "soon".into();
+        tap(&mut rt, &format!("panel-{bank}-snooze-hours"));
+        assert!(rt.find("snooze-problem").is_some());
+        rt.state.snooze_amount.text = "2".into();
+        tap(&mut rt, &format!("panel-{bank}-snooze-hours"));
+        let r = rt.state.reminders.list();
+        let r = r.iter().find(|r| r.id == bank).unwrap();
+        assert_eq!(r.due_words(&friday(14, 32)), "Today, 4:32 PM");
+        assert!(rt.find("reminder-banner").is_none());
+    }
+
+    #[test]
+    fn the_reminders_page_groups_them_and_deletes_one() {
+        let (app, _) = reminders_set();
+        let mut rt = runtime_with(app);
+        tap(&mut rt, "reminders-close");
+        tap(&mut rt, "for-you-reminders");
+        assert_eq!(rt.state.showing, Showing::Reminders);
+        assert!(rt.find("reminders-coming").is_some());
+        assert!(rt.find("reminders-later").is_some());
+        assert!(rt.find("reminders-due").is_none());
+        assert_eq!(texts_under(&rt, "reminders-3-due"), ["Tomorrow, 9:00 AM"]);
+        tap(&mut rt, "list-1-delete");
+        assert!(rt.find("reminders-1").is_none());
+        assert_eq!(rt.state.reminders.list().len(), 6);
+        assert_eq!(
+            texts_under(&rt, "reminders-summary"),
+            ["4 coming up \u{b7} 2 later"]
+        );
+    }
+
+    #[test]
+    fn the_settings_page_changes_what_later_today_means_and_survives_a_restart() {
+        let data = scratch("unused");
+        let (app, _) = on_clock(&data, friday(14, 30));
+        let mut rt = runtime_with(app);
+        tap(&mut rt, "reminders");
+        tap(&mut rt, "reminders-settings");
+        assert_eq!(
+            texts_under(&rt, "reminder-example-later-today"),
+            ["\u{201c}Remind me later today\u{201d} \u{2192} Today, 5:30 PM"]
+        );
+        tap(&mut rt, "reminder-setting-later-today-hours-down");
+        assert_eq!(
+            texts_under(&rt, "reminder-setting-later-today-hours-value"),
+            ["2 hours"]
+        );
+        assert_eq!(
+            texts_under(&rt, "reminder-example-later-today"),
+            ["\u{201c}Remind me later today\u{201d} \u{2192} Today, 4:30 PM"]
+        );
+        rt.state
+            .reminders
+            .set("Reply to the review", When::LaterToday)
+            .unwrap();
+        drop(rt);
+        let (app, _) = on_clock(&data, friday(14, 30));
+        assert_eq!(app.reminder_settings.settings().later_today_hours, 2);
+        assert_eq!(
+            app.reminders.list()[0].due_words(&friday(14, 30)),
+            "Today, 4:30 PM"
+        );
     }
 
     #[test]
