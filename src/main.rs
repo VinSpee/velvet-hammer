@@ -2717,16 +2717,12 @@ mod tests {
         assert_eq!(rt.state.showing, Showing::Approvals);
         assert!(rt.find("mode-run-without-asking").is_some());
         assert!(rt.find("rules-empty").is_some());
-        tap(&mut rt, "mode-ask-every-time");
+        tap_scrolled(&mut rt, "mode-ask-every-time");
         assert_eq!(rt.state.approvals.settings().mode, Mode::Ask);
-        tap(&mut rt, "rule-effect-deny");
+        tap_scrolled(&mut rt, "rule-effect-deny");
         rt.state.form.tool.text = "Bash".into();
         rt.state.form.pattern.text = "git push".into();
-        tap(&mut rt, "rule-save");
-        rt.update(|_, tx| tx.scroll_center("rule-0".to_string()));
-        for _ in 0..30 {
-            rt.frame(1.0 / 60.0);
-        }
+        tap_scrolled(&mut rt, "rule-save");
         assert!(rt.find("rule-0").is_some());
         assert_eq!(
             rt.state.approvals.settings().rules[0].describe(),
