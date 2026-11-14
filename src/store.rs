@@ -6,7 +6,7 @@
 //! file the app cannot read is never dropped quietly: the app runs on that setting's safe
 //! fallback, the page says why, and the next change keeps the old file as `<file>.bad`.
 
-use std::fs::{self, File};
+use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
@@ -161,4 +161,48 @@ pub fn check_version(value: &Value) -> Result<(), String> {
         Some(other) => Err(format!("it has schema version {other}, not {VERSION}")),
         None => Err("it has no schema version".into()),
     }
+}
+
+/// Creates the directory, and any missing parents, readable by its owner only.
+pub fn create_private_dir(dir: &Path) -> io::Result<()> {
+    let mut builder = fs::DirBuilder::new();
+    builder.recursive(true);
+    #[cfg(unix)]
+    std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o700);
+    builder.create(dir)
+}
+
+/// Opens a log for appending, creating it with owner-only permissions and tightening a log an
+/// earlier version made.
+pub fn open_private(path: &Path) -> io::Result<File> {
+    let mut options = OpenOptions::new();
+    options.create(true).append(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+    let file = options.open(path)?;
+    make_private(path)?;
+    Ok(file)
+}
+
+#[cfg(unix)]
+pub fn make_private(path: &Path) -> io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(path, fs::Permissions::from_mode(0o600))
+}
+
+#[cfg(not(unix))]
+pub fn make_private(_: &Path) -> io::Result<()> {
+    Ok(())
+}
+
+/// Makes a directory that exists readable by its owner only, however it was made.
+#[cfg(unix)]
+pub fn make_private_dir(dir: &Path) -> io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(dir, fs::Permissions::from_mode(0o700))
+}
+
+#[cfg(not(unix))]
+pub fn make_private_dir(_: &Path) -> io::Result<()> {
+    Ok(())
 }

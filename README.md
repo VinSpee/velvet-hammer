@@ -39,21 +39,25 @@ been tested yet (see [Trying the real sign-in](#trying-the-real-sign-in)).
 
 ## What works today
 
-The window has three columns:
+The window has three columns, and every setting is in **Settings** (see
+[Settings and menus](#settings-and-menus)):
 
 - **Agents** (left): the subagents the chief of staff manages. Selecting one opens a peek at its
   transcript in place of the chat; **Back to chat** closes it. Under them, **Second mates** lists
   firstmate's second mates with **Add second mate**, and selecting one opens its page; then
-  **Projects** lists the projects in firstmate's records with **Add project**. A **Firstmate** card at the bottom
-  shows the state of the managed firstmate clone and opens a page for installing and updating it.
-  Above it, **Visual replies**, **Firstmate rules** and **Tool approval** cards show each
-  setting in a few words and open its page; the tool-approval page links to the activity log.
+  **Projects** lists the projects in firstmate's records with **Add project**.
 - **Chief of staff** (middle): the conversation, with a message field and a **Send** button. A
   line under the heading says what runs it, such as "Claude Code · signed in with your Claude Max
   plan". When Claude Code is not ready, a sign-in screen takes the conversation's place. With no
   projects yet, a card above the conversation explains them and offers **Add a project**; while
   you add one, a row above the message field offers **Choose a folder…**, **Yes**, **No** and
   **Done adding**.
+  Cmd+F (Ctrl+F on Windows and Linux) opens a find bar that searches the whole conversation,
+  and the conversation is kept across restarts in the app's data directory, earlier sessions
+  above a divider (see [The conversation: find and history](docs/conversation.md)). Every
+  message has a link, `velvet-hammer://message/<id>`, that **Copy link** copies; a link in any
+  message shows as a chip that goes to the message, and the chief of staff gets each message
+  you link to quoted with your words (see [Message links](docs/links.md)).
   The chief of staff's messages are Markdown, shown formatted: bold, italic, strikethrough,
   inline code and code blocks, headings, lists, block quotes and links. A line break shows as
   written, HTML shows as text, and a reply still arriving never shows a half-written marker. A link
@@ -71,6 +75,42 @@ The window has three columns:
   [Views in the chat](docs/json-render.md).
 - **Needs your input** and **For you to do** (right): questions the agents are waiting on, each
   with answer buttons, and steps only you can take, each with a **Done** button.
+
+## Settings and menus
+
+Configuration is out of the main window, behind the platform's Settings menu item:
+
+- **macOS** has native menus. **Settings…** (Cmd+,) is in the application menu. The Edit menu has
+  the standard text actions (Undo, Redo, Cut, Copy, Paste, Select All) and then **Find…**
+  (Cmd+F), **Find Next** (Cmd+G) and **Find Previous** (Shift+Cmd+G). The Window menu has
+  Minimize and Close, and Help has **Velvet Hammer Help**, which opens this README on GitHub.
+  Run from `cargo`, the application menu is titled with the binary's name, `velvet-hammer`; an
+  app bundle would give it the app's name.
+- **Windows and Linux** get no native menu bar, because Rune has none there. The window draws the
+  closest equivalent along its top instead: **File › Settings** (Ctrl+,) on Windows, **Edit ›
+  Preferences** (Ctrl+,) on Linux, as GNOME and KDE apps say, **Edit › Find…** (Ctrl+F), **Find
+  Next** (Ctrl+G) and **Find Previous** (Ctrl+Shift+G), **Window › Minimize** and **Help ›
+  Velvet Hammer Help**. Text actions stay on the usual keys; the drawn Edit menu does not list
+  them.
+
+**Settings** shows each section with its setting in a few words: **Tool approval**, **Visual
+replies**, **Firstmate rules** and **Firstmate** (the managed clone) each open their page, which
+works as before and has **All settings** to come back. **Conversation history** is set on the
+Settings page itself: **Keep the conversation** (recommended, the default) or **Do not keep the
+conversation**, and **Clear history**, which asks before it deletes anything (see
+[The conversation: find and history](docs/conversation.md#history)). The settings are kept in
+`history.json` beside the other settings files.
+
+The main window keeps what you use all the time: the agents and projects, the chat, **Needs your
+input** and **For you to do**.
+
+| State | Screenshot |
+| --- | --- |
+| The native Edit menu on macOS, from the running app | [macos-edit-menu.png](docs/screens/settings/macos-edit-menu.png) |
+| Settings, every section | [settings.png](docs/screens/settings/settings.png) |
+| **Clear history** asking first | [settings-clear.png](docs/screens/settings/settings-clear.png) |
+| The drawn menu bar on Windows, **File › Settings** open | [menu-windows.png](docs/screens/settings/menu-windows.png) |
+| The drawn menu bar on Linux, **Edit › Preferences** and Find open | [menu-linux.png](docs/screens/settings/menu-linux.png) |
 
 ## Layout of the code
 
@@ -109,11 +149,20 @@ The window has three columns:
 - `src/ui.rs`: json-render views: the catalog, reading a spec (whole or still streaming) within
   its limits, its state, the tree to draw and the actions its controls fire (see
   [docs/json-render.md](docs/json-render.md)).
+- `src/find.rs`: find in the conversation: what each message is searched as, the matches and
+  stepping through them (see [docs/conversation.md](docs/conversation.md)).
+- `src/history.rs`: the conversation kept across restarts in `history.jsonl`, and the setting
+  that turns it off.
+- `src/links.rs`: message links: their form, the chips they draw as, and the quotes the chief
+  of staff gets for the messages the captain links to (see [docs/links.md](docs/links.md)).
+- `src/menus.rs`: the menus on each platform, native on macOS and drawn in the window elsewhere,
+  and the commands they share with the keyboard shortcuts.
 - `src/markdown.rs`: prepares the chief of staff's Markdown for Rune's Markdown view, keeping
   line breaks and showing HTML as text.
 - `src/view.rs`: the Rune view, with the tool-use views in `src/view/tool.rs`, the
-  json-render views in `src/view/ui.rs`, and the visual-replies and firstmate-rules pages in
-  `src/view/policy.rs`. Every element a
+  json-render views in `src/view/ui.rs`, the visual-replies and firstmate-rules pages in
+  `src/view/policy.rs`, and the Settings page and the drawn menu bar in
+  `src/view/settings.rs`. Every element a
   test or script reaches has a key.
 - `src/main.rs`: the `App` state (workspace, chief of staff, sign-in status, firstmate clone,
   message draft, what the middle column shows), the headless scenes, and the tests.
@@ -138,6 +187,8 @@ talks to Anthropic:
   standard input, and the reply streams into the chat as Claude Code produces it. The process
   runs in the managed firstmate clone with `FM_HOME` set to the app's own firstmate home, so it
   starts as firstmate (see [The managed firstmate clone](docs/firstmate.md)).
+- **Message links.** Each message is sent with a line giving its link, and with any message it
+  links to quoted (see [Message links](docs/links.md)).
 - **Tools and hooks.** The chat session also gets `--mcp-config` and `--settings` flags that point
   at a server the app runs on `127.0.0.1` for that session only. Its `app_note` tool adds a note
   to **For you to do**, its `app_ui` tool shows a view in the chat, and its PreToolUse hook applies
@@ -176,8 +227,7 @@ check the terms again for that case.
 ### Tool approval
 
 Every tool use of the chief of staff goes through the app's PreToolUse hook, which decides it
-with settings you choose on the **Tool approval** page (the card above **Firstmate** in the
-agents column). While the chief of staff runs as firstmate, [firstmate's rules](docs/firstmate-rules.md)
+with settings you choose on the **Tool approval** page (in **Settings**). While the chief of staff runs as firstmate, [firstmate's rules](docs/firstmate-rules.md)
 are checked first; a rule's deny is final, and its question is asked whatever these settings say.
 
 - **Mode.** **Run without asking** (recommended, and what a fresh install uses): the chief of
@@ -322,6 +372,21 @@ It writes these files to `OUT_DIR`:
 | `rules-settings.png`, `rules-settings.json` | The Firstmate rules page after a forced push was denied and a merge was asked about and allowed |
 | `rules-merge-ask.png`, `rules-merge-ask.json` | A merge through firstmate's script waiting for you, naming the pull request |
 | `rules-project-ask.png`, `rules-project-ask.json` | A write into a project waiting for you, naming the file |
+| `find.png`, `find.json` | The find bar on a long chat: four matches, the first current |
+| `find-stepped.png`, `find-stepped.json` | The third match current, scrolled into view |
+| `find-none.png`, `find-none.json` | A query with no matches |
+| `history.png`, `history.json` | After a restart: the kept earlier session above its divider, found by find |
+| `find-keys.png`, `find-keys-*.json` | `scripts/find.json` on a long chat: Cmd+F, typing, Enter and Cmd+G, then Escape |
+| `link-copied.png`, `link-copied.json` | A message's link copied with **Copy link** |
+| `link-opened.png`, `link-opened.json` | A message link opened: the chat scrolled to the message, highlighted |
+| `link-context.png`, `link-context.json` | A link in the captain's message as a chip, and the fake echoing the quote it was sent |
+| `link-missing.png`, `link-missing.json` | A link to a message that is not in the chat |
+| `open-link.png`, `open-link-*.json` | `scripts/open-link.json`: a link the system opened with the app, then the highlight fading |
+| `settings.png`, `settings.json` | Settings: every section, with conversation history set in place |
+| `settings-clear.png`, `settings-clear.json` | **Clear history** asking before it deletes the kept conversation |
+| `menu-windows.png`, `menu-windows.json` | The menu bar the window draws on Windows, with **File › Settings** open |
+| `menu-linux.png`, `menu-linux.json` | The same on Linux, with **Edit › Preferences** and Find open |
+| `menus-*.json` | `scripts/menus.json`: Settings and Find picked from the menu bar, then Cmd+, |
 | `walk-sent.json` | `scripts/walkthrough.json` after typing and sending a message |
 | `walk-end.png`, `walk-end.json` | The same script after answering an item, finishing the task and opening a peek |
 
@@ -355,6 +420,20 @@ cargo test                                         # drives taps through Rune's 
 
 Add `--theme light` to render the light theme. A release build (`cargo build --release`) takes
 the same arguments because the `tooling` feature is on.
+
+## Pipeline validation
+
+Changes go through the [no-mistakes](https://kunchenguid.github.io/no-mistakes/) pipeline, and
+`.no-mistakes.yaml` tells it how to validate this project. Its `commands` fetch dependencies, run
+`cargo test`, lint with `cargo fmt --check` and `cargo clippy -D warnings`, and format with
+`cargo fmt`, each with rustup's proxies first on `PATH` so the pinned toolchain runs instead of
+Homebrew's `rust`. Its `test.instructions` is the runbook the Test step's agent follows: run
+`scripts/verify.sh`, require it to exit zero, and open the rendered scenes the change affects.
+The runbook excludes what cannot run in the pipeline: a real Claude sign-in, the windowed app,
+and a real firstmate home that pushes or merges.
+
+no-mistakes reads `commands` and `test.instructions` from `main`, not from the pushed branch, so
+an edit to them applies to the runs after it merges.
 
 ## License
 

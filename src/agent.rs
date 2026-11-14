@@ -88,6 +88,7 @@ impl ChiefOfStaff for Stub {
             chat: seed_chat(),
             items: seed_items(),
             agents: seed_agents(),
+            ..Workspace::default()
         }
     }
 

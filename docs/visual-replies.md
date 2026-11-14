@@ -14,7 +14,7 @@ Two of Claude Code's hooks carry it, served by the app like its PreToolUse hook 
 - A **check of each final reply**. When a reply of a qualifying shape arrives with no view in its
   turn, the app sends it back once with feedback asking for a view.
 
-The **Visual replies** card in the agents column opens the settings page.
+The **Visual replies** section in Settings (Cmd+, on macOS) opens the settings page.
 
 ## What Claude Code's hooks offer
 

@@ -4,21 +4,24 @@
 
 use crate::{App, Showing};
 use rune::tok::{self, Theme, radius, space, type_};
-use rune::{Cx, El, ScrollSpec, TextEdit, col, el, row, text, text_input};
-use rune_kit::{Kit, Markdown};
+use rune::{Cx, El, ScrollSpec, TextEdit, TextHighlight, col, el, row, text, text_input};
+use rune_kit::{Highlight, Kit, Markdown};
 
 use crate::approval::{self, Effect, Mode};
-use crate::guard;
 
+use crate::find::{self, Hits};
 use crate::firstmate::{Checkout, Distro, Firstmate, Standing, Work};
+use crate::links;
 use crate::model::{Action, Agent, Author, Item, ItemKind, Message, Plan, Status};
 use crate::projects::Project;
 
 mod mates;
 mod policy;
+mod settings;
 mod tool;
 mod ui;
 use policy::{rules_page, visuals_page};
+use settings::{all_settings, menu_bar, settings_page};
 use tool::{picture_page, tool_use};
 
 pub fn view(s: &App, cx: &mut Cx<App>) -> El {
@@ -29,9 +32,10 @@ pub fn view(s: &App, cx: &mut Cx<App>) -> El {
     };
     let main = match (&s.showing, peeked, &s.status) {
         (Showing::Crew(id), ..) => crew_peek(s, id, t, cx.system_dark()),
+        (Showing::Settings, ..) => settings_page(s, t, cx.system_dark()),
         (Showing::Mate(id), ..) => mates::mate_page(s, id, t, cx.system_dark()),
         (Showing::AddMate, ..) => mates::add_page(s, t, cx.system_dark()),
-        (Showing::Firstmate, ..) => firstmate_page(&s.firstmate, t, cx.system_dark()),
+        (Showing::Firstmate, ..) => firstmate_page(s, t, cx.system_dark()),
         (Showing::Approvals, ..) => approvals_page(s, t, cx.system_dark()),
         (Showing::Activity, ..) => activity_page(s, t, cx.system_dark()),
         (Showing::Visuals, ..) => visuals_page(s, t, cx.system_dark()),
@@ -39,15 +43,14 @@ pub fn view(s: &App, cx: &mut Cx<App>) -> El {
         (Showing::Picture(id), ..) => picture_page(s, id, t, cx.system_dark()),
         (_, Some(agent), _) => peek(s, agent, t, cx.system_dark()),
         // A chief of staff that runs in the managed clone cannot chat until it is installed.
-        (_, None, Status::Ready(_)) if !s.chat_ready() => {
-            firstmate_page(&s.firstmate, t, cx.system_dark())
-        }
+        (_, None, Status::Ready(_)) if !s.chat_ready() => firstmate_page(s, t, cx.system_dark()),
         (_, None, Status::Ready(plan)) => chat(s, plan, t, cx.system_dark()),
         (_, None, status) => sign_in(status, t, cx.system_dark()),
     };
-    row()
+    let window = row()
         .w_full()
-        .h_full()
+        .grow(1.0)
+        .min_h(0.0)
         .fill(t.bg)
         .child(agents(s, t, cx.system_dark()))
         .child(main)
@@ -61,11 +64,17 @@ pub fn view(s: &App, cx: &mut Cx<App>) -> El {
                 .gap(space::S3)
                 .child(needs_input(s, t, cx.system_dark()))
                 .child(for_you(s, t)),
-        )
+        );
+    col()
+        .w_full()
+        .h_full()
+        .fill(t.bg)
+        .children(s.in_window_menus.then(|| menu_bar(s, t)))
+        .child(window)
 }
 
 fn agents(s: &App, t: Theme, dark: bool) -> El {
-    let list = col()
+    let mut list = col()
         .key("agents")
         .role("list")
         .label("Agents")
@@ -75,13 +84,16 @@ fn agents(s: &App, t: Theme, dark: bool) -> El {
         .py(space::S6)
         .gap(space::S1)
         .fill(t.card)
+        // The agents, second mates and projects can outgrow the window.
+        .min_h(0.0)
+        .scroll(ScrollSpec {
+            stick_bottom: false,
+        })
         .child(heading("Agents", t));
-    // The agents, second mates and projects scroll, so the cards under them stay in view.
-    let mut items = col().gap(space::S1);
     for a in &s.ws.agents {
         let id = a.id;
         let selected = s.showing == Showing::Peek(id);
-        items = items.child(
+        list = list.child(
             col()
                 .key(format!("agent-{id}"))
                 .role("button")
@@ -105,7 +117,7 @@ fn agents(s: &App, t: Theme, dark: bool) -> El {
     for crew in &s.captain.crew {
         let id = crew.id.clone();
         let selected = s.showing == Showing::Crew(id.clone());
-        items = items.child(
+        list = list.child(
             col()
                 .key(format!("crew-{id}"))
                 .role("button")
@@ -131,79 +143,12 @@ fn agents(s: &App, t: Theme, dark: bool) -> El {
         );
     }
     if s.mates.records.is_some() {
-        items = items.child(mates::mate_list(s, t, dark));
+        list = list.child(mates::mate_list(s, t, dark));
     }
     if let Some(projects) = &s.projects {
-        items = items.child(project_list(s, projects, t, dark));
+        list = list.child(project_list(s, projects, t, dark));
     }
-    let on = guard::Rule::ALL
-        .iter()
-        .filter(|r| s.rules.settings().on(**r))
-        .count();
-    list.child(
-        col()
-            .key("agents-scroll")
-            .grow(1.0)
-            .min_h(0.0)
-            .scroll(ScrollSpec {
-                stick_bottom: false,
-            })
-            .child(items),
-    )
-    .child(nav_card(
-        s,
-        "visuals",
-        "Visual replies",
-        s.visuals.settings().label().to_string(),
-        &[Showing::Visuals],
-        t,
-    ))
-    .child(nav_card(
-        s,
-        "rules",
-        "Firstmate rules",
-        format!("{on} of {} on", guard::Rule::ALL.len()),
-        &[Showing::Rules],
-        t,
-    ))
-    .child(nav_card(
-        s,
-        "approvals",
-        "Tool approval",
-        s.approvals.settings().mode.label().to_string(),
-        &[Showing::Approvals, Showing::Activity],
-        t,
-    ))
-    .child(nav_card(
-        s,
-        "firstmate",
-        "Firstmate",
-        firstmate_summary(&s.firstmate).to_string(),
-        &[Showing::Firstmate],
-        t,
-    ))
-}
-
-/// A card at the bottom of the agents column that opens the first of `pages`, and is
-/// highlighted while any of them shows. Its summary is keyed `<key>-summary`.
-fn nav_card(s: &App, key: &str, title: &str, summary: String, pages: &[Showing], t: Theme) -> El {
-    let open = pages[0].clone();
-    col()
-        .key(key)
-        .role("button")
-        .label(title.to_string())
-        .focusable(true)
-        .padding(space::S2)
-        .gap(2.0)
-        .radius(radius::SM)
-        .fill(if pages.contains(&s.showing) {
-            t.control_off
-        } else {
-            t.card
-        })
-        .on_press(move |s: &mut App| s.showing = open.clone())
-        .child(text(title.to_string()).font(type_::TITLE).color(t.text))
-        .child(note(&format!("{key}-summary"), &summary, t))
+    list
 }
 
 /// The projects in firstmate's records, and the way to add one.
@@ -283,7 +228,8 @@ fn firstmate_summary(fm: &Firstmate) -> &'static str {
 }
 
 /// The managed firstmate clone: how it stands against upstream, and installing and updating it.
-fn firstmate_page(fm: &Firstmate, t: Theme, dark: bool) -> El {
+fn firstmate_page(s: &App, t: Theme, dark: bool) -> El {
+    let fm = &s.firstmate;
     let path = fm.clone_dir().display().to_string();
     let mut body = col().key("firstmate-status").gap(space::S3).max_w(560.0);
     let mut buttons = row().gap(space::S2).flex_wrap();
@@ -376,9 +322,11 @@ fn firstmate_page(fm: &Firstmate, t: Theme, dark: bool) -> El {
         }
     }
     body = body.child(
-        buttons.child(button("firstmate-close", "Back to chat", t, |s| {
-            s.showing = Showing::Chat
-        })),
+        buttons
+            .child(all_settings("firstmate-all-settings", s, t))
+            .child(button("firstmate-close", "Back to chat", t, |s| {
+                s.showing = Showing::Chat
+            })),
     );
     if matches!(fm.distro(), Distro::Installed(_)) {
         body = body.child(note(
@@ -689,6 +637,7 @@ fn approvals_page(s: &App, t: Theme, dark: bool) -> El {
     ));
     let actions = row()
         .gap(space::S2)
+        .child(all_settings("approvals-all-settings", s, t))
         .child(button("approvals-activity", "Activity log", t, |s| {
             s.showing = Showing::Activity
         }))
@@ -751,7 +700,7 @@ fn activity_page(s: &App, t: Theme, dark: bool) -> El {
     );
     let actions = row()
         .gap(space::S2)
-        .child(button("activity-settings", "Settings", t, |s| {
+        .child(button("activity-settings", "Tool approval", t, |s| {
             s.showing = Showing::Approvals
         }))
         .child(button("activity-close", "Back to chat", t, |s| {
@@ -938,6 +887,11 @@ fn chat(s: &App, plan: &Plan, t: Theme, dark: bool) -> El {
             t,
         ));
     }
+    let hits = if s.find.open {
+        find::search(s, &s.find.query.text)
+    } else {
+        Vec::new()
+    };
     col()
         .key("chat")
         .grow(1.0)
@@ -946,8 +900,22 @@ fn chat(s: &App, plan: &Plan, t: Theme, dark: bool) -> El {
         .padding(space::S6)
         .gap(space::S3)
         .child(header)
+        .children(s.find.open.then(|| find_bar(s, &hits, t)))
         .children((s.has_no_projects() && !s.adding).then(|| no_projects(t)))
-        .child(transcript(s, "messages", &s.ws.chat, s.replying, t, dark))
+        .child(transcript(
+            s,
+            "messages",
+            &s.ws.chat,
+            s.replying,
+            Found {
+                chat: true,
+                earlier: s.ws.earlier,
+                hits: &hits,
+                current: s.find.current,
+            },
+            t,
+            dark,
+        ))
         .children(s.answering.as_ref().map(|key| {
             row()
                 .key("answering")
@@ -966,7 +934,90 @@ fn chat(s: &App, plan: &Plan, t: Theme, dark: bool) -> El {
                 .child(button("answer-cancel", "Cancel", t, |s| s.answering = None))
         }))
         .children(s.adding.then(|| adding(s, t, dark)))
+        .children(match &s.flash {
+            Some((Err(id), _)) => Some(warning(
+                "link-missing",
+                &format!(
+                    "That message is not in this conversation: {}. It may be from history that \
+                     was cleared or not kept.",
+                    links::url(id)
+                ),
+                dark,
+            )),
+            _ => None,
+        })
         .child(composer)
+}
+
+/// The find bar over the conversation: the query, where the current match is among them all,
+/// and stepping through them.
+fn find_bar(s: &App, hits: &[Hits], t: Theme) -> El {
+    let total = find::total(hits);
+    let query = s.find.query.text.trim();
+    let count = if query.is_empty() {
+        String::new()
+    } else if let Some(id) = links::parse(query) {
+        if s.ws.message(id).is_some() {
+            "Went to the linked message".to_string()
+        } else {
+            "Message not found".to_string()
+        }
+    } else if total == 0 {
+        "No matches".to_string()
+    } else {
+        format!("{} of {total}", s.find.current.min(total - 1) + 1)
+    };
+    let input = text_input(&s.find.query, type_::BODY)
+        .key("find-input")
+        .single_line()
+        .grow(1.0)
+        .color(t.text)
+        .placeholder("Find in the conversation", t.text_secondary)
+        .on_edit(|s: &mut App| &mut s.find.query)
+        .on_input_key(
+            |s: &mut App, key: &rune::KeyEvent, tx: &mut rune::Tx| match key.key {
+                rune::Key::Enter => {
+                    s.step_find(if key.mods.shift { -1 } else { 1 });
+                    true
+                }
+                rune::Key::Escape => {
+                    s.close_find(tx);
+                    true
+                }
+                _ => false,
+            },
+        );
+    row()
+        .key("find-bar")
+        .role("search")
+        .label("Find in the conversation")
+        .gap(space::S2)
+        .center_y()
+        .child(
+            row()
+                .grow(1.0)
+                .h(32.0)
+                .px(space::S3)
+                .center_y()
+                .radius(radius::MD)
+                .fill(t.card)
+                .border(1.0, tok::accent(0, true))
+                .child(input),
+        )
+        .child(
+            text(count)
+                .key("find-count")
+                .font(type_::LABEL)
+                .color(t.text_secondary),
+        )
+        .child(small_button("find-previous", "Previous", t, |s| {
+            s.step_find(-1)
+        }))
+        .child(small_button("find-next", "Next", t, |s| s.step_find(1)))
+        .child(
+            small_button("find-close", "Done", t, |_| {})
+                .on_press_tx(|s: &mut App, tx: &mut rune::Tx| s.close_find(tx)),
+        )
 }
 
 /// The empty state: the app works on projects, and there are none yet.
@@ -1342,26 +1393,60 @@ fn peek(s: &App, agent: &Agent, t: Theme, dark: bool) -> El {
             "peek-messages",
             &agent.transcript,
             None,
+            Found::default(),
             t,
             dark,
         ))
 }
 
+/// What a transcript marks: where the messages of this session start, and the matches of
+/// the find bar with the current one.
+#[derive(Default)]
+struct Found<'a> {
+    /// The transcript is the chief of staff's chat, whose messages have links.
+    chat: bool,
+    earlier: usize,
+    hits: &'a [Hits],
+    current: usize,
+}
+
+impl Found<'_> {
+    fn of(&self, i: usize) -> Option<&Hits> {
+        self.hits.iter().find(|h| h.message == i)
+    }
+}
+
+/// The colour behind a match, stronger for the current one.
+fn match_color(current: bool, dark: bool) -> rune::Color {
+    tok::accent(3, dark).alpha(if current { 0.75 } else { 0.3 })
+}
+
 /// A conversation. The chief of staff's messages are Markdown, drawn formatted; `replying` is
 /// the one still arriving, whose unfinished tail draws as what it is about to become. Everyone
-/// else's words show as written, and a tool use shows through its handler.
+/// else's words show as written, and a tool use shows through its handler. Messages kept from
+/// earlier sessions sit above a divider.
 fn transcript(
     s: &App,
     key: &str,
     messages: &[Message],
     replying: Option<usize>,
+    found: Found,
     t: Theme,
     dark: bool,
 ) -> El {
     let mut list = col().gap(space::S2);
     for (i, m) in messages.iter().enumerate() {
+        if found.earlier > 0 && i == found.earlier {
+            list = list.child(earlier_divider(t));
+        }
+        let hits = found.of(i);
         if let Some(tool) = &m.tool {
-            list = list.child(tool_use(s, i, tool, t, dark));
+            let mut card = tool_use(s, i, tool, t, dark);
+            if let Some(hits) = hits {
+                let current = hits.holds(found.current);
+                card = card.border(if current { 2.0 } else { 1.0 }, match_color(current, dark));
+            }
+            list = list.child(card);
             continue;
         }
         let who = match m.author {
@@ -1373,24 +1458,92 @@ fn transcript(
             Author::App => "Velvet Hammer",
         };
         let words = if m.author == Author::ChiefOfStaff {
-            markdown(&m.text, replying == Some(i), dark).key(format!("msg-{i}-text"))
+            let marks = hits.map(|h| {
+                h.numbered()
+                    .map(|(n, ranges)| {
+                        let current = n == found.current;
+                        let mark = Highlight::new()
+                            .current_match(current)
+                            .bg(match_color(current, dark))
+                            .key(find::match_key(n));
+                        (ranges.clone(), mark)
+                    })
+                    .collect::<Vec<_>>()
+            });
+            markdown(
+                &links::markdown(&m.text, &s.ws),
+                replying == Some(i),
+                marks.unwrap_or_default(),
+                dark,
+            )
+            .key(format!("msg-{i}-text"))
         } else {
-            text(m.text.clone()).font(type_::BODY).color(t.text).wrap()
+            let marks = hits
+                .into_iter()
+                .flat_map(|h| h.numbered())
+                .flat_map(|(n, ranges)| {
+                    let current = n == found.current;
+                    ranges.iter().map(move |r| {
+                        TextHighlight::new(r.clone(), match_color(current, dark))
+                            .key(find::match_key(n))
+                    })
+                });
+            let (shown, chips) = links::display(&m.text, &s.ws);
+            let mut words = text(shown)
+                .font(type_::BODY)
+                .color(t.text)
+                .wrap()
+                .selectable(true)
+                .text_highlights(marks)
+                .pills(
+                    chips
+                        .iter()
+                        .map(|c| (c.range.clone(), chip_style(c.found, t, dark))),
+                )
+                .on_link(|s: &mut App, url: &str, tx: &mut rune::Tx| s.open_link(url, tx));
+            for chip in &chips {
+                words = words.link(rune::Link::new(chip.range.clone(), chip.url.clone()));
+            }
+            words
         };
-        list = list.child(
-            col()
-                .key(format!("msg-{i}"))
-                .padding(space::S3)
-                .gap(space::S1)
-                .radius(radius::MD)
-                .fill(if m.author == Author::Captain {
-                    t.control_off
-                } else {
-                    t.card
-                })
-                .child(text(who).font(type_::SECTION).color(t.text_secondary))
-                .child(words),
+        let flashed = matches!(&s.flash, Some((Ok(id), _)) if *id == m.id) && found.chat;
+        let mut header = row().gap(space::S2).center_y().child(
+            text(who)
+                .font(type_::SECTION)
+                .color(t.text_secondary)
+                .grow(1.0),
         );
+        if found.chat {
+            header = header.child(link_button(s, i, m, t));
+        }
+        let mut card = col()
+            .key(format!("msg-{i}"))
+            .padding(space::S3)
+            .gap(space::S1)
+            .radius(radius::MD)
+            .fill(if flashed {
+                tok::accent(0, dark).alpha(0.18)
+            } else if m.author == Author::Captain {
+                t.control_off
+            } else {
+                t.card
+            })
+            .child(header)
+            .child(words);
+        if flashed {
+            card = card.border(2.0, tok::accent(0, dark));
+        }
+        if found.chat {
+            card = card.on_hover_change(move |s: &mut App, inside, _| {
+                if inside {
+                    s.hovered = Some(i);
+                } else if s.hovered == Some(i) {
+                    s.hovered = None;
+                    s.copied = None;
+                }
+            });
+        }
+        list = list.child(card);
     }
     col()
         .key(key)
@@ -1400,16 +1553,96 @@ fn transcript(
         .child(list)
 }
 
-/// Markdown from the chief of staff, formatted (see [`crate::markdown`]). Nothing in it runs:
-/// HTML shows as text. Links open in the default browser only when pressed, and only `http`,
-/// `https` and `mailto` links open at all ([`rune::Tx::open_url`] refuses the rest).
-fn markdown(source: &str, streaming: bool, dark: bool) -> El {
+/// The key of chat message `i`'s element: its card for a tool use, its bubble otherwise.
+pub fn message_key(i: usize, m: &Message) -> String {
+    if m.tool.is_some() {
+        format!("tool-{i}")
+    } else {
+        format!("msg-{i}")
+    }
+}
+
+/// How a link chip looks: the accent for a message in the chat, the warning colour for one that
+/// is not.
+fn chip_style(found: bool, t: Theme, dark: bool) -> rune::PillStyle {
+    let tint = if found {
+        tok::accent(0, dark)
+    } else {
+        tok::accent(3, dark)
+    };
+    rune::PillStyle::new().bg(tint.alpha(0.22)).fg(t.text)
+}
+
+/// The small button that copies message `i`'s link. It shows while the pointer is over the
+/// message or the button has focus, and stays reachable with Tab.
+fn link_button(s: &App, i: usize, m: &Message, t: Theme) -> El {
+    let key = format!("msg-{i}-link");
+    let copied = s.copied.as_deref() == Some(m.id.as_str());
+    let shown = copied || s.hovered == Some(i) || s.focused.as_deref() == Some(key.as_str());
+    let id = m.id.clone();
+    small_button(
+        &key,
+        if copied { "Link copied" } else { "Copy link" },
+        t,
+        |_| {},
+    )
+    .label(format!(
+        "Copy the link to this message, {}",
+        links::url(&m.id)
+    ))
+    .opacity(if shown { 1.0 } else { 0.0 })
+    .on_press_tx(move |s: &mut App, tx: &mut rune::Tx| {
+        tx.copy(links::url(&id));
+        s.copied = Some(id.clone());
+    })
+}
+
+/// The line between the messages kept from earlier sessions and this session's.
+fn earlier_divider(t: Theme) -> El {
+    row()
+        .key("earlier-divider")
+        .gap(space::S2)
+        .center_y()
+        .py(space::S2)
+        .child(el().h(1.0).grow(1.0).fill(t.card_border))
+        .child(
+            text(
+                "Earlier sessions above. Your chief of staff does not remember them unless you \
+                 link to one.",
+            )
+            .font(type_::LABEL)
+            .color(t.text_secondary),
+        )
+        .child(el().h(1.0).grow(1.0).fill(t.card_border))
+}
+
+/// Markdown from the chief of staff, formatted (see [`crate::markdown`]), with the find bar's
+/// matches marked. Nothing in it runs: HTML shows as text. A message link draws as a chip and
+/// goes to its message (see [`crate::links`]); other links open in the default browser only when
+/// pressed, and only `http`, `https` and `mailto` links open at all ([`rune::Tx::open_url`]
+/// refuses the rest).
+fn markdown(
+    source: &str,
+    streaming: bool,
+    marks: Vec<(Vec<std::ops::Range<usize>>, Highlight)>,
+    dark: bool,
+) -> El {
     Markdown::new(crate::markdown::prepare(source))
+        .highlights(marks)
         .streaming(streaming)
         .selectable(true)
-        .on_link_tx(|_: &mut App, url: &str, tx: &mut rune::Tx| {
-            let _ = tx.open_url(url);
+        .link_style(move |url: &str| {
+            links::parse(url).map(|_| {
+                let chip = rune::Span::new(0, 0)
+                    .color(tok::theme(dark).text)
+                    .bg(tok::accent(0, dark).alpha(0.22), 3.0);
+                (
+                    chip,
+                    rune::LinkPaint::new().bg(tok::accent(0, dark).alpha(0.35)),
+                )
+            })
         })
+        .on_link_tx(|s: &mut App, url: &str, tx: &mut rune::Tx| s.open_link(url, tx))
         .build(&Kit::neutral(dark))
 }
 

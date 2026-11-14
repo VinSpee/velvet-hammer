@@ -436,7 +436,7 @@ fn conversation(s: &App, id: &str, t: Theme, dark: bool) -> El {
             }
             Said::Back(line) => (
                 format!("{id} \u{b7} {}{}", line.verb, when(line.at)),
-                markdown(&line.note, false, dark),
+                markdown(&line.note, false, Vec::new(), dark),
                 false,
             ),
         };
