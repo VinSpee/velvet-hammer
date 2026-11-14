@@ -4,6 +4,7 @@
 
 mod agent;
 mod approval;
+mod attach;
 mod bearings;
 mod bridge;
 mod claude;
@@ -24,10 +25,11 @@ use std::sync::mpsc::{Receiver, channel};
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
-use rune::{AppSpec, Image, ImageCache, Player, TextEdit, Tx, Waker};
+use rune::{AppSpec, ClipboardContent, Image, ImageCache, Player, TextEdit, Tx, Waker};
 
 use agent::{ChiefOfStaff, Event, Stub};
 use approval::{Activity, Mode, Store};
+use attach::Attachment;
 use bearings::Bearings;
 use claude::Claude;
 use firstmate::{Checkout, Distro, Firstmate, Work, lab::Lab};
@@ -79,11 +81,21 @@ pub struct App {
     /// The captain hold the next message answers, by its key.
     pub answering: Option<String>,
     pub draft: TextEdit,
+    /// The files attached to the draft, in the order they were attached.
+    pub attached: Vec<Attachment>,
+    /// Why the last file pasted or dropped was not attached.
+    pub attach_problem: Option<String>,
+    /// A file drag is over the chat.
+    pub drop_over: bool,
+    /// The app's data directory, where attachments are copied.
+    data: PathBuf,
     pub showing: Showing,
     /// The chat message the chief of staff is still writing.
     pub replying: Option<usize>,
     /// How each finished tool use is drawn, by its id, with the image or video it shows.
     pub media: HashMap<String, Media>,
+    /// The thumbnail or poster frame of each attached image or video, by its saved copy.
+    pub attachment_media: HashMap<PathBuf, Media>,
     /// The tool uses whose results the captain unfolded, by id.
     pub unfolded: HashSet<String>,
     /// The state of each view the chief of staff showed, by its tool use's id.
@@ -180,9 +192,14 @@ impl App {
             wake: None,
             answering: None,
             draft: TextEdit::default(),
+            attached: Vec::new(),
+            attach_problem: None,
+            drop_over: false,
+            data: data.to_path_buf(),
             showing: Showing::Chat,
             replying: None,
             media: HashMap::new(),
+            attachment_media: HashMap::new(),
             unfolded: HashSet::new(),
             ui: HashMap::new(),
             ui_images: HashMap::new(),
@@ -481,17 +498,89 @@ impl App {
 
     pub fn send(&mut self) {
         let text = self.draft.text.trim().to_string();
-        if text.is_empty() || !self.chat_ready() {
+        if (text.is_empty() && self.attached.is_empty()) || !self.chat_ready() {
             return;
         }
         self.draft.clear();
+        self.attach_problem = None;
         // An answer goes to the chief of staff in the captain's own words, naming the hold.
         // Firstmate records it and decides whether it closes a question or frees held work.
         let text = match self.answering.take() {
             Some(key) => format!("My answer to the captain hold {key}: {text}"),
             None => text,
         };
-        self.act(Action::Say(text));
+        let attachments = std::mem::take(&mut self.attached);
+        self.act(Action::Say { text, attachments });
+    }
+
+    /// Attaches files dropped on the chat or pasted from the clipboard, each copied into the
+    /// data directory. A file that cannot be attached says why, and the rest still attach.
+    pub fn attach_files(&mut self, files: &[PathBuf]) {
+        self.attach_problem = None;
+        for file in files {
+            let attached = self.room().and_then(|()| attach::file(&self.data, file));
+            self.take_attachment(attached);
+        }
+    }
+
+    /// Attaches a pasted image, such as a screenshot, from its PNG bytes.
+    pub fn attach_png(&mut self, png: &[u8]) {
+        self.attach_problem = None;
+        let attached = self.room().and_then(|()| attach::png(&self.data, png));
+        self.take_attachment(attached);
+    }
+
+    /// Takes what the clipboard holds as attachments when it holds files (copied in Finder) or
+    /// an image without text (a screenshot); true when it did. Text, including the text a
+    /// spreadsheet copies beside a picture of its cells, pastes as text.
+    pub fn paste(&mut self, content: &ClipboardContent) -> bool {
+        if !content.files().is_empty() {
+            self.attach_files(content.files());
+            return true;
+        }
+        match content.image() {
+            Some(image) if content.text().is_empty() => {
+                self.attach_png(image.png());
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Removes an attachment from the draft and deletes its copy.
+    pub fn remove_attachment(&mut self, i: usize) {
+        if i < self.attached.len() {
+            let gone = self.attached.remove(i);
+            self.attachment_media.remove(&gone.path);
+            attach::discard(&gone);
+        }
+    }
+
+    fn room(&self) -> Result<(), String> {
+        if self.attached.len() >= attach::MAX_PER_MESSAGE {
+            return Err(format!(
+                "A message can carry up to {} attachments.",
+                attach::MAX_PER_MESSAGE
+            ));
+        }
+        Ok(())
+    }
+
+    fn take_attachment(&mut self, attached: Result<Attachment, String>) {
+        match attached {
+            Ok(a) => {
+                if let Some(handler) = tools::handler_for_file(&a.path) {
+                    let media = self.media_for(&handler);
+                    self.attachment_media.insert(a.path.clone(), media);
+                }
+                self.attached.push(a);
+            }
+            // Every file that did not attach says why, in the order they came.
+            Err(why) => match &mut self.attach_problem {
+                Some(problems) => *problems = format!("{problems} {why}"),
+                None => self.attach_problem = Some(why),
+            },
+        }
     }
 
     /// Whether firstmate's records list no project, including in a home that does not exist yet.
@@ -509,13 +598,13 @@ impl App {
         self.adding = true;
         self.answering = None;
         self.showing = Showing::Chat;
-        self.act(Action::Say(ADD_PROJECT.into()));
+        self.act(Action::say(ADD_PROJECT));
     }
 
     /// Sends one of the add flow's quick replies, such as the captain's yes.
     pub fn reply(&mut self, words: &str) {
         if self.chat_ready() {
-            self.act(Action::Say(words.into()));
+            self.act(Action::say(words));
         }
     }
 
@@ -548,7 +637,7 @@ impl App {
     /// Tells the chief of staff, in the chat, that the captain approves merging `url`.
     pub fn approve_merge(&mut self, task: &str, url: &str) {
         if self.chat_ready() {
-            self.act(Action::Say(format!(
+            self.act(Action::say(format!(
                 "I approve merging {url} (task {task})."
             )));
         }
@@ -1006,6 +1095,31 @@ fn main() {
                 say(s, "shell: ls");
                 s.unfolded.insert("toolu_fake_Bash".into());
             }),
+            // Files attached to a message: pasted or dropped, in the draft as chips (a picture,
+            // a video's poster frame, a file's name and size), sent with their paths and the
+            // image as image content, refused over the size cap, and the chat under a drag.
+            ("attach-draft", |s| {
+                *s = attaching(&["chart.png", "clip.mp4", "notes.md"]);
+                s.draft.text = "Here are the chart, the clip and the notes.".into();
+            }),
+            ("attach-sent", |s| {
+                *s = fake_in(Mode::Run);
+                s.attach_files(&[fixture("chart.png").into(), fixture("notes.md").into()]);
+                say(s, "Here is the chart and the notes.");
+                settle_attachments(s);
+            }),
+            ("attach-too-large", |s| {
+                *s = attaching(&["chart.png"]);
+                let big = s.data.join("screen-recording.mov");
+                std::fs::File::create(&big)
+                    .and_then(|f| f.set_len(attach::MAX_BYTES * 4))
+                    .expect("a large file");
+                s.attach_files(&[big]);
+            }),
+            ("attach-drop", |s| {
+                *s = attaching(&["chart.png"]);
+                s.drop_over = true;
+            }),
             ("tool-picture", |s| {
                 *s = shown(&fixture("chart.png"));
                 s.showing = Showing::Picture("toolu_fake_Read".into());
@@ -1200,6 +1314,24 @@ fn shown(path: &str) -> App {
     app
 }
 
+/// The stub with each fixture attached to the draft, its thumbnail decoded.
+fn attaching(names: &[&str]) -> App {
+    let mut app = stub();
+    let files: Vec<PathBuf> = names.iter().map(|n| fixture(n).into()).collect();
+    app.attach_files(&files);
+    settle_attachments(&mut app);
+    app
+}
+
+/// Waits for every attached image's thumbnail to decode.
+fn settle_attachments(app: &mut App) {
+    for media in app.attachment_media.values() {
+        if let Some(Ok(image)) = &media.image {
+            let _ = image.wait();
+        }
+    }
+}
+
 /// A file in `scripts/fixtures`, as written.
 fn fixture_text(name: &str) -> String {
     let path = Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -1373,6 +1505,173 @@ mod tests {
         rt.state.draft.text = "   ".into();
         tap(&mut rt, "send");
         assert_eq!(rt.state.ws.chat.len(), before);
+    }
+
+    // Attachments: pasted or dropped on the chat, shown as chips, sent with the message.
+
+    fn chart_png() -> Vec<u8> {
+        std::fs::read(fixture("chart.png")).unwrap()
+    }
+
+    fn focus_the_field(rt: &mut Runtime<App>) {
+        tap(rt, "chat-input");
+    }
+
+    #[test]
+    fn pasting_a_screenshot_into_the_field_attaches_it() {
+        let mut rt = runtime();
+        focus_the_field(&mut rt);
+        let shot = rune::ClipboardImage::from_png(chart_png()).unwrap();
+        rt.paste_content(ClipboardContent::new("").with_image(shot));
+        rt.frame(1.0 / 60.0);
+        let attached = &rt.state.attached;
+        assert_eq!(attached.len(), 1);
+        assert_eq!(attached[0].name, attach::PASTED_IMAGE);
+        assert_eq!(attached[0].kind, attach::Kind::Image);
+        assert!(
+            attached[0]
+                .path
+                .starts_with(rt.state.data.join(attach::DIR))
+        );
+        assert_eq!(std::fs::read(&attached[0].path).unwrap(), chart_png());
+        assert!(rt.state.draft.text.is_empty());
+        assert!(rt.find("attachment-0").is_some());
+        assert!(rt.find("attachment-0-thumb").is_some());
+    }
+
+    #[test]
+    fn pasting_with_no_field_focused_still_attaches() {
+        let mut rt = runtime();
+        let shot = rune::ClipboardImage::from_png(chart_png()).unwrap();
+        rt.paste_content(ClipboardContent::new("").with_image(shot));
+        rt.frame(1.0 / 60.0);
+        assert_eq!(rt.state.attached.len(), 1);
+    }
+
+    #[test]
+    fn files_copied_in_finder_attach_and_their_names_do_not_paste() {
+        let mut rt = runtime();
+        focus_the_field(&mut rt);
+        let files = [
+            PathBuf::from(fixture("clip.mp4")),
+            fixture("notes.md").into(),
+        ];
+        // Finder puts each file's name and an icon beside the file URLs.
+        let icon = rune::ClipboardImage::from_png(chart_png()).unwrap();
+        rt.paste_content(
+            ClipboardContent::new("clip.mp4\nnotes.md")
+                .with_files(files.clone())
+                .with_image(icon),
+        );
+        rt.frame(1.0 / 60.0);
+        let kinds: Vec<_> = rt.state.attached.iter().map(|a| a.kind).collect();
+        assert_eq!(kinds, [attach::Kind::Video, attach::Kind::File]);
+        assert!(rt.state.draft.text.is_empty());
+    }
+
+    #[test]
+    fn text_copied_with_a_picture_of_it_pastes_as_text() {
+        let mut rt = runtime();
+        focus_the_field(&mut rt);
+        let cells = rune::ClipboardImage::from_png(chart_png()).unwrap();
+        rt.paste_content(ClipboardContent::new("A1 B1").with_image(cells));
+        rt.frame(1.0 / 60.0);
+        assert!(rt.state.attached.is_empty());
+        assert_eq!(rt.state.draft.text, "A1 B1");
+    }
+
+    #[test]
+    fn dropping_files_on_the_chat_attaches_them() {
+        let mut rt = runtime();
+        let at = rt.find("messages").unwrap();
+        rt.drop_files(vec![fixture("notes.md").into()], Some(at));
+        rt.frame(1.0 / 60.0);
+        assert_eq!(rt.state.attached.len(), 1);
+        assert_eq!(rt.state.attached[0].name, "notes.md");
+        assert!(!rt.state.drop_over, "the highlight ends with the drop");
+    }
+
+    #[test]
+    fn removing_an_attachment_deletes_its_copy() {
+        let mut rt = runtime();
+        rt.state.attach_files(&[fixture("notes.md").into()]);
+        rt.invalidate();
+        let copy = rt.state.attached[0].path.clone();
+        tap(&mut rt, "attachment-0-remove");
+        assert!(rt.state.attached.is_empty());
+        assert!(!copy.exists());
+        assert!(rt.find("attachments").is_none());
+    }
+
+    #[test]
+    fn a_folder_or_a_file_over_the_cap_says_why_and_the_rest_attach() {
+        let mut rt = runtime();
+        let big = rt.state.data.join("huge.mov");
+        std::fs::File::create(&big)
+            .unwrap()
+            .set_len(attach::MAX_BYTES * 2)
+            .unwrap();
+        let folder = rt.state.data.join("photos");
+        std::fs::create_dir_all(&folder).unwrap();
+        rt.state
+            .attach_files(&[big, fixture("notes.md").into(), folder]);
+        rt.invalidate();
+        rt.frame(1.0 / 60.0);
+        assert_eq!(rt.state.attached.len(), 1);
+        let why = rt.state.attach_problem.clone().unwrap();
+        assert!(why.contains("\u{201c}huge.mov\u{201d} is 100 MB"), "{why}");
+        assert!(why.contains("\u{201c}photos\u{201d} is a folder"), "{why}");
+        assert!(rt.find("attach-problem").is_some());
+    }
+
+    #[test]
+    fn a_message_carries_at_most_the_cap_of_attachments() {
+        let mut rt = runtime();
+        let notes: Vec<PathBuf> = (0..attach::MAX_PER_MESSAGE + 1)
+            .map(|_| fixture("notes.md").into())
+            .collect();
+        rt.state.attach_files(&notes);
+        assert_eq!(rt.state.attached.len(), attach::MAX_PER_MESSAGE);
+        assert!(
+            rt.state
+                .attach_problem
+                .as_ref()
+                .unwrap()
+                .contains("up to 10")
+        );
+    }
+
+    #[test]
+    fn attachments_alone_send_and_stay_on_the_message() {
+        let mut rt = runtime();
+        rt.state.attach_files(&[fixture("chart.png").into()]);
+        let before = rt.state.ws.chat.len();
+        tap(&mut rt, "send");
+        let chat = &rt.state.ws.chat;
+        assert_eq!(chat.len(), before + 2);
+        assert_eq!(chat[before].attachments.len(), 1);
+        assert!(
+            chat[before].attachments[0].path.exists(),
+            "a sent copy is kept"
+        );
+        assert!(chat[before + 1].text.contains("with 1 attachment"));
+        assert!(rt.state.attached.is_empty());
+        assert!(rt.find(&format!("msg-{before}-attachments-0")).is_some());
+    }
+
+    #[test]
+    fn claude_code_gets_the_image_as_image_content_and_every_file_by_path() {
+        let mut rt = runtime_with(fake_in(Mode::Run));
+        rt.state
+            .attach_files(&[fixture("chart.png").into(), fixture("notes.md").into()]);
+        rt.state.draft.text = "Look at these".into();
+        tap(&mut rt, "send");
+        wait(&mut rt, replied);
+        let reply = &rt.state.ws.chat.last().unwrap().text;
+        assert_eq!(
+            reply,
+            "You said: Look at these [image blocks: 1, files listed: 2]"
+        );
     }
 
     #[test]

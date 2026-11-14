@@ -31,6 +31,7 @@ for scene in chat replied empty peek signed-out signing-in signed-in expired cli
   firstmate-modified firstmate-blocked firstmate-session firstmate-panels firstmate-answering firstmate-crew \
   projects-fresh projects-empty projects-adding projects-listed \
   formatted formatted-all formatted-streaming tool-image tool-image-broken tool-video tool-generic tool-picture \
+  attach-draft attach-sent attach-too-large attach-drop \
   view-static view-streaming view-state view-action view-unknown view-too-large \
   visuals-settings visuals-enforced visuals-capped rules-settings rules-merge-ask rules-project-ask; do
   headless --scene "$scene" --snap "$out/$scene.png"
@@ -326,6 +327,21 @@ check rules-merge-ask.json yes 'Firstmate'"'"'s hard rule 2: never merge a pull 
 check rules-merge-ask.json yes '"key": "answer-1-0"'
 check rules-project-ask.json yes 'Let the chief of staff edit /tmp/velvet-hammer/rules-project-ask/data/home/projects/site/README.md?'
 check rules-project-ask.json yes '"key": "answer-1-1"'
+# Attachments: chips for an image, a video and a file in the draft; the message that carried
+# them, with the image sent as image content and every file by path; a file over the cap; a drag.
+check attach-draft.json yes '"key": "attachments"'
+check attach-draft.json yes '"label": "Image: chart.png"'
+check attach-draft.json yes '"label": "Video: clip.mp4"'
+check attach-draft.json yes '"key": "attachment-2-remove"'
+check attach-draft.json yes '"text": "136 bytes"'
+check attach-draft.json yes '"label": "Remove notes.md"'
+check attach-sent.json yes '"key": "msg-0-attachments-1"'
+check attach-sent.json yes '"text": "You said: Here is the chart and the notes. [image blocks: 1, files listed: 2]"'
+check attach-sent.json no  '"key": "attachments"'
+check attach-too-large.json yes '"key": "attach-problem"'
+check attach-too-large.json yes 'is 200 MB. Attachments can be up to 50 MB each.'
+check attach-too-large.json no  '"key": "attachment-1"'
+check attach-drop.json yes '"key": "attach-drop-hint"'
 # The scripted run.
 check walk-sent.json yes '"text": "Ship it when CI is green."'
 check walk-sent.json yes 'Got it:'

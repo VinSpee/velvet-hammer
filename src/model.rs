@@ -2,6 +2,7 @@
 //! subagents the chief of staff manages. Everything the view draws comes from a [`Workspace`],
 //! and every change the captain makes is an [`Action`] applied to it.
 
+use crate::attach::Attachment;
 use crate::tools::ToolUse;
 use crate::ui::UiAction;
 
@@ -27,6 +28,8 @@ pub struct Message {
     pub text: String,
     /// The tool use an [`Author::Tool`] message shows.
     pub tool: Option<ToolUse>,
+    /// The files the captain attached to the message.
+    pub attachments: Vec<Attachment>,
 }
 
 impl Message {
@@ -35,6 +38,7 @@ impl Message {
             author,
             text: text.into(),
             tool: None,
+            attachments: Vec::new(),
         }
     }
 
@@ -43,6 +47,7 @@ impl Message {
             author: Author::Tool,
             text: String::new(),
             tool: Some(tool),
+            attachments: Vec::new(),
         }
     }
 }
@@ -135,7 +140,11 @@ pub struct Workspace {
 /// Something the captain did.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Action {
-    Say(String),
+    /// A message, with any files attached to it.
+    Say {
+        text: String,
+        attachments: Vec<Attachment>,
+    },
     Answer {
         item: Id,
         choice: String,
@@ -145,6 +154,16 @@ pub enum Action {
     },
     /// A control in a view the chief of staff showed (see [`crate::ui`]).
     Ui(UiAction),
+}
+
+impl Action {
+    /// A message with nothing attached.
+    pub fn say(text: impl Into<String>) -> Action {
+        Action::Say {
+            text: text.into(),
+            attachments: Vec::new(),
+        }
+    }
 }
 
 impl Workspace {
@@ -170,7 +189,10 @@ impl Workspace {
     /// answered or finished item leaves its panel. The agent layer replies separately.
     pub fn apply(&mut self, action: &Action) {
         match action {
-            Action::Say(text) => self.chat.push(Message::new(Author::Captain, text.clone())),
+            Action::Say { text, attachments } => self.chat.push(Message {
+                attachments: attachments.clone(),
+                ..Message::new(Author::Captain, text.clone())
+            }),
             Action::Ui(ui) => self
                 .chat
                 .push(Message::new(Author::Captain, format!("{}.", ui.did))),

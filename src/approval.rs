@@ -333,7 +333,7 @@ impl Saved for Settings {
 }
 
 /// Creates the directory, and any missing parents, readable by its owner only.
-fn create_private_dir(dir: &Path) -> io::Result<()> {
+pub(crate) fn create_private_dir(dir: &Path) -> io::Result<()> {
     let mut builder = fs::DirBuilder::new();
     builder.recursive(true);
     #[cfg(unix)]

@@ -14,6 +14,7 @@ use crate::firstmate::{Checkout, Distro, Firstmate, Standing, Work};
 use crate::model::{Action, Agent, Author, Item, ItemKind, Message, Plan, Status};
 use crate::projects::Project;
 
+mod attach;
 mod policy;
 mod tool;
 mod ui;
@@ -46,6 +47,12 @@ pub fn view(s: &App, cx: &mut Cx<App>) -> El {
         .w_full()
         .h_full()
         .fill(t.bg)
+        // Cmd-V with no field focused still attaches a screenshot or copied files to the draft.
+        .on_paste_content(|s: &mut App, content, _| {
+            if s.showing == Showing::Chat && s.chat_ready() {
+                s.paste(content);
+            }
+        })
         .child(agents(s, t, cx.system_dark()))
         .child(main)
         .child(
@@ -893,6 +900,7 @@ fn chat(s: &App, plan: &Plan, t: Theme, dark: bool) -> El {
             t.text_secondary,
         )
         .on_edit(|s: &mut App| &mut s.draft)
+        .on_input_paste(|s: &mut App, content, _| s.paste(content))
         .on_submit(|s: &mut App, _| s.send());
     let composer = row()
         .key("composer")
@@ -949,7 +957,19 @@ fn chat(s: &App, plan: &Plan, t: Theme, dark: bool) -> El {
                 .child(button("answer-cancel", "Cancel", t, |s| s.answering = None))
         }))
         .children(s.adding.then(|| adding(s, t, dark)))
+        .children(attach::tray(s, t, dark))
         .child(composer)
+        // Files dragged in from Finder attach to the draft.
+        .on_drop_files(|s: &mut App, files, _| s.attach_files(files))
+        .on_drop_hover(|s: &mut App, over, _| s.drop_over = over)
+        .border(
+            2.0,
+            if s.drop_over {
+                tok::accent(0, true)
+            } else {
+                rune::Color::TRANSPARENT
+            },
+        )
 }
 
 /// The empty state: the app works on projects, and there are none yet.
@@ -1341,20 +1361,24 @@ fn transcript(
         } else {
             text(m.text.clone()).font(type_::BODY).color(t.text).wrap()
         };
-        list = list.child(
-            col()
-                .key(format!("msg-{i}"))
-                .padding(space::S3)
-                .gap(space::S1)
-                .radius(radius::MD)
-                .fill(if m.author == Author::Captain {
-                    t.control_off
-                } else {
-                    t.card
-                })
-                .child(text(who).font(type_::SECTION).color(t.text_secondary))
-                .child(words),
-        );
+        list =
+            list.child(
+                col()
+                    .key(format!("msg-{i}"))
+                    .padding(space::S3)
+                    .gap(space::S1)
+                    .radius(radius::MD)
+                    .fill(if m.author == Author::Captain {
+                        t.control_off
+                    } else {
+                        t.card
+                    })
+                    .child(text(who).font(type_::SECTION).color(t.text_secondary))
+                    .children((!m.text.is_empty()).then_some(words))
+                    .children((!m.attachments.is_empty()).then(|| {
+                        attach::sent(s, &format!("msg-{i}-attachments"), &m.attachments, t)
+                    })),
+            );
     }
     col()
         .key(key)

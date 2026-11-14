@@ -90,7 +90,13 @@ impl ChiefOfStaff for Stub {
 
     fn act(&mut self, _ws: &Workspace, action: &Action) {
         let text = match action {
-            Action::Say(text) => format!("Got it: \u{201c}{text}\u{201d}. I'll take it from here."),
+            Action::Say { text, attachments } if !attachments.is_empty() => format!(
+                "Got it: \u{201c}{text}\u{201d}, with {}.",
+                crate::attach::count(attachments)
+            ),
+            Action::Say { text, .. } => {
+                format!("Got it: \u{201c}{text}\u{201d}. I'll take it from here.")
+            }
             Action::Answer { choice, .. } => {
                 format!("Thanks. Going with \u{201c}{choice}\u{201d}.")
             }

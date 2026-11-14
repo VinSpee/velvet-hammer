@@ -18,11 +18,13 @@ use std::sync::{Arc, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use base64::Engine;
 use portable_pty::{ChildKiller, CommandBuilder, MasterPty, PtySize, native_pty_system};
 use rune::Waker;
 use serde_json::{Value, json};
 
 use crate::agent::{ChiefOfStaff, Event};
+use crate::attach::Attachment;
 use crate::bridge::{Bridge, Call, Policies};
 use crate::guard::Home;
 use crate::model::{Action, Id, Item, ItemKind, Plan, Status, Workspace};
@@ -396,7 +398,7 @@ impl Claude {
         }
     }
 
-    fn say(&mut self, text: &str) -> Result<(), String> {
+    fn say(&mut self, content: Value) -> Result<(), String> {
         if self.session.is_none() {
             let id = self.id();
             self.session = Some(
@@ -413,11 +415,45 @@ impl Claude {
         }
         let stdin = &mut self.session.as_mut().expect("started above").stdin;
         let stdin = stdin.as_mut().expect("open until the session is dropped");
-        let line = json!({"type": "user", "message": {"role": "user", "content": text}});
+        let line = json!({"type": "user", "message": {"role": "user", "content": content}});
         writeln!(stdin, "{line}")
             .and_then(|()| stdin.flush())
             .map_err(|e| format!("Could not send the message to Claude Code: {e}"))
     }
+}
+
+/// What Claude Code gets for one of the captain's messages: the text alone, or with
+/// attachments, each image small enough as image content, then the text with a line naming every
+/// attachment's saved copy, which the chief of staff can read or hand on with its own tools. An
+/// image that can no longer be read goes by its path like any other file.
+fn user_content(text: &str, attachments: &[Attachment]) -> Value {
+    if attachments.is_empty() {
+        return text.into();
+    }
+    let mut blocks = Vec::new();
+    let mut listed = Vec::new();
+    for a in attachments {
+        let inline = a.inline_type().and_then(|media| {
+            let bytes = std::fs::read(&a.path).ok()?;
+            let data = base64::engine::general_purpose::STANDARD.encode(bytes);
+            Some(json!({"type": "image", "source": {"type": "base64", "media_type": media, "data": data}}))
+        });
+        let how = if inline.is_some() {
+            ", the image above"
+        } else {
+            ""
+        };
+        blocks.extend(inline);
+        listed.push(format!("- {} ({}{how})", a.path.display(), a.label()));
+    }
+    let mut words = text.trim().to_string();
+    if !words.is_empty() {
+        words.push_str("\n\n");
+    }
+    words.push_str("Attached files, saved on this computer:\n");
+    words.push_str(&listed.join("\n"));
+    blocks.push(json!({"type": "text", "text": words}));
+    Value::Array(blocks)
 }
 
 impl ChiefOfStaff for Claude {
@@ -450,16 +486,16 @@ impl ChiefOfStaff for Claude {
             }
             return;
         }
-        let text = match action {
-            Action::Say(text) => text.clone(),
-            Action::Answer { item, choice } => format!("My answer to item {item}: {choice}"),
+        let content = match action {
+            Action::Say { text, attachments } => user_content(text, attachments),
+            Action::Answer { item, choice } => format!("My answer to item {item}: {choice}").into(),
             Action::Done { item } => match self.notes.remove(item) {
-                Some(note) => format!("I have done this: {note}"),
-                None => format!("I have done item {item}."),
+                Some(note) => format!("I have done this: {note}").into(),
+                None => format!("I have done item {item}.").into(),
             },
-            Action::Ui(ui) => ui.message(),
+            Action::Ui(ui) => ui.message().into(),
         };
-        if let Err(problem) = self.say(&text) {
+        if let Err(problem) = self.say(content) {
             self.end_session();
             self.out.push(Event::Problem(problem));
         }
@@ -1018,5 +1054,40 @@ mod tests {
             first_https_url("visit https://claude.ai/x?y=1 now").as_deref(),
             Some("https://claude.ai/x?y=1")
         );
+    }
+
+    #[test]
+    fn a_message_with_attachments_sends_small_images_inline_and_lists_every_file() {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("target/claude-content");
+        std::fs::create_dir_all(&dir).unwrap();
+        let shot = dir.join("shot.png");
+        std::fs::write(&shot, b"\x89PNG fake").unwrap();
+        let a = |path: &Path, bytes, kind| Attachment {
+            path: path.to_path_buf(),
+            name: path.file_name().unwrap().to_string_lossy().into(),
+            bytes,
+            kind,
+        };
+        use crate::attach::Kind;
+        assert_eq!(user_content("hi", &[]), json!("hi"));
+        let big = dir.join("poster.png");
+        let content = user_content(
+            "  ",
+            &[a(&shot, 10, Kind::Image), a(&big, 9_000_000, Kind::Image)],
+        );
+        let blocks = content.as_array().unwrap();
+        assert_eq!(blocks.len(), 2, "one image inline, then the text");
+        assert_eq!(blocks[0]["type"], "image");
+        assert_eq!(blocks[0]["source"]["media_type"], "image/png");
+        let text = blocks[1]["text"].as_str().unwrap();
+        assert!(
+            text.starts_with("Attached files, saved on this computer:\n"),
+            "{text}"
+        );
+        assert!(text.contains(&format!(
+            "- {} (shot.png, 10 bytes, the image above)",
+            shot.display()
+        )));
+        assert!(text.contains(&format!("- {} (poster.png, 8.6 MB)", big.display())));
     }
 }

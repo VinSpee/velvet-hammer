@@ -35,6 +35,9 @@
 # stops again with the same list and `stop_hook_active` unset, then ends with "Left as text.", or
 # with "looped" if the hook sent it back a second time.
 #
+# A message with attachments (content blocks rather than a string) is answered with its words
+# and how many image blocks and listed files it carried.
+#
 # A message containing "whereami" is answered with the session's working directory and FM_HOME.
 # After a message "wake: TEXT" and its reply, a second turn nobody asked for says TEXT, the way
 # a firstmate Stop hook wakes an idle session.
@@ -128,6 +131,18 @@ auth)
   # stream-json in and out: one user record per line, one turn per record.
   while IFS= read -r line; do
     text=$(printf '%s' "$line" | sed -E 's/.*"content":"(([^"\\]|\\.)*)".*/\1/')
+    case $line in
+    *'"content":['*)
+      # A message with attachments: image blocks, then a text block whose last lines list
+      # every attachment's saved copy. Say what arrived, without the base64.
+      words=$(printf '%s' "$line" | sed -E 's/.*\{"text":"(([^"\\]|\\.)*)","type":"text"\}.*/\1/')
+      images=$(printf '%s' "$line" | grep -o '"type":"image"' | wc -l | tr -d ' ')
+      listed=$(printf '%s' "$words" | grep -o '\\n- ' | wc -l | tr -d ' ')
+      said=${words%%Attached files*}
+      said=${said%\\n\\n}
+      text="${said:-nothing} [image blocks: $images, files listed: $listed]"
+      ;;
+    esac
     context=$(post "$hook_base/hooks/user-prompt-submit" "$hook_auth" "{\"hook_event_name\":\"UserPromptSubmit\",\"prompt\":\"\"}" 30 || true)
     case $text in
     'context?')

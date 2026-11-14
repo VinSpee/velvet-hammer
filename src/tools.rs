@@ -199,7 +199,7 @@ fn media_file(path: PathBuf) -> Option<Handler> {
 }
 
 /// The media type of an image or video file, by its extension.
-fn extension_type(path: &Path) -> Option<&'static str> {
+pub(crate) fn extension_type(path: &Path) -> Option<&'static str> {
     let ext = path.extension()?.to_str()?.to_ascii_lowercase();
     Some(match ext.as_str() {
         "png" => "image/png",
