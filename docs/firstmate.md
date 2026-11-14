@@ -287,6 +287,50 @@ the chosen path into your message, which you then send. **Yes** and **No** send 
 the chief of staff has finished asking. **Done adding** hides the row. You can always type
 instead.
 
+**Choosing a GitHub repository.** Above those controls, a combobox lists your GitHub
+repositories, so you can pick one instead of typing its address. Type in its field to filter the
+list, or choose **Show repositories**. Choosing one puts its address, such as
+`https://github.com/acme/payments-api`, into your message, which you then send, exactly as a
+chosen folder's path is, and empties the field. The app does not clone anything: firstmate's procedure clones and
+registers the repository after your yes, as it does for any address.
+
+- **Where the list comes from.** The app runs the GitHub CLI you already signed in with:
+  `gh api user` for your login, then `gh api --paginate user/repos`, which lists every repository
+  you own, collaborate on or reach through an organization. It reads only each repository's
+  owner, name, visibility, description, last push and fork and archived flags. It never reads,
+  asks for or stores a token. The list is kept for the session and listed again each time it
+  opens; while that runs, the last list stays and a line says it is refreshing.
+- **Order.** Your own private repositories first, then the other private ones (an
+  organization's, or ones you collaborate on, with internal ones counted as private), then public
+  ones, and archived ones last, each group most recently pushed first. Each row shows a
+  **Private**, **Internal** or **Public** badge, **Fork** and **Archived** badges where they
+  apply, and the date of the last push.
+- **Filtering.** Each character you type, ignoring case and spaces, must appear in that order in
+  `owner/name` or in the description. A match in `owner/name` ranks above one only in the
+  description. Among those, runs of consecutive characters and characters at the start of a word
+  rank higher, and gaps rank lower; ties keep the order above, so your own private repositories
+  still lead. The matched characters are marked. The list shows the best 50 and says how many
+  more there are.
+- **Keyboard.** Focus stays in the field. Down opens the list and moves the highlight, Up moves
+  it back (both wrap), Return chooses the highlighted repository, and Escape closes the list, or
+  clears the field when the list is already closed. The element around the field has the
+  combobox role and the list has the listbox role, with each row an option; the field names the
+  highlighted row as its active descendant. Rune reports every text field to the platform as a
+  text input, which is why the combobox role sits on the element around it.
+- **When gh cannot list them.** If `gh` is not installed or not on the app's `PATH`, the list
+  says so and how to install it (https://cli.github.com, or `brew install gh`) and sign in
+  (`gh auth login`). If `gh` is not signed in, it says to run `gh auth login`. Any other failure
+  shows `gh`'s own words. Each has **Try again**. A refresh that fails keeps the list you are
+  looking at.
+
+| State | Screenshot |
+| --- | --- |
+| The list, your own private repositories first | [projects-repos.png](screens/projects/projects-repos.png) |
+| Filtered by `ham`: two name matches and a description match, marked | [projects-repos-filtered.png](screens/projects/projects-repos-filtered.png) |
+| A repository chosen: its address in the message | [projects-repos-chosen.png](screens/projects/projects-repos-chosen.png) |
+| `gh` not installed | [projects-repos-missing.png](screens/projects/projects-repos-missing.png) |
+| `gh` not signed in | [projects-repos-signed-out.png](screens/projects/projects-repos-signed-out.png) |
+
 ## Second mates
 
 A second mate, in firstmate's terms, is a crewmate with its own persistent firstmate home, a
