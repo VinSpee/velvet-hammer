@@ -15,13 +15,21 @@ use crate::links;
 use crate::model::{Action, Agent, Author, Item, ItemKind, Message, Plan, Status};
 use crate::projects::Project;
 
+mod mates;
+mod messages;
 mod policy;
+mod remind;
+mod repos;
 mod settings;
 mod tool;
 mod ui;
+mod workers;
+use messages::messages_page;
 use policy::{rules_page, visuals_page};
+use repos::repo_picker;
 use settings::{all_settings, menu_bar, settings_page};
 use tool::{picture_page, tool_use};
+use workers::{workers_page, workers_summary};
 
 pub fn view(s: &App, cx: &mut Cx<App>) -> El {
     let t = tok::theme(cx.system_dark());
@@ -32,17 +40,33 @@ pub fn view(s: &App, cx: &mut Cx<App>) -> El {
     let main = match (&s.showing, peeked, &s.status) {
         (Showing::Crew(id), ..) => crew_peek(s, id, t, cx.system_dark()),
         (Showing::Settings, ..) => settings_page(s, t, cx.system_dark()),
+        (Showing::Mate(id), ..) => mates::mate_page(s, id, t, cx.system_dark()),
+        (Showing::AddMate, ..) => mates::add_page(s, t, cx.system_dark()),
         (Showing::Firstmate, ..) => firstmate_page(s, t, cx.system_dark()),
         (Showing::Approvals, ..) => approvals_page(s, t, cx.system_dark()),
         (Showing::Activity, ..) => activity_page(s, t, cx.system_dark()),
         (Showing::Visuals, ..) => visuals_page(s, t, cx.system_dark()),
         (Showing::Rules, ..) => rules_page(s, t, cx.system_dark()),
+        (Showing::Messages, ..) => messages_page(s, t, cx.system_dark()),
+        (Showing::Reminders, ..) => remind::reminders_page(s, t, cx.system_dark()),
+        (Showing::ReminderSettings, ..) => remind::settings_page(s, t, cx.system_dark()),
+        (Showing::Workers, ..) => workers_page(s, t, cx.system_dark()),
         (Showing::Picture(id), ..) => picture_page(s, id, t, cx.system_dark()),
         (_, Some(agent), _) => peek(s, agent, t, cx.system_dark()),
         // A chief of staff that runs in the managed clone cannot chat until it is installed.
         (_, None, Status::Ready(_)) if !s.chat_ready() => firstmate_page(s, t, cx.system_dark()),
         (_, None, Status::Ready(plan)) => chat(s, plan, t, cx.system_dark()),
-        (_, None, status) => sign_in(status, t, cx.system_dark()),
+        (_, None, status) => sign_in(status, s.queue.len(), t, cx.system_dark()),
+    };
+    // A reminder that came due stays over whatever the middle column shows.
+    let main = match remind::banner(s, t, cx.system_dark()) {
+        Some(banner) => col()
+            .grow(1.0)
+            .h_full()
+            .min_h(0.0)
+            .child(col().px(space::S6).pt(space::S6).child(banner))
+            .child(main),
+        None => main,
     };
     let window = row()
         .w_full()
@@ -60,7 +84,7 @@ pub fn view(s: &App, cx: &mut Cx<App>) -> El {
                 .padding(space::S3)
                 .gap(space::S3)
                 .child(needs_input(s, t, cx.system_dark()))
-                .child(for_you(s, t)),
+                .child(for_you(s, t, cx.system_dark())),
         );
     col()
         .w_full()
@@ -81,6 +105,11 @@ fn agents(s: &App, t: Theme, dark: bool) -> El {
         .py(space::S6)
         .gap(space::S1)
         .fill(t.card)
+        // The agents, second mates and projects can outgrow the window.
+        .min_h(0.0)
+        .scroll(ScrollSpec {
+            stick_bottom: false,
+        })
         .child(heading("Agents", t));
     for a in &s.ws.agents {
         let id = a.id;
@@ -109,35 +138,71 @@ fn agents(s: &App, t: Theme, dark: bool) -> El {
     for crew in &s.captain.crew {
         let id = crew.id.clone();
         let selected = s.showing == Showing::Crew(id.clone());
-        list = list.child(
-            col()
-                .key(format!("crew-{id}"))
-                .role("button")
-                .label(format!("Peek at {}", crew.name))
-                .focusable(true)
-                .padding(space::S2)
-                .gap(2.0)
-                .radius(radius::SM)
-                .fill(if selected { t.control_off } else { t.card })
-                .on_press(move |s: &mut App| s.showing = Showing::Crew(id.clone()))
-                .child(
-                    text(crew.name.clone())
-                        .font(type_::TITLE)
-                        .color(t.text)
-                        .wrap(),
-                )
-                .child(
-                    text(format!("{} \u{b7} {}", crew.state, crew.doing))
-                        .font(type_::LABEL)
-                        .color(t.text_secondary)
-                        .wrap(),
-                ),
-        );
+        list =
+            list.child(
+                col()
+                    .key(format!("crew-{id}"))
+                    .role("button")
+                    .label(format!("Peek at {}", crew.name))
+                    .focusable(true)
+                    .padding(space::S2)
+                    .gap(2.0)
+                    .radius(radius::SM)
+                    .fill(if selected { t.control_off } else { t.card })
+                    .on_press(move |s: &mut App| s.showing = Showing::Crew(id.clone()))
+                    .child(
+                        text(crew.name.clone())
+                            .font(type_::TITLE)
+                            .color(t.text)
+                            .wrap(),
+                    )
+                    .child(
+                        text(format!("{} \u{b7} {}", crew.state, crew.doing))
+                            .font(type_::LABEL)
+                            .color(t.text_secondary)
+                            .wrap(),
+                    )
+                    .children(crew.runs.as_ref().map(|runs| {
+                        note(&format!("crew-{}-runs", crew.id), runs, t).wrap_anywhere()
+                    })),
+            );
+    }
+    if s.mates.records.is_some() {
+        list = list.child(mates::mate_list(s, t, dark));
     }
     if let Some(projects) = &s.projects {
         list = list.child(project_list(s, projects, t, dark));
     }
-    list
+    list.child(el().grow(1.0)).child(nav_card(
+        s,
+        "reminders",
+        "Reminders",
+        remind::summary(s),
+        &[Showing::Reminders, Showing::ReminderSettings],
+        t,
+    ))
+}
+
+/// A card at the bottom of the agents column that opens the first of `pages`, and is
+/// highlighted while any of them shows. Its summary is keyed `<key>-summary`.
+fn nav_card(s: &App, key: &str, title: &str, summary: String, pages: &[Showing], t: Theme) -> El {
+    let open = pages[0].clone();
+    col()
+        .key(key)
+        .role("button")
+        .label(title.to_string())
+        .focusable(true)
+        .padding(space::S2)
+        .gap(2.0)
+        .radius(radius::SM)
+        .fill(if pages.contains(&s.showing) {
+            t.control_off
+        } else {
+            t.card
+        })
+        .on_press(move |s: &mut App| s.showing = open.clone())
+        .child(text(title.to_string()).font(type_::TITLE).color(t.text))
+        .child(note(&format!("{key}-summary"), &summary, t))
 }
 
 /// The projects in firstmate's records, and the way to add one.
@@ -938,7 +1003,9 @@ fn chat(s: &App, plan: &Plan, t: Theme, dark: bool) -> El {
             )),
             _ => None,
         })
+        .children(messages::working(s, t))
         .child(composer)
+        .children(messages::queued(s, t))
 }
 
 /// The find bar over the conversation: the query, where the current match is among them all,
@@ -1075,9 +1142,10 @@ fn adding(s: &App, t: Theme, dark: bool) -> El {
         .child(note(
             "adding-help",
             "Adding a project with your chief of staff. Answer in the chat; a chosen folder's \
-             path goes into your message for you to send.",
+             path or GitHub repository's address goes into your message for you to send.",
             t,
         ))
+        .child(repo_picker(s, t, dark))
         .child(buttons);
     if let Some(problem) = &s.pick_problem {
         bar = bar.child(warning("add-pick-problem", problem, dark));
@@ -1108,7 +1176,7 @@ fn capitalized(word: &str) -> String {
 
 /// What the middle column shows while the chat can't run: the sign-in, its progress, or why
 /// Claude Code isn't usable. Claude Code does the signing in; this only starts it and reports.
-fn sign_in(status: &Status, t: Theme, dark: bool) -> El {
+fn sign_in(status: &Status, queued: usize, t: Theme, dark: bool) -> El {
     let mut body = col().key("sign-in").gap(space::S3).max_w(520.0);
     let mut buttons = row().gap(space::S2);
     let (title, lede) = match status {
@@ -1240,6 +1308,19 @@ fn sign_in(status: &Status, t: Theme, dark: bool) -> El {
         }
         Status::Checking | Status::Ready(_) => {}
     }
+    if queued > 0 {
+        body = body.child(note(
+            "sign-in-queued",
+            &if queued == 1 {
+                "Your queued message is kept and goes out once Claude Code is ready.".to_string()
+            } else {
+                format!(
+                    "Your {queued} queued messages are kept and go out once Claude Code is ready."
+                )
+            },
+            t,
+        ));
+    }
     col()
         .key("sign-in-screen")
         .grow(1.0)
@@ -1279,13 +1360,21 @@ fn warning(key: &str, words: &str, dark: bool) -> El {
 /// steers a crewmate through the chief of staff.
 fn crew_peek(s: &App, id: &str, t: Theme, dark: bool) -> El {
     let crew = s.captain.crew.iter().find(|c| c.id == id);
+    let mate = s.captain.mate(id).is_some() || s.mates.get(id).is_some();
     let (name, doing) = match crew {
         Some(crew) => (
-            crew.name.as_str(),
+            crew.name.clone(),
             format!("{} \u{b7} {}", crew.state, crew.doing),
         ),
-        None => (id, "No longer in flight.".to_string()),
+        None if mate => (
+            format!("second mate {id}"),
+            s.captain
+                .mate(id)
+                .map_or(String::new(), |m| m.doing.clone()),
+        ),
+        None => (id.to_string(), "No longer in flight.".to_string()),
     };
+    let back = id.to_string();
     let header = row()
         .gap(space::S2)
         .center_y()
@@ -1296,9 +1385,15 @@ fn crew_peek(s: &App, id: &str, t: Theme, dark: bool) -> El {
                 .child(heading(&format!("Peeking at {name}"), t))
                 .child(note("crew-doing", &doing, t)),
         )
-        .child(button("peek-close", "Back to chat", t, |s| {
-            s.showing = Showing::Chat
-        }));
+        .child(if mate {
+            button("peek-close", "Back to its page", t, move |s| {
+                s.open_mate(&back)
+            })
+        } else {
+            button("peek-close", "Back to chat", t, |s| {
+                s.showing = Showing::Chat
+            })
+        });
     let pane = match s.peek.as_ref().and_then(|p| p.pane.as_ref()) {
         None => note("crew-peek-reading", "Reading its terminal\u{2026}", t),
         Some(Err(problem)) => warning("crew-peek-problem", problem, dark),
@@ -1329,8 +1424,13 @@ fn crew_peek(s: &App, id: &str, t: Theme, dark: bool) -> El {
         .child(pane)
         .child(note(
             "crew-peek-help",
-            "The last 40 lines of this crewmate's terminal, read by firstmate's bin/fm-peek.sh. \
-             To steer it, tell your chief of staff.",
+            if mate {
+                "The last 40 lines of this second mate's terminal, read by firstmate's \
+                 bin/fm-peek.sh. To steer it, send it a message from its page."
+            } else {
+                "The last 40 lines of this crewmate's terminal, read by firstmate's \
+                 bin/fm-peek.sh. To steer it, tell your chief of staff."
+            },
             t,
         ))
 }
@@ -1423,6 +1523,9 @@ fn transcript(
             continue;
         }
         let who = match m.author {
+            Author::Captain if m.while_working => {
+                "You \u{b7} sent while your chief of staff was working"
+            }
             Author::Captain => "You",
             Author::ChiefOfStaff => "Chief of staff",
             Author::Subagent => "Subagent",
@@ -1648,6 +1751,29 @@ fn needs_input(s: &App, t: Theme, dark: bool) -> El {
     }
     for hold in &s.captain.holds {
         let key = hold.key.clone();
+        // A second mate's hold is answered to that mate, which owns it.
+        if let Some(owner) = hold.owner.clone() {
+            let answering = s.mates.answering == Some((owner.clone(), key.clone()));
+            rows.push(
+                words_card(
+                    &format!("hold-{owner}-{key}"),
+                    &format!("{key} \u{b7} from second mate {owner}"),
+                    &hold.question,
+                    t,
+                )
+                .child(row().child(button(
+                    &format!("answer-{owner}-{key}"),
+                    if answering {
+                        "Answering on its page"
+                    } else {
+                        "Answer"
+                    },
+                    t,
+                    move |s| s.answer_mate_hold(&owner, &key),
+                ))),
+            );
+            continue;
+        }
         let answering = s.answering.as_deref() == Some(&hold.key);
         rows.push(
             words_card(&format!("hold-{key}"), &hold.key, &hold.question, t).child(row().child(
@@ -1693,8 +1819,12 @@ fn needs_input(s: &App, t: Theme, dark: bool) -> El {
     )
 }
 
-fn for_you(s: &App, t: Theme) -> El {
-    let rows = s.ws.for_you().map(|item| {
+const NOTHING_FOR_YOU: &str = "Nothing for you to do.";
+
+/// Reminders that came due first, then the steps the agents left for the captain.
+fn for_you(s: &App, t: Theme, dark: bool) -> El {
+    let mut rows = remind::panel_rows(s, t, dark);
+    rows.extend(s.ws.for_you().map(|item| {
         let id = item.id;
         card(&format!("task-{id}"), item, t).child(row().child(button(
             &format!("done-{id}"),
@@ -1702,14 +1832,24 @@ fn for_you(s: &App, t: Theme) -> El {
             t,
             move |s| s.act(Action::Done { item: id }),
         )))
-    });
-    panel(
-        "for-you",
-        "For you to do",
-        "Nothing for you to do.",
-        rows.collect(),
-        t,
-    )
+    }));
+    if !s.reminders.list().is_empty() {
+        // Reminders still to come wait on the Reminders page, which this opens.
+        if rows.is_empty() {
+            rows.push(
+                text(NOTHING_FOR_YOU)
+                    .key("for-you-empty")
+                    .font(type_::BODY)
+                    .color(t.text_secondary),
+            );
+        }
+        rows.push(
+            row().child(small_button("for-you-reminders", "All reminders", t, |s| {
+                s.showing = Showing::Reminders
+            })),
+        );
+    }
+    panel("for-you", "For you to do", NOTHING_FOR_YOU, rows, t)
 }
 
 fn panel(key: &str, title: &str, empty: &str, rows: Vec<El>, t: Theme) -> El {

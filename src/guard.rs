@@ -23,6 +23,7 @@ use std::path::{Component, Path, PathBuf};
 use serde_json::{Value, json};
 
 use crate::approval::{Effect, commands};
+use crate::crew;
 use crate::store::{self, Saved};
 
 /// The settings file in the data directory.
@@ -38,10 +39,11 @@ pub enum Rule {
     DiscardAsks,
     ProjectsReadOnly,
     PublishAsks,
+    ClaudeOnSubscription,
 }
 
 impl Rule {
-    pub const ALL: [Rule; 7] = [
+    pub const ALL: [Rule; 8] = [
         Rule::MergeScriptOnly,
         Rule::MergeAsks,
         Rule::NoAdminMerge,
@@ -49,6 +51,7 @@ impl Rule {
         Rule::DiscardAsks,
         Rule::ProjectsReadOnly,
         Rule::PublishAsks,
+        Rule::ClaudeOnSubscription,
     ];
 
     pub fn key(self) -> &'static str {
@@ -60,6 +63,7 @@ impl Rule {
             Rule::DiscardAsks => "discard-asks-captain",
             Rule::ProjectsReadOnly => "projects-read-only",
             Rule::PublishAsks => "publish-asks-captain",
+            Rule::ClaudeOnSubscription => "claude-on-subscription",
         }
     }
 
@@ -76,6 +80,7 @@ impl Rule {
             Rule::DiscardAsks => "Discarding unlanded work waits for your word",
             Rule::ProjectsReadOnly => "Projects are read-only to the chief of staff",
             Rule::PublishAsks => "Publishing waits for your word",
+            Rule::ClaudeOnSubscription => "Claude workers run only on your subscription",
         }
     }
 
@@ -111,6 +116,11 @@ impl Rule {
                 "AGENTS.md, sections 1 and 6: no push, fork, issue, comment or pull request on \
                  firstmate's own authority, and no remote the captain did not consent to."
             }
+            Rule::ClaudeOnSubscription => {
+                "Velvet Hammer: a Claude model runs only through Claude Code on your \
+                 subscription, never through pi or an API key. This rule is the app's, not \
+                 firstmate's."
+            }
         }
     }
 
@@ -139,6 +149,11 @@ impl Rule {
                 "Bash: git push, gh repo create or fork, glab repo create, gh pr create or \
                  comment, gh issue create or comment, gh release create, gh gist create."
             }
+            Rule::ClaudeOnSubscription => {
+                "Bash: bin/fm-spawn.sh with --harness pi or pi-signed (or, with no --harness, \
+                 config/crew-harness naming pi) and a Claude --model (one whose id contains \
+                 claude, or the anthropic provider)."
+            }
         }
     }
 
@@ -146,7 +161,10 @@ impl Rule {
     /// `git worktree remove`.
     pub fn effect(self) -> Effect {
         match self {
-            Rule::MergeScriptOnly | Rule::NoAdminMerge | Rule::NoForcePush => Effect::Deny,
+            Rule::MergeScriptOnly
+            | Rule::NoAdminMerge
+            | Rule::NoForcePush
+            | Rule::ClaudeOnSubscription => Effect::Deny,
             Rule::MergeAsks | Rule::DiscardAsks | Rule::ProjectsReadOnly | Rule::PublishAsks => {
                 Effect::Ask
             }
@@ -156,7 +174,10 @@ impl Rule {
     /// What it does with a match, in words.
     pub fn does(self) -> &'static str {
         match self {
-            Rule::MergeScriptOnly | Rule::NoAdminMerge | Rule::NoForcePush => {
+            Rule::MergeScriptOnly
+            | Rule::NoAdminMerge
+            | Rule::NoForcePush
+            | Rule::ClaudeOnSubscription => {
                 "Denies it, telling the chief of staff why and what to do instead."
             }
             Rule::DiscardAsks => {
@@ -471,6 +492,7 @@ fn command_hits(words: &[String], dir: &Path, home: &Home, records: &[PathBuf]) 
             "Firstmate's hard rule 3: --force skips the landed-work check and discards whatever \
              the task has not landed. Allow only if you mean to throw that work away.",
         )),
+        "fm-spawn.sh" if !help => found.extend(spawn_hit(args, home, &shown)),
         "gh" | "glab" | "tea" => found.extend(forge_hits(&name, args, &shown)),
         "git" => found.extend(git_hits(args, dir, home, records, &shown)),
         _ => {}
@@ -497,6 +519,42 @@ fn admin(shown: &str) -> Hit {
              only the captain can turn this rule off, on Velvet Hammer's Firstmate rules page."
         ),
     )
+}
+
+/// A spawn that would run a Claude model through pi. Without `--harness`, firstmate uses the
+/// home's `config/crew-harness`, so that is read too.
+fn spawn_hit(args: &[String], home: &Home, shown: &str) -> Option<Hit> {
+    let value = |flag: &str| {
+        let inline = format!("{flag}=");
+        args.iter()
+            .enumerate()
+            .find_map(|(i, a)| match a.strip_prefix(&inline) {
+                Some(v) => Some(v.to_string()),
+                None if a == flag => args.get(i + 1).cloned(),
+                None => None,
+            })
+    };
+    let model = value("--model")?;
+    let harness = value("--harness").or_else(|| {
+        let pinned = fs::read_to_string(home.dir.join("config/crew-harness")).ok()?;
+        Some(pinned.split_whitespace().collect())
+    })?;
+    let program = harness.split_whitespace().next().unwrap_or_default();
+    let pi = matches!(
+        Path::new(program).file_name().and_then(|n| n.to_str()),
+        Some("pi" | "pi-signed")
+    );
+    (pi && crew::is_claude(&model)).then(|| {
+        Hit::new(
+            Rule::ClaudeOnSubscription,
+            String::new(),
+            format!(
+                "`{shown}` would run the Claude model {model} through pi. Claude workers run \
+                 only through Claude Code on the captain's subscription: spawn it with \
+                 --harness claude, or choose a model that is not Claude for pi."
+            ),
+        )
+    })
 }
 
 /// The rules a `gh`, `glab` or `tea` command matches.
@@ -990,6 +1048,38 @@ mod tests {
         );
         assert_eq!(decide(&home, cwd, "git status"), None);
         assert_eq!(decide(&home, cwd, "git log --oneline -f"), None);
+    }
+
+    #[test]
+    fn a_claude_model_is_never_spawned_through_pi() {
+        let (home, _) = home();
+        let cwd = Path::new("/clone");
+        for command in [
+            "bin/fm-spawn.sh t1 projects/site --mode no-mistakes --yolo on --harness pi --model opencode-go/claude-haiku-5-5",
+            "bin/fm-spawn.sh t1 projects/site --harness=pi-signed --model=anthropic/claude-sonnet-5-5",
+            "env FOO=1 /home/fm/bin/fm-spawn.sh t1 p --model Claude-Opus-5 --harness pi",
+        ] {
+            assert_eq!(
+                decide(&home, cwd, command),
+                Some((Rule::ClaudeOnSubscription, Effect::Deny)),
+                "{command}"
+            );
+        }
+        for command in [
+            "bin/fm-spawn.sh t1 projects/site --harness pi --model opencode-go/deepseek-v4.1-flash",
+            "bin/fm-spawn.sh t1 projects/site --harness claude --model claude-sonnet-5-5",
+            "bin/fm-spawn.sh t1 projects/site --model sonnet",
+            "bin/fm-spawn.sh --help --harness pi --model anthropic/claude-x",
+        ] {
+            assert_eq!(decide(&home, cwd, command), None, "{command}");
+        }
+        // With no --harness, firstmate spawns on the home's crew harness.
+        fs::create_dir_all(home.dir.join("config")).unwrap();
+        fs::write(home.dir.join("config/crew-harness"), "pi\n").unwrap();
+        assert_eq!(
+            decide(&home, cwd, "bin/fm-spawn.sh t1 p --model claude-opus-5"),
+            Some((Rule::ClaudeOnSubscription, Effect::Deny))
+        );
     }
 
     #[test]

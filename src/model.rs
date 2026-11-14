@@ -30,6 +30,9 @@ pub struct Message {
     pub text: String,
     /// The tool use an [`Author::Tool`] message shows.
     pub tool: Option<ToolUse>,
+    /// The captain sent it while the chief of staff was working, so it reached the chief of
+    /// staff during a turn.
+    pub while_working: bool,
 }
 
 impl Message {
@@ -39,6 +42,7 @@ impl Message {
             author,
             text: text.into(),
             tool: None,
+            while_working: false,
         }
     }
 
@@ -48,6 +52,7 @@ impl Message {
             author: Author::Tool,
             text: String::new(),
             tool: Some(tool),
+            while_working: false,
         }
     }
 }

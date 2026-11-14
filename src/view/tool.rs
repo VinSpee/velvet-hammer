@@ -178,8 +178,33 @@ pub(super) fn tool_use(s: &App, i: usize, tool: &ToolUse, t: Theme, dark: bool) 
             },
         )
         .child(header(s, &key, tool, &handler, state, &p, t, dark))
+        .children(routed(s, &key, tool, t))
         .children(command(s, &key, tool, &handler, t, dark))
         .children(body)
+}
+
+/// Work the chief of staff routed to a second mate: which mate took it, and a way to open it.
+fn routed(s: &App, key: &str, tool: &ToolUse, t: Theme) -> Option<El> {
+    let command = tool.input["command"].as_str()?;
+    let mate = crate::secondmates::routed_to(command, s.mates.list())?;
+    let id = mate.id.clone();
+    Some(
+        row()
+            .key(format!("{key}-routed"))
+            .gap(space::S2)
+            .center_y()
+            .child(
+                text(format!("Routed to second mate {}", mate.id))
+                    .font(type_::LABEL)
+                    .color(t.text),
+            )
+            .child(small_button(
+                &format!("{key}-routed-open"),
+                "Open",
+                t,
+                move |s| s.open_mate(&id),
+            )),
+    )
 }
 
 /// A json-render view the chief of staff showed with `app_ui`, under its own heading.

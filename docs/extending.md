@@ -13,9 +13,12 @@ Each chat session starts a small HTTP server on `127.0.0.1` (`src/bridge.rs`) an
 that one `claude -p` process with two flags. Nothing is written to the user's Claude settings.
 
 - **A tool.** `--mcp-config` names the app's MCP server, `velvet-hammer`, over streamable HTTP.
-  It has two tools. `app_note` adds a note to the **For you to do** panel; marking the note
+  It has five tools. `app_note` adds a note to the **For you to do** panel; marking the note
   done tells the chief of staff which note it was. `app_ui` shows a json-render view in the chat
-  (see [Views in the chat](json-render.md)).
+  (see [Views in the chat](json-render.md)). `app_secondmate` opens the guided flow for adding a
+  second mate, with the scope the captain described (see
+  [Second mates](firstmate.md#second-mates)). `app_remind` sets a reminder for the captain and
+  `app_reminders` lists them (see [Reminders](reminders.md)).
 - **Hooks.** `--settings` adds three HTTP hooks. The `UserPromptSubmit` and `Stop` hooks carry
   [visual replies](visual-replies.md): a standing instruction to show digests, lists, choices and
   tables as views, and a check that sends such a reply back once when it arrives as text. The

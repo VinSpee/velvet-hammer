@@ -2,9 +2,11 @@
 //! 127.0.0.1 that `claude` calls back into. It serves two things, both passed to that one session
 //! as command-line flags so the captain's own Claude settings are never written:
 //!
-//! - an MCP server (`--mcp-config`) with two tools: `app_note`, which puts a note in the
-//!   captain's For you to do panel, and `app_ui`, which shows a json-render view in the chat
-//!   (see [`crate::ui`]);
+//! - an MCP server (`--mcp-config`) with five tools: `app_note`, which puts a note in the
+//!   captain's For you to do panel, `app_ui`, which shows a json-render view in the chat
+//!   (see [`crate::ui`]), `app_secondmate`, which opens the guided flow for adding a second
+//!   mate (see [`crate::secondmates`]), and `app_remind` and `app_reminders`, which set and list
+//!   the captain's reminders (see [`crate::reminders`]);
 //! - a PreToolUse hook (`--settings`), which applies firstmate's rules (see [`crate::guard`])
 //!   and the captain's tool-approval settings (see [`crate::approval`]) to each tool use: it
 //!   allows it, denies it, or asks the captain to allow or deny it in the Needs your input panel.
@@ -27,7 +29,9 @@ use std::time::{Duration, Instant};
 use serde_json::{Value, json};
 
 use crate::approval::{self, Effect, Entry, Policy, Settings};
+use crate::crew;
 use crate::guard::{self, Home};
+use crate::reminders::{self, Reminders};
 use crate::store::Shared;
 use crate::ui;
 use crate::visual::{self, Turn};
@@ -35,6 +39,7 @@ use crate::visual::{self, Turn};
 /// The MCP server's name; Claude Code calls its tools `mcp__velvet-hammer__<tool>`.
 pub const SERVER: &str = "velvet-hammer";
 const NOTE_TOOL: &str = "app_note";
+const SECONDMATE_TOOL: &str = "app_secondmate";
 /// Claude Code's timeout for the hook, in seconds (its default).
 const HOOK_TIMEOUT_SECS: u64 = 600;
 /// Claude Code's timeout for the prompt and stop hooks, which answer at once.
@@ -55,6 +60,8 @@ static NEXT_TICKET: AtomicU64 = AtomicU64::new(1);
 pub enum Call {
     /// `app_note` was called with this text.
     Note(String),
+    /// `app_secondmate` was called with the scope the captain described.
+    AddMate(String),
     /// `claude` wants to use a tool; `title` is the question for the captain, such as "Allow
     /// Bash?", and `input` is all of what it would do, as text, after any firstmate rule's
     /// reason. Send true to allow it,
@@ -73,14 +80,22 @@ pub enum Call {
     /// The stop hook sent the reply back to be shown as a view, because it has this shape (in
     /// words, such as "lists 4 items").
     Nudged(String),
+    /// `app_remind` set a reminder, so the app looks again for the next one due.
+    Reminded,
 }
 
-/// The settings the hooks decide with, each read at every call so a change applies at once.
+/// The settings the hooks decide with, each read at every call so a change applies at once,
+/// and the captain's reminders, which the reminder tools set and list.
 #[derive(Clone)]
 pub struct Policies {
     pub approval: Policy,
     pub visual: Shared<visual::Mode>,
     pub rules: Shared<guard::Settings>,
+    /// The captain's worker nicknames and the models the pi runtime lists, for the standing
+    /// crew instruction while the chief of staff runs as firstmate.
+    pub nicknames: Shared<crew::Nicknames>,
+    pub models: Shared<Vec<String>>,
+    pub reminders: Reminders,
 }
 
 impl Policies {
@@ -91,6 +106,9 @@ impl Policies {
             approval: Arc::new(RwLock::new(Settings::ask_every_time())),
             visual: Arc::new(RwLock::new(visual::Mode::Off)),
             rules: Arc::new(RwLock::new(guard::Settings::default())),
+            nicknames: Arc::new(RwLock::new(crew::Nicknames::default())),
+            models: Arc::new(RwLock::new(Vec::new())),
+            reminders: Reminders::in_memory(reminders::system_clock()),
         }
     }
 }
@@ -268,7 +286,9 @@ fn serve(
             ("/hooks/pre-tool-use", Ok(input)) => {
                 Reply::Json(pre_tool_use(&input, &stream, serving, on_call))
             }
-            ("/hooks/user-prompt-submit", Ok(_)) => Reply::Json(user_prompt_submit(serving)),
+            ("/hooks/user-prompt-submit", Ok(input)) => {
+                Reply::Json(user_prompt_submit(&input, serving))
+            }
             ("/hooks/stop", Ok(input)) => Reply::Json(stop(&input, serving, on_call)),
             (
                 "/mcp" | "/hooks/pre-tool-use" | "/hooks/user-prompt-submit" | "/hooks/stop",
@@ -319,6 +339,29 @@ fn mcp(request: &Value, serving: &Serving, on_call: &dyn Fn(Call)) -> Option<Val
             "name": ui::TOOL,
             "description": ui::description(),
             "inputSchema": ui::input_schema(),
+        }, {
+            "name": SECONDMATE_TOOL,
+            "description": "Open Velvet Hammer's guided flow for adding a persistent second mate, \
+                            with the scope the captain described filled in. Use it when the \
+                            captain asks you to create a second mate. The app asks the captain \
+                            the remaining questions one at a time (projects, name, runtime), \
+                            shows exactly what will be created, and runs firstmate's \
+                            bin/fm-home-seed.sh and bin/fm-spawn.sh only after the captain's \
+                            yes, then tells you the outcome so you can hand the new mate its \
+                            work. Do not seed or launch the mate yourself as well.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {"scope": {"type": "string", "description": "What the second mate should be responsible for, in the captain's words."}},
+                "required": ["scope"],
+            },
+        }, {
+            "name": reminders::TOOL,
+            "description": reminders::description(),
+            "inputSchema": reminders::input_schema(),
+        }, {
+            "name": reminders::LIST_TOOL,
+            "description": reminders::list_description(),
+            "inputSchema": {"type": "object", "properties": {}},
         }]})),
         "tools/call" if params["name"] == NOTE_TOOL => {
             let text = params["arguments"]["text"]
@@ -332,17 +375,44 @@ fn mcp(request: &Value, serving: &Serving, on_call: &dyn Fn(Call)) -> Option<Val
                 json!({"content": [{"type": "text", "text": "Added to the captain's For you to do panel."}]})
             })
         }
+        "tools/call" if params["name"] == SECONDMATE_TOOL => {
+            let scope = params["arguments"]["scope"]
+                .as_str()
+                .unwrap_or_default()
+                .trim();
+            on_call(Call::AddMate(scope.to_string()));
+            Ok(json!({"content": [{"type": "text", "text":
+                "Opened Add a second mate for the captain. Velvet Hammer will tell you the outcome."}]}))
+        }
         // The chat draws the view from the tool use itself; the call only checks it, so the
         // model learns what was refused or left out.
         "tools/call" if params["name"] == ui::TOOL => Ok(match ui::answer(&params["arguments"]) {
             Ok(text) => {
-                lock(&serving.turn).viewed = true;
+                let mut turn = lock(&serving.turn);
+                turn.viewed = true;
+                turn.asked |= ui::asks(&params["arguments"]);
+                drop(turn);
                 json!({"content": [{"type": "text", "text": text}]})
             }
             Err(problem) => {
                 json!({"isError": true, "content": [{"type": "text", "text": problem}]})
             }
         }),
+        // The app works out the time, so the answer tells the model what was set.
+        "tools/call" if params["name"] == reminders::TOOL => Ok(
+            match serving.policies.reminders.answer(&params["arguments"]) {
+                Ok(text) => {
+                    on_call(Call::Reminded);
+                    json!({"content": [{"type": "text", "text": text}]})
+                }
+                Err(problem) => {
+                    json!({"isError": true, "content": [{"type": "text", "text": problem}]})
+                }
+            },
+        ),
+        "tools/call" if params["name"] == reminders::LIST_TOOL => Ok(
+            json!({"content": [{"type": "text", "text": serving.policies.reminders.describe()}]}),
+        ),
         "tools/call" => Err((-32602, "Unknown tool")),
         _ => Err((-32601, "Method not found")),
     };
@@ -391,14 +461,24 @@ fn lock(turn: &Mutex<Turn>) -> std::sync::MutexGuard<'_, Turn> {
 
 /// A message from the captain starts a new reply, and carries the standing instruction to use
 /// views when the visual-replies mode asks for one. The session's first message also says how
-/// message links work, once.
-fn user_prompt_submit(serving: &Serving) -> Value {
+/// message links work, once. While the chief of staff runs as firstmate, each message also
+/// carries the worker nicknames and what the app made of a request for a worker (see
+/// [`crate::crew`]).
+fn user_prompt_submit(input: &Value, serving: &Serving) -> Value {
     lock(&serving.turn).prompt();
     let links =
         (!serving.told_links.swap(true, Ordering::SeqCst)).then_some(crate::links::INSTRUCTION);
+    let crew = serving.home.as_ref().map(|_| {
+        crew::context(
+            input["prompt"].as_str().unwrap_or_default(),
+            &read(&serving.policies.nicknames),
+            &read(&serving.policies.models),
+        )
+    });
     let context: Vec<&str> = links
         .into_iter()
         .chain(read(&serving.policies.visual).instruction())
+        .chain(crew.as_deref())
         .collect();
     if context.is_empty() {
         return json!({});
@@ -528,6 +608,9 @@ mod tests {
             approval: Arc::new(RwLock::new(settings)),
             visual: Arc::new(RwLock::new(visual::Mode::Enforce)),
             rules: Arc::new(RwLock::new(guard::Settings::default())),
+            nicknames: Arc::new(RwLock::new(crew::Nicknames::default())),
+            models: Arc::new(RwLock::new(Vec::new())),
+            reminders: Reminders::in_memory(reminders::system_clock()),
         };
         let bridge = Bridge::start(policies.clone(), home, move |call| {
             tx.lock().unwrap().send(call).unwrap()
@@ -633,6 +716,28 @@ mod tests {
     }
 
     #[test]
+    fn app_secondmate_opens_the_guided_add_with_the_scope() {
+        let (bridge, calls) = bridge();
+        let auth = bearer(&bridge);
+        let (_, list) = post(
+            &bridge,
+            "/mcp",
+            Some(&auth),
+            json!({"jsonrpc": "2.0", "id": 1, "method": "tools/list"}),
+        );
+        assert_eq!(list["result"]["tools"][2]["name"], "app_secondmate");
+        let (_, called) = post(
+            &bridge,
+            "/mcp",
+            Some(&auth),
+            json!({"jsonrpc": "2.0", "id": 2, "method": "tools/call",
+            "params": {"name": "app_secondmate", "arguments": {"scope": " billing work "}}}),
+        );
+        assert_eq!(called["result"]["isError"], Value::Null);
+        assert!(matches!(calls.try_recv(), Ok(Call::AddMate(scope)) if scope == "billing work"));
+    }
+
+    #[test]
     fn app_ui_lists_the_catalog_and_checks_a_spec() {
         let (bridge, calls) = bridge();
         let auth = bearer(&bridge);
@@ -669,6 +774,75 @@ mod tests {
         assert_eq!(refused["isError"], true);
         // Checking a spec asks nothing of the app: the chat draws it from the tool use.
         assert!(calls.try_recv().is_err());
+    }
+
+    #[test]
+    fn app_remind_sets_a_reminder_at_the_apps_time_and_app_reminders_lists_it() {
+        let (tx, calls) = channel();
+        let tx = Mutex::new(tx);
+        let eastern = jiff::tz::TimeZone::posix("EST5EDT,M3.2.0,M11.1.0").unwrap();
+        let now = jiff::civil::date(2026, 11, 13)
+            .at(14, 30, 0, 0)
+            .to_zoned(eastern)
+            .unwrap();
+        let mut policies = Policies::ask_every_time();
+        policies.reminders = Reminders::in_memory(Arc::new(move || now.clone()));
+        let bridge = Bridge::start(policies.clone(), None, move |call| {
+            tx.lock().unwrap().send(call).unwrap()
+        })
+        .unwrap();
+        let auth = bearer(&bridge);
+        let (_, list) = post(
+            &bridge,
+            "/mcp",
+            Some(&auth),
+            json!({"jsonrpc": "2.0", "id": 1, "method": "tools/list"}),
+        );
+        let names: Vec<&str> = list["result"]["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|t| t["name"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            names,
+            [
+                "app_note",
+                "app_ui",
+                "app_secondmate",
+                "app_remind",
+                "app_reminders"
+            ]
+        );
+        let call = |name: &str, arguments: Value| {
+            post(
+                &bridge,
+                "/mcp",
+                Some(&auth),
+                json!({"jsonrpc": "2.0", "id": 2, "method": "tools/call",
+                       "params": {"name": name, "arguments": arguments}}),
+            )
+            .1["result"]
+                .clone()
+        };
+        let set = call(
+            "app_remind",
+            json!({"text": "stretch", "when": "in", "amount": 2, "unit": "minutes"}),
+        );
+        assert_eq!(
+            set["content"][0]["text"],
+            "Reminder set for Today, 2:32 PM: stretch"
+        );
+        assert!(matches!(calls.try_recv(), Ok(Call::Reminded)));
+        let refused = call("app_remind", json!({"text": "stretch", "when": "soon"}));
+        assert_eq!(refused["isError"], true);
+        assert!(calls.try_recv().is_err());
+        let listed = call("app_reminders", json!({}));
+        assert_eq!(
+            listed["content"][0]["text"],
+            "It is now Today, 2:30 PM.\n- Today, 2:32 PM: stretch (set Today, 2:30 PM)"
+        );
+        assert_eq!(policies.reminders.list().len(), 1);
     }
 
     #[test]
@@ -965,6 +1139,46 @@ mod tests {
                 "{mode:?}"
             );
         }
+    }
+
+    #[test]
+    fn a_firstmate_session_learns_the_nicknames_and_how_a_request_resolved() {
+        let (bridge, _, policies) = bridge_on(Settings::default(), Some(Home::new("/home")));
+        *policies.visual.write().unwrap() = visual::Mode::Off;
+        *policies.models.write().unwrap() = vec!["opencode-go/kimi-k3".into()];
+        let auth = bearer(&bridge);
+        let context = |prompt: &str| {
+            let out = post(
+                &bridge,
+                "/hooks/user-prompt-submit",
+                Some(&auth),
+                json!({"hook_event_name": "UserPromptSubmit", "prompt": prompt}),
+            )
+            .1;
+            out["hookSpecificOutput"]["additionalContext"]
+                .as_str()
+                .unwrap_or_default()
+                .to_string()
+        };
+        assert!(context("status?").contains("\u{201c}hacker\u{201d} is --harness pi"));
+        assert!(
+            context("send a kimi k3 worker to look").contains("as the model opencode-go/kimi-k3")
+        );
+
+        // Outside firstmate there is no crew to send.
+        let (plain, _, policies) = bridge_on(Settings::default(), None);
+        *policies.visual.write().unwrap() = visual::Mode::Off;
+        let out = post(
+            &plain,
+            "/hooks/user-prompt-submit",
+            Some(&bearer(&plain)),
+            json!({"hook_event_name": "UserPromptSubmit", "prompt": "send a hacker"}),
+        )
+        .1;
+        let context = out["hookSpecificOutput"]["additionalContext"]
+            .as_str()
+            .unwrap_or_default();
+        assert!(!context.contains("hacker"), "{context}");
     }
 
     #[test]

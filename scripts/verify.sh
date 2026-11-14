@@ -30,12 +30,21 @@ for scene in chat replied empty peek signed-out signing-in signed-in expired cli
   firstmate-missing firstmate-installing firstmate-up-to-date firstmate-update-available \
   firstmate-modified firstmate-blocked firstmate-session firstmate-panels firstmate-answering firstmate-crew \
   projects-fresh projects-empty projects-adding projects-listed \
+  projects-repos projects-repos-filtered projects-repos-chosen projects-repos-missing projects-repos-signed-out \
   formatted formatted-all formatted-streaming tool-image tool-image-broken tool-video tool-generic tool-picture \
   tool-bash tool-bash-open tool-terminal tool-diff tool-files \
   view-static view-streaming view-state view-action view-unknown view-too-large \
+  choice-ask choice-answered choice-multiple choice-enforced \
   visuals-settings visuals-enforced visuals-capped rules-settings rules-merge-ask rules-project-ask \
   find find-stepped find-none history link-copied link-opened link-context link-missing \
-  settings settings-clear menu-windows menu-linux; do
+  settings settings-clear menu-windows menu-linux \
+  reminders-list reminder-fired reminder-snooze reminder-settings reminder-link-opened \
+  mates-none mates-listed mate-idle mate-working mate-stopped mate-mismatch mate-peek \
+  add-mate-scope add-mate-projects add-mate-name add-mate-runtime add-mate-confirm add-mate-created add-mate-refused \
+  mate-retire-confirm mate-retire-refused mate-message mate-replied mate-escalation mate-escalation-answered \
+  mate-routed mate-from-chat \
+  workers-fresh workers-settings workers-claude-refused workers-crew \
+  send-while-working send-while-working-answered messages-settings queue-waiting queue-delivering queue-not-ready; do
   headless --scene "$scene" --snap "$out/$scene.png"
   headless --scene "$scene" --tree "$out/$scene.json"
 done
@@ -262,6 +271,28 @@ check projects-listed.json yes '"key": "add-project"'
 check projects-listed.json no  '"key": "projects-empty"'
 check projects-listed.json no  '"key": "projects-none"'
 check chat.json no  '"key": "projects"'
+# The GitHub repository combobox while adding a project.
+check projects-adding.json yes '"key": "repo-search"'
+check projects-adding.json no  '"key": "repo-list"'
+check projects-repos.json yes '"role": "combobox"'
+check projects-repos.json yes '"key": "repo-list"'
+check projects-repos.json yes '"role": "listbox"'
+check projects-repos.json yes '"key": "repo-option-captain:dotfiles"'
+check projects-repos.json yes '"activeDescendant": "repo-option-captain:dotfiles"'
+check projects-repos.json yes '"text": "Private"'
+check projects-repos.json yes '"text": "Archived"'
+check projects-repos.json yes '"key": "add-pick-folder"'
+check projects-repos-filtered.json yes '"text": "ham"'
+check projects-repos-filtered.json yes '"key": "repo-option-acme:velvet-hammer"'
+check projects-repos-filtered.json yes '"key": "repo-option-acme:handbook"'
+check projects-repos-filtered.json no  '"key": "repo-option-captain:dotfiles"'
+check projects-repos-chosen.json yes 'https://github.com/acme/payments-api'
+check projects-repos-chosen.json no  '"key": "repo-list"'
+check projects-repos-missing.json yes '"key": "repo-problem"'
+check projects-repos-missing.json yes 'https://cli.github.com'
+check projects-repos-missing.json yes '"key": "repo-retry"'
+check projects-repos-signed-out.json yes 'is not signed in to GitHub'
+check projects-repos-signed-out.json yes '"key": "repo-retry"'
 # The chief of staff's Markdown, formatted: the screenshot's headings bold on their own lines with
 # no asterisks, every construct, HTML shown as text, and a reply still arriving with its bold
 # unclosed.
@@ -336,10 +367,53 @@ check view-unknown.json yes '"text": "Unknown component “BarChart”"'
 check view-unknown.json yes '"text": "Monday was the slowest."'
 check view-too-large.json yes 'more than the limit of 200, so it is not shown.'
 check view-too-large.json no  '"key": "tool-1-ui-main"'
+# A question with a fixed set of answers, asked with a Choice: the recommended option marked, the
+# exact value sent and shown as the captain's choice, several picks with their own words, and the
+# stop hook sending a question asked in prose back to be asked with a Choice.
+check choice-ask.json yes '"text": "Merge authority for velvet-hammer is yolo on. Do you want it off?"'
+check choice-ask.json yes '"key": "tool-1-ui-merge-option-0"'
+check choice-ask.json yes '"key": "tool-1-ui-merge-recommended"'
+check choice-ask.json yes '"key": "tool-1-ui-merge-other"'
+check choice-ask.json no  '"key": "tool-1-ui-merge-sent"'
+check choice-answered.json yes '"text": "Chose “yolo off”."'
+check choice-answered.json yes '"key": "tool-1-ui-merge-sent"'
+check choice-answered.json yes 'Thanks. I got the values'
+check choice-answered.json yes 'yolo-off'
+check choice-answered.json no  '"key": "tool-1-ui-merge-other"'
+check choice-multiple.json yes '"key": "tool-1-ui-checks-send"'
+check choice-multiple.json yes '"text": "A changelog entry"'
+check choice-multiple.json no  '"text": "Chose'
+check choice-enforced.json yes 'the reply asks a question with a fixed set of answers.'
+check choice-enforced.json yes '"key": "tool-3-ui-merge-sent"'
+check choice-enforced.json yes '"text": "Chose “yolo off”."'
+check choice-enforced.json yes 'with the option'
+check choice-enforced.json yes 'yolo-off'
 # Visual replies: the settings page, a list sent back once and shown as a view, and a reply that
 # ignored the feedback, sent back only once.
+# Messages sent while the chief of staff works: sent at once and marked, the setting with Send
+# right away recommended and chosen, the queue with one message being edited, the first queued
+# message going out when the turn ends, and the queue kept while Claude Code is not ready.
+check send-while-working.json yes '"text": "You · sent while your chief of staff was working"'
+check send-while-working.json yes '"key": "working"'
+check send-while-working.json no  '"key": "queue"'
+check send-while-working-answered.json yes 'I also took in'
+check send-while-working-answered.json no  '"key": "working"'
+check messages-settings.json yes '"key": "messages-page"'
+check messages-settings.json yes '"text": "● Send right away (Recommended)"'
+check messages-settings.json yes '"text": "○ Queue new messages until the chief of staff is done"'
+check queue-waiting.json yes '"key": "queued-0-edit"'
+check queue-waiting.json yes '"key": "queued-1-save"'
+check queue-waiting.json yes '"key": "queued-2-delete"'
+check queue-waiting.json yes 'Queued until your chief of staff is done'
+check queue-delivering.json yes '"text": "Then open the release PR."'
+check queue-delivering.json no  '"key": "queued-2"'
+check queue-delivering.json yes '"key": "queued-1"'
+check queue-not-ready.json yes '"key": "sign-in-queued"'
 check settings.json yes '"key": "visuals"'
 check settings.json yes '"text": "Enforce"'
+check settings.json yes '"key": "messages"'
+check settings.json yes '"key": "messages-summary"'
+check settings.json yes '"text": "Send right away"'
 check visuals-settings.json yes '"key": "visuals-page"'
 check visuals-settings.json yes '"text": "● Enforce (Recommended)"'
 check visuals-settings.json yes '"key": "visual-mode-nudge"'
@@ -384,7 +458,7 @@ check menus-shortcut.json yes '"key": "settings-page"'
 # Firstmate's rules: the page with what two rules did, a merge question that names the pull
 # request, and a write into a project waiting for the captain.
 check settings.json yes '"key": "rules"'
-check settings.json yes '"text": "7 of 7 on"'
+check settings.json yes '"text": "8 of 8 on"'
 check rules-settings.json yes '"key": "rules-page"'
 check rules-settings.json yes '"key": "guard-merge-through-script"'
 check rules-settings.json yes '"key": "guard-publish-asks-captain-toggle"'
@@ -397,6 +471,30 @@ check rules-merge-ask.json yes 'Firstmate'"'"'s hard rule 2: never merge a pull 
 check rules-merge-ask.json yes '"key": "answer-1-0"'
 check rules-project-ask.json yes 'Let the chief of staff edit /tmp/velvet-hammer/rules-project-ask/data/home/projects/site/README.md?'
 check rules-project-ask.json yes '"key": "answer-1-1"'
+# Workers on other providers: nothing set up, pi installed from a stand-in release with
+# firstmate pointed at it, a Claude model refused for pi, and what each worker runs on.
+check settings.json yes '"key": "workers"'
+check settings.json yes '"text": "1 nickname · pi not installed"'
+check workers-fresh.json yes '"key": "workers-page"'
+check workers-fresh.json yes '"text": "pi 1.5.2 is not installed."'
+check workers-fresh.json yes '"key": "workers-install"'
+check workers-fresh.json yes '"text": "No opencode Go key is in the keychain yet."'
+check workers-fresh.json yes '"key": "workers-connect"'
+check workers-fresh.json yes '"key": "nickname-0"'
+check workers-fresh.json yes 'pi · opencode-go/deepseek-v4.1-flash'
+check workers-settings.json yes 'It lists 6 models for the keys it has.'
+check workers-settings.json yes '"text": "Your opencode Go key is in the keychain."'
+check workers-settings.json yes 'may spend only opencode Go.'
+check workers-settings.json no  '"key": "workers-connect"'
+check workers-settings.json yes '"key": "nickname-1"'
+check workers-settings.json yes 'claude · opus · effort high'
+check workers-claude-refused.json yes '"key": "nickname-problem"'
+check workers-claude-refused.json yes 'never through pi. Choose Claude Code for a Claude model.'
+check workers-claude-refused.json no  '"key": "nickname-2"'
+check workers-crew.json yes '"key": "crew-lab-verify-runs"'
+check workers-crew.json yes '"text": "pi · opencode-go/deepseek-v4.1-flash"'
+check workers-crew.json yes '"text": "claude · claude-sonnet-5-5"'
+check rules-settings.json yes '"key": "guard-claude-on-subscription"'
 # Find in the conversation: the count and the highlighted matches, the current one after
 # stepping, no matches, and the history kept from an earlier session above its divider.
 check find.json yes '"key": "find-bar"'
@@ -430,6 +528,120 @@ check link-missing.json yes 'what did ⚠ Message not found say?'
 check link-missing.json yes ': message not found. No message in this chat has this link.'
 check open-link-opened.json yes '"text": "Reply 5: nothing new."'
 check open-link-faded.json yes '"text": "Reply 5: nothing new."'
+# Reminders on a fixed clock: the page with each form set, two come due (one overdue) in the
+# banner and For you to do, the snooze menu, and the settings with what each keyword means now.
+check chat.json yes '"key": "reminders"'
+check chat.json yes '"text": "none set"'
+check chat.json no  '"key": "reminder-banner"'
+check reminders-list.json yes '"key": "reminders-page"'
+check reminders-list.json yes '"key": "reminders-coming"'
+check reminders-list.json yes '"key": "reminders-later"'
+check reminders-list.json yes '"text": "Today, 2:50 PM"'
+check reminders-list.json yes '"text": "Today, 5:30 PM"'
+check reminders-list.json yes '"text": "Tomorrow, 9:00 AM"'
+check reminders-list.json yes '"text": "Monday, Nov 16, 9:00 AM"'
+check reminders-list.json yes '"text": "5 coming up · 2 later"'
+check reminders-list.json no  '"key": "reminder-banner"'
+check reminder-fired.json yes '"key": "reminder-banner"'
+check reminder-fired.json yes '"text": "Stretch"'
+check reminder-fired.json yes '"text": "Set Today, 2:30 PM · due Today, 2:32 PM"'
+check reminder-fired.json yes '"key": "reminder-banner-more"'
+check reminder-fired.json yes '"key": "reminder-1"'
+check reminder-fired.json yes 'Reminder · overdue · Set Today, 9:00 AM · due Today, 10:00 AM'
+check reminder-fired.json yes '"key": "panel-1-done"'
+check reminder-fired.json yes '"text": "2 due · 1 coming up · 1 later"'
+check reminder-fired.json no  '"key": "banner-2-snooze-menu"'
+check reminder-snooze.json yes '"key": "banner-2-snooze-menu"'
+check reminder-snooze.json yes '"key": "banner-2-snooze-10m"'
+check reminder-snooze.json yes '"key": "banner-2-snooze-tomorrow"'
+check reminder-snooze.json yes '"key": "snooze-amount"'
+check reminder-settings.json yes '"key": "reminder-settings-page"'
+check reminder-settings.json yes '"key": "reminder-setting-evening-up"'
+check reminder-settings.json yes '"text": "6:00 PM"'
+check reminder-settings.json yes '"text": "Monday"'
+check reminder-settings.json yes '→ Today, 5:30 PM'
+check reminder-settings.json yes '→ Monday, Nov 16, 9:00 AM'
+# A reminder links back to the message it was set in, and its settings are a section of Settings.
+check reminder-fired.json yes '"key": "banner-2-message"'
+check reminder-fired.json yes '"key": "panel-1-message"'
+check reminder-fired.json yes '"text": "↪ Set in this message"'
+check reminder-link-opened.json yes '"key": "chat"'
+check reminder-link-opened.json no  '"key": "reminders-page"'
+check reminder-settings.json yes '"key": "reminder-settings-all-settings"'
+check settings.json yes '"key": "reminder-settings"'
+check settings.json yes '"text": "later today by 6:00 PM · mornings 9:00 AM"'
+# Second mates: none yet, five listed in each state, each one's page, a peek at its terminal,
+# the guided add at each step with its outcome and a refusal, a refused retirement, a message
+# and its reply, an escalation answered, work the chief of staff routed, and the add opened from
+# the chat.
+check mates-none.json yes '"key": "mates-none"'
+check mates-none.json yes '"key": "add-mate"'
+check mates-listed.json yes '"key": "mate-docs"'
+check mates-listed.json yes '"text": "running · idle"'
+check mates-listed.json yes '"text": "running · working"'
+check mates-listed.json yes '"text": "stopped · idle"'
+check mates-listed.json yes '"text": "running · waiting on you"'
+check mates-listed.json yes '"key": "mate-web-mismatch"'
+check mates-listed.json no  '"key": "mate-docs-mismatch"'
+check mates-listed.json yes '"key": "hold-support-refund-window"'
+check mates-listed.json yes '"key": "answer-support-refund-window"'
+check mate-idle.json yes '"key": "mate-page"'
+check mate-idle.json yes 'Scope: documentation site work: pages, examples and the docs build'
+check mate-idle.json yes '"key": "mate-interrupt"'
+check mate-idle.json yes '"key": "mate-relaunch"'
+check mate-idle.json yes '"key": "mate-retire"'
+check mate-idle.json yes '"key": "mate-children-none"'
+check mate-idle.json yes 'The docs build passes on main; the last run took 41 seconds.'
+check mate-idle.json yes '"key": "mate-edit-note"'
+check mate-working.json yes '"key": "mate-child-invoice-retries"'
+check mate-working.json yes '"text": "working · running the retry tests"'
+check mate-working.json yes '"key": "mate-child-billing-dashboard"'
+check mate-stopped.json yes '"text": "Session: stopped · idle"'
+check mate-stopped.json yes '"key": "mate-start"'
+check mate-stopped.json no  '"key": "mate-interrupt"'
+check mate-mismatch.json yes '"key": "mate-mismatch"'
+check mate-mismatch.json yes 'invalid home: not a seeded secondmate home'
+check mate-peek.json yes '"text": "Peeking at second mate docs"'
+check mate-peek.json yes 'no routed work; waiting quietly'
+check mate-peek.json yes '"text": "Back to its page"'
+check add-mate-scope.json yes '"key": "add-mate-scope"'
+check add-mate-scope.json yes '"text": "Step 1 of 4"'
+check add-mate-projects.json yes '"key": "add-mate-project-site"'
+check add-mate-projects.json yes 'local-only projects stay with the main firstmate'
+check add-mate-projects.json yes '"key": "add-mate-no-projects"'
+check add-mate-name.json yes '"key": "add-mate-name"'
+check add-mate-name.json yes '/data/secondmates/site.'
+check add-mate-runtime.json yes '"key": "add-mate-runtime-0"'
+check add-mate-runtime.json yes "codex (firstmate's default for second mates)"
+check add-mate-runtime.json yes '"key": "add-mate-runtime-1"'
+check add-mate-confirm.json yes '"key": "add-mate-yes"'
+check add-mate-confirm.json yes '"text": "Yes, create payments"'
+check add-mate-confirm.json yes "1. Run firstmate's bin/fm-home-seed.sh payments"
+check add-mate-confirm.json yes 'bin/fm-spawn.sh payments --secondmate --harness claude'
+check add-mate-confirm.json yes 'Nothing remote is created, pushed or published'
+check add-mate-created.json yes '"key": "mate-payments"'
+check add-mate-created.json yes 'Firstmate created payments with its home at'
+check add-mate-created.json no  '"key": "mate-mismatch"'
+check add-mate-refused.json yes '"key": "add-mate-problem"'
+check add-mate-refused.json yes 'Firstmate refused to create payments'
+check add-mate-refused.json yes 'is not initialized for no-mistakes; refusing to mutate preexisting clone'
+check mate-retire-confirm.json yes '"key": "mate-confirm"'
+check mate-retire-confirm.json yes '"text": "Retire billing?"'
+check mate-retire-confirm.json yes 'Velvet Hammer never forces a retirement'
+check mate-retire-refused.json yes 'Firstmate refused to retire billing, and nothing was changed.'
+check mate-retire-refused.json yes 'REFUSED: secondmate billing still has in-flight work'
+check mate-retire-refused.json no  'WARNING: watcher'
+check mate-message.json yes '"text": "Is the search page live yet?"'
+check mate-message.json yes "Delivered to docs's inbox."
+check mate-replied.json yes 'waits for its pull request to merge.'
+check mate-replied.json no  '**built**'
+check mate-escalation.json yes '"key": "mate-hold-refund-window"'
+check mate-escalation.json yes '"key": "mate-answering"'
+check mate-escalation-answered.json yes "The captain's answer to your captain hold refund-window: 30 days, counted from delivery."
+check mate-escalation-answered.json no  '"key": "mate-answering"'
+check mate-routed.json yes '"text": "Routed to second mate docs"'
+check mate-from-chat.json yes '"key": "add-mate-page"'
+check mate-from-chat.json yes 'the billing service, its invoices and payment retries'
 # The scripted run.
 check walk-sent.json yes '"text": "Ship it when CI is green."'
 check walk-sent.json yes 'Got it:'

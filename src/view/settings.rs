@@ -6,7 +6,7 @@
 use rune::tok::{Theme, radius, space, type_};
 use rune::{El, col, el, row, text};
 
-use super::{button, choice, firstmate_summary, note, page, section, warning};
+use super::{button, choice, firstmate_summary, note, page, section, warning, workers_summary};
 use crate::history::Keeping;
 use crate::menus;
 use crate::{App, Showing, guard};
@@ -20,6 +20,13 @@ pub fn settings_page(s: &App, t: Theme, dark: bool) -> El {
     let sections = col()
         .key("settings-sections")
         .gap(space::S2)
+        .child(section_card(
+            "messages",
+            "Messages",
+            s.delivery.settings().summary().to_string(),
+            Showing::Messages,
+            t,
+        ))
         .child(section_card(
             "approvals",
             "Tool approval",
@@ -35,6 +42,13 @@ pub fn settings_page(s: &App, t: Theme, dark: bool) -> El {
             t,
         ))
         .child(section_card(
+            "workers",
+            "Workers",
+            workers_summary(s),
+            Showing::Workers,
+            t,
+        ))
+        .child(section_card(
             "rules",
             "Firstmate rules",
             format!("{on} of {} on", guard::Rule::ALL.len()),
@@ -47,6 +61,13 @@ pub fn settings_page(s: &App, t: Theme, dark: bool) -> El {
             firstmate_summary(&s.firstmate).to_string(),
             Showing::Firstmate,
             t,
+        ))
+        .child(section_card(
+            "reminder-settings",
+            "Reminders",
+            super::remind::settings_summary(s),
+            Showing::ReminderSettings,
+            t,
         ));
     let body = col()
         .key("settings-body")
@@ -55,9 +76,11 @@ pub fn settings_page(s: &App, t: Theme, dark: bool) -> El {
             section("Your chief of staff", t)
                 .child(note(
                     "settings-help",
-                    "How your chief of staff's tool uses are decided, how its replies are shown, \
-                     the firstmate rules its hook enforces, and the firstmate clone it runs on. \
-                     Each opens its page.",
+                    "When your messages reach your chief of staff while it works, how its tool \
+                     uses are decided, how its replies are shown, \
+                     the workers it can send on other providers, the firstmate rules its hook \
+                     enforces, the firstmate clone it runs on, and the times your reminders' \
+                     words stand for. Each opens its page.",
                     t,
                 ))
                 .child(sections),
@@ -91,7 +114,10 @@ fn section_card(key: &str, title: &str, summary: String, page: Showing, t: Theme
         .fill(t.bg)
         .border(1.0, t.card_border)
         .hover(t.control_off)
-        .on_press(move |s: &mut App| s.showing = page.clone())
+        .on_press(move |s: &mut App| match page {
+            Showing::Workers => s.open_workers(),
+            _ => s.showing = page.clone(),
+        })
         .child(text(title.to_string()).font(type_::TITLE).color(t.text))
         .child(note(&format!("{key}-summary"), &summary, t))
 }
