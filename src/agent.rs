@@ -128,7 +128,7 @@ impl ChiefOfStaff for Stub {
 
     fn act(&mut self, _ws: &Workspace, action: &Action) {
         if self.slow.is_some()
-            && let Action::Say(text) = action
+            && let Action::Say { text, .. } = action
         {
             // The reply so far ends where the first message sent during the turn arrives, so
             // the rest of the turn shows after it.
@@ -152,7 +152,13 @@ impl ChiefOfStaff for Stub {
             return;
         }
         let text = match action {
-            Action::Say(text) => format!("Got it: \u{201c}{text}\u{201d}. I'll take it from here."),
+            Action::Say { text, attachments } if !attachments.is_empty() => format!(
+                "Got it: \u{201c}{text}\u{201d}, with {}.",
+                crate::attach::count(attachments)
+            ),
+            Action::Say { text, .. } => {
+                format!("Got it: \u{201c}{text}\u{201d}. I'll take it from here.")
+            }
             Action::Answer { choice, .. } => {
                 format!("Thanks. Going with \u{201c}{choice}\u{201d}.")
             }

@@ -15,6 +15,7 @@ use crate::links;
 use crate::model::{Action, Agent, Author, Item, ItemKind, Message, Plan, Status};
 use crate::projects::Project;
 
+mod attach;
 mod mates;
 mod messages;
 mod policy;
@@ -90,6 +91,12 @@ pub fn view(s: &App, cx: &mut Cx<App>) -> El {
         .w_full()
         .h_full()
         .fill(t.bg)
+        // Cmd-V with no field focused still attaches a screenshot or copied files to the draft.
+        .on_paste_content(|s: &mut App, content, _| {
+            if s.showing == Showing::Chat && s.chat_ready() {
+                s.paste(content);
+            }
+        })
         .children(s.in_window_menus.then(|| menu_bar(s, t)))
         .child(window)
 }
@@ -913,6 +920,7 @@ fn chat(s: &App, plan: &Plan, t: Theme, dark: bool) -> El {
             t.text_secondary,
         )
         .on_edit(|s: &mut App| &mut s.draft)
+        .on_input_paste(|s: &mut App, content, _| s.paste(content))
         .on_submit(|s: &mut App, _| s.send());
     let composer = row()
         .key("composer")
@@ -929,7 +937,15 @@ fn chat(s: &App, plan: &Plan, t: Theme, dark: bool) -> El {
                 .border(1.0, t.card_border)
                 .child(input),
         )
-        .child(button("send", "Send", t, |s| s.send()));
+        .child({
+            let send = button("send", "Send", t, |s| s.send());
+            if s.adding_attachments() {
+                send.fill(t.control_off)
+                    .label("Send, once the attachments are added")
+            } else {
+                send
+            }
+        });
     let mut header = col()
         .gap(2.0)
         .child(heading("Chief of staff", t))
@@ -1004,8 +1020,20 @@ fn chat(s: &App, plan: &Plan, t: Theme, dark: bool) -> El {
             _ => None,
         })
         .children(messages::working(s, t))
+        .children(attach::tray(s, t, dark))
         .child(composer)
         .children(messages::queued(s, t))
+        // Files dragged in from Finder attach to the draft.
+        .on_drop_files(|s: &mut App, files, _| s.attach_files(files))
+        .on_drop_hover(|s: &mut App, over, _| s.drop_over = over)
+        .border(
+            2.0,
+            if s.drop_over {
+                tok::accent(0, true)
+            } else {
+                rune::Color::TRANSPARENT
+            },
+        )
 }
 
 /// The find bar over the conversation: the query, where the current match is among them all,
@@ -1605,7 +1633,11 @@ fn transcript(
                 t.card
             })
             .child(header)
-            .child(words);
+            .children((!m.text.is_empty()).then_some(words))
+            .children(
+                (!m.attachments.is_empty())
+                    .then(|| attach::sent(s, &format!("msg-{i}-attachments"), &m.attachments, t)),
+            );
         if flashed {
             card = card.border(2.0, tok::accent(0, dark));
         }

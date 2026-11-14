@@ -148,12 +148,20 @@ pub fn queued(s: &App, t: Theme) -> Option<El> {
                 .gap(space::S2)
                 .center_y()
                 .child(
-                    text(format!("{}. {}", i + 1, shortened(message)))
-                        .key(format!("{key}-text"))
-                        .font(type_::BODY)
-                        .color(t.text)
-                        .wrap()
-                        .grow(1.0),
+                    text(match message.attachments.len() {
+                        0 => format!("{}. {}", i + 1, shortened(&message.text)),
+                        _ => format!(
+                            "{}. {} \u{b7} {}",
+                            i + 1,
+                            shortened(&message.text),
+                            crate::attach::count(&message.attachments)
+                        ),
+                    })
+                    .key(format!("{key}-text"))
+                    .font(type_::BODY)
+                    .color(t.text)
+                    .wrap()
+                    .grow(1.0),
                 )
                 .child(small_button(&format!("{key}-edit"), "Edit", t, move |s| {
                     s.edit_queued(i)

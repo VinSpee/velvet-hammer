@@ -1113,7 +1113,7 @@ impl App {
                 self.mates.adding = AddMate::default();
                 self.showing = Showing::Mate(plan.id.clone());
                 if self.chat_ready() {
-                    self.act(Action::Say(handoff(&plan, &outcome.words)));
+                    self.act(Action::say(handoff(&plan, &outcome.words)));
                 } else {
                     outcome.words.push_str(
                         " Your chief of staff cannot chat yet; once it can, ask it to hand the \

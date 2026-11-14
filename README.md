@@ -86,6 +86,13 @@ The window has three columns, and every setting is in **Settings** (see
   copy button: a command coloured as shell over its output with the output's colours, an edit as
   a diff, a file's numbered lines, a search's matches and a fetched page's summary, each long
   result folded to its first lines. See [Tool calls in the chat](docs/tool-calls.md).
+  You can attach images, videos and other files to a message by pasting them (a screenshot, or
+  files copied in Finder) or dropping them on the chat. Each shows as a chip with a thumbnail, a
+  first frame or the file's name and size, and a **×** to remove it before sending. The app keeps
+  its own copy in its data directory, made in the background (the chip reads "Adding…" and
+  **Send** waits until it is done); an image goes to the chief of staff as image content and
+  every file as its path, and the kept conversation keeps each message's attachments. A file can
+  be up to 50 MB. See [Attachments](docs/attachments.md).
   The chief of staff can also show you a small interactive view, a json-render spec it passes to
   the app's `app_ui` tool: cards, tables, badges, progress bars, buttons, text fields,
   checkboxes and choice selectors, drawn natively and filling in as the spec streams. Ticking,
@@ -189,6 +196,9 @@ input** and **For you to do**.
   `bin/fm-bearings-snapshot.sh --json` whenever the records change.
 - `scripts/fake-claude`: a stand-in for `claude` that speaks the same protocol without an account.
   Tests and the sign-in scenes run the app on it.
+- `src/attach.rs`: attachments: copying a pasted or dropped file into the data directory, the
+  size caps, and which images go to Claude Code as image content (see
+  [docs/attachments.md](docs/attachments.md)).
 - `src/tools.rs`: the chief of staff's tool uses and the registry that picks how each is drawn,
   keyed on the Model Context Protocol's content types and the Agent Client Protocol's tool kinds
   (see [docs/tool-calls.md](docs/tool-calls.md)).
@@ -207,9 +217,9 @@ input** and **For you to do**.
   and the commands they share with the keyboard shortcuts.
 - `src/markdown.rs`: prepares the chief of staff's Markdown for Rune's Markdown view, keeping
   line breaks and showing HTML as text.
-- `src/view.rs`: the Rune view, with the tool-use cards in `src/view/tool.rs` (the folding
-  output block and the diff in `src/view/tool/`), the json-render views in `src/view/ui.rs`,
-  the visual-replies and firstmate-rules pages in `src/view/policy.rs`, the Settings page and
+- `src/view.rs`: the Rune view, with the attachment chips in `src/view/attach.rs`, the tool-use
+  cards in `src/view/tool.rs` (the folding output block and the diff in `src/view/tool/`), the
+  json-render views in `src/view/ui.rs`, the visual-replies and firstmate-rules pages in `src/view/policy.rs`, the Settings page and
   the drawn menu bar in `src/view/settings.rs`, the Workers page in `src/view/workers.rs`, and
   the reminders' banner, card and pages in `src/view/remind.rs`. Every element a
   test or script reaches has a key.
@@ -421,6 +431,11 @@ It writes these files to `OUT_DIR`:
 | `tool-video.png`, `tool-video.json` | A video file, with its poster frame, **Play** and **Open in your video player** |
 | `tool-generic.png`, `tool-generic.json` | A Bash command the fake `claude` ran, as a terminal card |
 | `tool-picture.png`, `tool-picture.json` | An image from the chat, enlarged |
+| `attach-draft.png`, `attach-draft.json` | A chart, a video and a Markdown file attached to the draft, as chips |
+| `attach-sent.png`, `attach-sent.json` | The message that carried an image and a file, and the fake `claude` saying it got one image block and two listed files |
+| `attach-too-large.png`, `attach-too-large.json` | A file over the 50 MB cap, refused with why |
+| `attach-adding.png`, `attach-adding.json` | Files still being copied (**Adding…**) and one whose copy failed, as chips, with **Send** waiting |
+| `attach-drop.png`, `attach-drop.json` | A file drag over the chat |
 | `tool-bash.png`, `tool-bash.json` | A long test run: the command coloured as shell, its time, and the first lines of output |
 | `tool-bash-open.png`, `tool-bash-open.json` | The same run with the whole command and every line shown |
 | `tool-terminal.png`, `tool-terminal.json` | Output in colour, a failed command with its exit code, no output, a long line and a command still running |
@@ -490,7 +505,8 @@ and stop hooks; the `rules` and `workers` scenes run the fake `claude` as firstm
 there; the `tool`
 scenes have the fake `claude` use Read and Bash on the files in `scripts/fixtures`, except the
 `tool-bash`, `tool-bash-open`, `tool-terminal`, `tool-diff` and `tool-files` scenes, which replay the turns in
-`scripts/fixtures/tools-*.json` on the stub. The sign-in scenes run the app on `scripts/fake-claude`, so
+`scripts/fixtures/tools-*.json` on the stub; the `attach` scenes attach files in
+`scripts/fixtures`, and `attach-sent` sends them to the fake `claude`. The sign-in scenes run the app on `scripts/fake-claude`, so
 they need no Claude account; each waits for the fake's real processes before rendering. The
 firstmate and projects scenes run `git` on a scratch upstream repository under `target/`, so
 they need no network; the projects scenes write the registry firstmate's procedure would write,

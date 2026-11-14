@@ -5,7 +5,9 @@
 //! The file and its directory are readable by the captain's user only. A message is written once
 //! it is finished: the captain's when sent, a reply when it ends, a tool use when its result
 //! arrives. A tool use keeps its name, its input and its result as text; image bytes are never
-//! written, only the paths a tool named. A file past [`ROTATE_AT`] is moved to
+//! written, only the paths a tool named. A message's attachments keep the path of the app's own
+//! copy of each file (see [`crate::attach`]), with its name, size and kind; the files stay in
+//! `attachments/`. A file past [`ROTATE_AT`] is moved to
 //! `history.jsonl.1` when the app opens, and only the current file is read back.
 //!
 //! What is kept is never sent to the chief of staff on its own: a message from an earlier session
@@ -17,6 +19,7 @@ use std::path::{Path, PathBuf};
 
 use serde_json::{Value, json};
 
+use crate::attach::{Attachment, Kind};
 use crate::model::{Author, Message};
 use crate::store::{
     self, Saved, create_private_dir, make_private, make_private_dir, open_private, suffixed,
@@ -247,7 +250,32 @@ fn to_json(message: &Message) -> Value {
         }
         out["tool"] = kept;
     }
+    if !message.attachments.is_empty() {
+        let kept: Vec<Value> = message
+            .attachments
+            .iter()
+            .map(|a| {
+                json!({
+                    "path": a.path.to_string_lossy(),
+                    "name": a.name,
+                    "bytes": a.bytes,
+                    "kind": a.kind.key(),
+                })
+            })
+            .collect();
+        out["attachments"] = kept.into();
+    }
     out
+}
+
+/// An attachment as kept; `None` for one this version cannot read.
+fn attachment_from(value: &Value) -> Option<Attachment> {
+    Some(Attachment {
+        path: PathBuf::from(value["path"].as_str()?),
+        name: value["name"].as_str()?.to_string(),
+        bytes: value["bytes"].as_u64()?,
+        kind: Kind::from_key(value["kind"].as_str()?)?,
+    })
 }
 
 /// A content block as kept: image data never is.
@@ -316,6 +344,14 @@ fn from_json(value: &Value) -> Option<Message> {
         author: author_from(value["author"].as_str()?)?,
         text: value["text"].as_str()?.to_string(),
         tool,
+        attachments: match &value["attachments"] {
+            Value::Null => Vec::new(),
+            list => list
+                .as_array()?
+                .iter()
+                .map(attachment_from)
+                .collect::<Option<_>>()?,
+        },
         while_working: false,
     })
 }
@@ -372,6 +408,31 @@ mod tests {
         let content = &restored.result.as_ref().unwrap().content;
         assert!(matches!(&content[0], Content::Image { data: Err(why), .. } if why == NO_IMAGE));
         assert_eq!(content[1], Content::Text("done".into()));
+    }
+
+    #[test]
+    fn attachments_come_back_with_the_message_that_carried_them() {
+        let dir = scratch("attachments");
+        let mut history = History::new(&dir);
+        let shot = Attachment {
+            path: dir.join("attachments/ab12/Pasted image.png"),
+            name: "Pasted image.png".into(),
+            bytes: 2048,
+            kind: Kind::Image,
+        };
+        let notes = Attachment {
+            path: dir.join("attachments/cd34/notes.md"),
+            name: "notes.md".into(),
+            bytes: 136,
+            kind: Kind::File,
+        };
+        let said = Message {
+            attachments: vec![shot, notes],
+            ..Message::new(Author::Captain, "Here are the chart and the notes.")
+        };
+        history.record(&said);
+        let back = History::new(&dir).load();
+        assert_eq!(back, [said]);
     }
 
     #[cfg(unix)]

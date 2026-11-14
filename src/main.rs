@@ -5,6 +5,7 @@
 mod agent;
 mod ansi;
 mod approval;
+mod attach;
 mod bearings;
 mod bridge;
 mod claude;
@@ -31,14 +32,17 @@ mod visual;
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::mpsc::{Receiver, channel};
+use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
-use rune::{AppSpec, Image, ImageCache, Key, KeyEvent, Player, TextEdit, Tx, Waker};
+use rune::{
+    AppSpec, ClipboardContent, Image, ImageCache, Key, KeyEvent, Player, TextEdit, Tx, Waker,
+};
 
 use agent::{ChiefOfStaff, Event, Finish, Stub};
 use approval::{Activity, Mode, Store};
+use attach::Attachment;
 use bearings::Bearings;
 use claude::Claude;
 use firstmate::{Checkout, Distro, Firstmate, Work, lab::Lab};
@@ -72,7 +76,7 @@ pub struct App {
     pub working: bool,
     /// Messages waiting until the chief of staff is done, oldest first. Kept in memory only:
     /// quitting the app drops them, and the kept conversation holds only messages that went out.
-    pub queue: Vec<String>,
+    pub queue: Vec<Queued>,
     /// The queued message being edited, by its place in `queue`, with its field.
     pub editing: Option<(usize, TextEdit)>,
     /// The captain's worker nicknames, in the firstmate home's `config/`.
@@ -136,6 +140,20 @@ pub struct App {
     /// The captain hold the next message answers, by its key.
     pub answering: Option<String>,
     pub draft: TextEdit,
+    /// The files attached to the draft, in the order they were attached.
+    pub attached: Vec<Attachment>,
+    /// The draft's attachments still being copied, or whose copy failed, in the order they came.
+    pub pending: Vec<attach::Pending>,
+    next_pending: u64,
+    /// Sends each finished copy, by its pending id, from the thread that made it.
+    copies_tx: Sender<(u64, Result<Attachment, String>)>,
+    copies: Receiver<(u64, Result<Attachment, String>)>,
+    /// Why the last file pasted or dropped was not attached.
+    pub attach_problem: Option<String>,
+    /// A file drag is over the chat.
+    pub drop_over: bool,
+    /// The app's data directory, where attachments are copied.
+    data: PathBuf,
     /// The chat message under the pointer, whose link button shows.
     pub hovered: Option<usize>,
     /// The element that has focus, as of the last frame.
@@ -162,6 +180,8 @@ pub struct App {
     pub replying: Option<usize>,
     /// How each finished tool use is drawn, by its id, with the image or video it shows.
     pub media: HashMap<String, Media>,
+    /// The thumbnail or poster frame of each attached image or video, by its saved copy.
+    pub attachment_media: HashMap<PathBuf, Media>,
     /// How the captain set out each tool use's card, by its id.
     pub cards: HashMap<String, Card>,
     /// When each tool use started, or how long it took once its result arrived, by its id.
@@ -178,6 +198,13 @@ pub struct App {
     window_wake: Arc<OnceLock<Waker>>,
     /// Wakes the window when an image decodes or a video loads, once there is a window.
     media_wake: Waker,
+}
+
+/// A message waiting in the queue: the captain's words and the files attached to them.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Queued {
+    pub text: String,
+    pub attachments: Vec<Attachment>,
 }
 
 /// What a finished tool use shows, chosen by [`tools::handler`] when its result arrives.
@@ -294,6 +321,7 @@ impl App {
                 }
             }
         });
+        let (copies_tx, copies) = channel();
         let mut ws = chief.open();
         if keeping.settings().0 {
             let earlier = history.load();
@@ -345,6 +373,15 @@ impl App {
             wake: None,
             answering: None,
             draft: TextEdit::default(),
+            attached: Vec::new(),
+            pending: Vec::new(),
+            next_pending: 0,
+            copies_tx,
+            copies,
+            attach_problem: None,
+            drop_over: false,
+            data: data.to_path_buf(),
+            attachment_media: HashMap::new(),
             hovered: None,
             focused: None,
             copied: None,
@@ -376,6 +413,20 @@ impl App {
                 app.media.insert(tool.id, media);
             }
         }
+        // The thumbnails of attachments on messages kept from an earlier session.
+        let kept: Vec<PathBuf> = app
+            .ws
+            .chat
+            .iter()
+            .flat_map(|m| &m.attachments)
+            .map(|a| a.path.clone())
+            .collect();
+        for path in kept {
+            if let Some(handler) = tools::handler_for_file(&path) {
+                let media = app.media_for(&handler);
+                app.attachment_media.insert(path, media);
+            }
+        }
         app.drain();
         app
     }
@@ -386,7 +437,13 @@ impl App {
         self.confirm_clear = false;
         self.history.clear();
         let earlier = std::mem::take(&mut self.ws.earlier);
-        self.ws.chat.drain(..earlier);
+        // The cleared messages' attachments go with them; this session's stay on their messages.
+        for gone in self.ws.chat.drain(..earlier) {
+            for a in &gone.attachments {
+                self.attachment_media.remove(&a.path);
+                attach::discard(a);
+            }
+        }
         self.replying = self.replying.map(|i| i - earlier);
         self.find.current = 0;
         self.hovered = None;
@@ -420,6 +477,10 @@ impl App {
                 Ok(None) => {}
                 Err(problem) => self.pick_problem = Some(problem),
             }
+            changed = true;
+        }
+        while let Ok((id, copy)) = self.copies.try_recv() {
+            self.take_copy(id, copy);
             changed = true;
         }
         changed |= self.repos.poll();
@@ -825,7 +886,7 @@ impl App {
                 m.while_working = true;
             }
         }
-        if matches!(action, Action::Say(_) | Action::Ui(_)) {
+        if matches!(action, Action::Say { .. } | Action::Ui(_)) {
             self.keep(self.ws.chat.len() - 1);
             // A reminder the chief of staff sets in this turn links back to this message.
             self.reminders
@@ -849,43 +910,43 @@ impl App {
         if self.working || self.queue.is_empty() || editing_first || !self.chat_ready() {
             return false;
         }
-        let text = self.queue.remove(0);
+        let Queued { text, attachments } = self.queue.remove(0);
         if let Some((i, _)) = &mut self.editing {
             *i -= 1;
         }
-        self.act(Action::Say(text));
+        self.act(Action::Say { text, attachments });
         true
     }
 
     /// Sends what the captain said, or queues it: in queue mode while the chief of staff works,
     /// and in either mode behind messages already queued, so nothing goes out of order.
-    fn say(&mut self, text: String) {
+    fn say(&mut self, text: String, attachments: Vec<Attachment>) {
         let queue = self.working && *self.delivery.settings() == messages::Delivery::Queue;
         if queue || !self.queue.is_empty() {
-            self.queue.push(text);
+            self.queue.push(Queued { text, attachments });
             self.deliver();
         } else {
-            self.act(Action::Say(text));
+            self.act(Action::Say { text, attachments });
         }
     }
 
     /// Starts editing the queued message at `i`.
     pub fn edit_queued(&mut self, i: usize) {
-        if let Some(text) = self.queue.get(i) {
-            self.editing = Some((i, TextEdit::new(text)));
+        if let Some(queued) = self.queue.get(i) {
+            self.editing = Some((i, TextEdit::new(&queued.text)));
         }
     }
 
-    /// Keeps the edit; an emptied message leaves the queue.
+    /// Keeps the edit; a message emptied of words and attachments leaves the queue.
     pub fn save_queued(&mut self) {
         let Some((i, edit)) = self.editing.take() else {
             return;
         };
         let text = edit.text.trim().to_string();
-        if text.is_empty() {
+        if text.is_empty() && self.queue[i].attachments.is_empty() {
             self.queue.remove(i);
         } else {
-            self.queue[i] = text;
+            self.queue[i].text = text;
         }
         self.deliver();
     }
@@ -899,7 +960,10 @@ impl App {
         if i >= self.queue.len() {
             return;
         }
-        self.queue.remove(i);
+        for gone in self.queue.remove(i).attachments {
+            self.attachment_media.remove(&gone.path);
+            attach::discard(&gone);
+        }
         self.editing = match self.editing.take() {
             Some((at, _)) if at == i => None,
             Some((at, edit)) if at > i => Some((at - 1, edit)),
@@ -935,18 +999,163 @@ impl App {
 
     pub fn send(&mut self) {
         let text = self.draft.text.trim().to_string();
-        if text.is_empty() || !self.chat_ready() {
+        if (text.is_empty() && self.attached.is_empty())
+            || self.adding_attachments()
+            || !self.chat_ready()
+        {
             return;
         }
         // Cleared before anything else, so a second Enter in the same moment sends nothing.
         self.draft.clear();
+        self.attach_problem = None;
+        self.pending.clear();
         // An answer goes to the chief of staff in the captain's own words, naming the hold.
         // Firstmate records it and decides whether it closes a question or frees held work.
         let text = match self.answering.take() {
             Some(key) => format!("My answer to the captain hold {key}: {text}"),
             None => text,
         };
-        self.say(text);
+        let attachments = std::mem::take(&mut self.attached);
+        self.say(text, attachments);
+    }
+
+    /// Attaches files dropped on the chat or pasted from the clipboard, each copied into the
+    /// data directory on a background thread. A file that cannot be attached says why, and the
+    /// rest still attach.
+    pub fn attach_files(&mut self, files: &[PathBuf]) {
+        self.attach_problem = None;
+        let mut jobs = Vec::new();
+        for file in files {
+            match self.room().and_then(|()| attach::check(file)) {
+                Ok(name) => jobs.push((self.add_pending(name), attach::Origin::File(file.clone()))),
+                Err(why) => self.note_problem(why),
+            }
+        }
+        self.copy(jobs);
+    }
+
+    /// Attaches a pasted image, such as a screenshot, from its PNG bytes.
+    pub fn attach_png(&mut self, png: &[u8]) {
+        self.attach_problem = None;
+        match self
+            .room()
+            .and_then(|()| attach::within_cap(attach::PASTED_IMAGE, png.len() as u64))
+        {
+            Ok(()) => {
+                let id = self.add_pending(attach::PASTED_IMAGE.into());
+                self.copy(vec![(id, attach::Origin::Png(png.to_vec()))]);
+            }
+            Err(why) => self.note_problem(why),
+        }
+    }
+
+    /// Takes what the clipboard holds as attachments when it holds files (copied in Finder) or
+    /// an image without text (a screenshot); true when it did. Text, including the text a
+    /// spreadsheet copies beside a picture of its cells, pastes as text.
+    pub fn paste(&mut self, content: &ClipboardContent) -> bool {
+        if !content.files().is_empty() {
+            self.attach_files(content.files());
+            return true;
+        }
+        match content.image() {
+            Some(image) if content.text().is_empty() => {
+                self.attach_png(image.png());
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Removes an attachment from the draft and deletes its copy.
+    pub fn remove_attachment(&mut self, i: usize) {
+        if i < self.attached.len() {
+            let gone = self.attached.remove(i);
+            self.attachment_media.remove(&gone.path);
+            attach::discard(&gone);
+        }
+    }
+
+    /// Removes a chip whose copy is still being made, or failed. A copy that finishes after
+    /// this is deleted.
+    pub fn remove_pending(&mut self, id: u64) {
+        self.pending.retain(|p| p.id != id);
+    }
+
+    /// Whether any attachment of the draft is still being copied, so the message cannot send.
+    pub fn adding_attachments(&self) -> bool {
+        self.pending.iter().any(|p| p.failed.is_none())
+    }
+
+    fn room(&self) -> Result<(), String> {
+        let held = self.attached.len() + self.pending.iter().filter(|p| p.failed.is_none()).count();
+        if held >= attach::MAX_PER_MESSAGE {
+            return Err(format!(
+                "A message can carry up to {} attachments.",
+                attach::MAX_PER_MESSAGE
+            ));
+        }
+        Ok(())
+    }
+
+    fn add_pending(&mut self, name: String) -> u64 {
+        let id = self.next_pending;
+        self.next_pending += 1;
+        self.pending.push(attach::Pending {
+            id,
+            name,
+            failed: None,
+        });
+        id
+    }
+
+    /// Makes the copies of one drop or paste on a thread of their own, one after the other.
+    fn copy(&self, jobs: Vec<(u64, attach::Origin)>) {
+        if jobs.is_empty() {
+            return;
+        }
+        let (data, done, wake) = (
+            self.data.clone(),
+            self.copies_tx.clone(),
+            self.media_wake.clone(),
+        );
+        std::thread::spawn(move || {
+            for (id, origin) in jobs {
+                let copy = match origin {
+                    attach::Origin::File(source) => attach::file(&data, &source),
+                    attach::Origin::Png(png) => attach::png(&data, &png),
+                };
+                let _ = done.send((id, copy));
+                wake();
+            }
+        });
+    }
+
+    /// Takes a finished copy in place of its chip, or says on the chip why there is none.
+    fn take_copy(&mut self, id: u64, copy: Result<Attachment, String>) {
+        let Some(at) = self.pending.iter().position(|p| p.id == id) else {
+            if let Ok(removed) = copy {
+                attach::discard(&removed);
+            }
+            return;
+        };
+        match copy {
+            Ok(a) => {
+                self.pending.remove(at);
+                if let Some(handler) = tools::handler_for_file(&a.path) {
+                    let media = self.media_for(&handler);
+                    self.attachment_media.insert(a.path.clone(), media);
+                }
+                self.attached.push(a);
+            }
+            Err(why) => self.pending[at].failed = Some(why),
+        }
+    }
+
+    fn note_problem(&mut self, why: String) {
+        match &mut self.attach_problem {
+            Some(problems) => *problems = format!("{problems} {why}"),
+            None => self.attach_problem = Some(why),
+        }
     }
 
     /// Whether firstmate's records list no project, including in a home that does not exist yet.
@@ -964,13 +1173,13 @@ impl App {
         self.adding = true;
         self.answering = None;
         self.showing = Showing::Chat;
-        self.say(ADD_PROJECT.into());
+        self.say(ADD_PROJECT.into(), Vec::new());
     }
 
     /// Sends one of the add flow's quick replies, such as the captain's yes.
     pub fn reply(&mut self, words: &str) {
         if self.chat_ready() {
-            self.say(words.into());
+            self.say(words.into(), Vec::new());
         }
     }
 
@@ -1048,7 +1257,10 @@ impl App {
     /// Tells the chief of staff, in the chat, that the captain approves merging `url`.
     pub fn approve_merge(&mut self, task: &str, url: &str) {
         if self.chat_ready() {
-            self.say(format!("I approve merging {url} (task {task})."));
+            self.say(
+                format!("I approve merging {url} (task {task})."),
+                Vec::new(),
+            );
         }
     }
 
@@ -1634,6 +1846,48 @@ fn main() {
                     .entry("toolu_fake_Bash".into())
                     .or_default()
                     .all_lines = true;
+            }),
+            // Files attached to a message: pasted or dropped, in the draft as chips (a picture,
+            // a video's poster frame, a file's name and size, a file still being added or that failed to be), sent with their paths and the
+            // image as image content, refused over the size cap, and the chat under a drag.
+            ("attach-draft", |s| {
+                *s = attaching(&["chart.png", "clip.mp4", "notes.md"]);
+                s.draft.text = "Here are the chart, the clip and the notes.".into();
+            }),
+            ("attach-sent", |s| {
+                *s = fake_in(Mode::Run);
+                s.attach_files(&[fixture("chart.png").into(), fixture("notes.md").into()]);
+                settle_attachments(s);
+                say(s, "Here is the chart and the notes.");
+            }),
+            ("attach-too-large", |s| {
+                *s = attaching(&["chart.png"]);
+                let big = s.data.join("screen-recording.mov");
+                std::fs::File::create(&big)
+                    .and_then(|f| f.set_len(attach::MAX_BYTES * 4))
+                    .expect("a large file");
+                s.attach_files(&[big]);
+            }),
+            ("attach-adding", |s| {
+                *s = attaching(&["chart.png"]);
+                s.draft.text = "Here is the chart and the recording.".into();
+                for (name, failed) in [
+                    ("screen-recording.mov", None),
+                    (
+                        "locked.pdf",
+                        Some("\u{201c}locked.pdf\u{201d} could not be copied: Permission denied."),
+                    ),
+                ] {
+                    s.pending.push(attach::Pending {
+                        id: s.pending.len() as u64,
+                        name: name.into(),
+                        failed: failed.map(Into::into),
+                    });
+                }
+            }),
+            ("attach-drop", |s| {
+                *s = attaching(&["chart.png"]);
+                s.drop_over = true;
             }),
             ("tool-picture", |s| {
                 *s = shown(&fixture("chart.png"));
@@ -2399,7 +2653,8 @@ fn fixture(name: &str) -> String {
     std::fs::create_dir_all(dir).expect("fixture directory");
     let path = dir.join(name);
     // Tests run at once and may copy the same fixture; a rename never shows a half-written file.
-    let partial = dir.join(format!("{name}.{}.part", std::process::id()));
+    let thread = format!("{:?}", std::thread::current().id()).replace(['(', ')'], "");
+    let partial = dir.join(format!("{name}.{}.{thread}.part", std::process::id()));
     std::fs::copy(&source, &partial).expect("fixture copy");
     std::fs::rename(&partial, &path).expect("fixture rename");
     path.display().to_string()
@@ -2415,6 +2670,31 @@ fn shown(path: &str) -> App {
         }
     }
     app
+}
+
+/// The stub with each fixture attached to the draft, its thumbnail decoded.
+fn attaching(names: &[&str]) -> App {
+    let mut app = stub();
+    let files: Vec<PathBuf> = names.iter().map(|n| fixture(n).into()).collect();
+    app.attach_files(&files);
+    settle_attachments(&mut app);
+    app
+}
+
+/// Waits for every copy of the draft's attachments to finish, then for every attached image's
+/// thumbnail to decode.
+fn settle_attachments(app: &mut App) {
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while app.adding_attachments() {
+        assert!(Instant::now() < deadline, "attachments were not copied");
+        std::thread::sleep(Duration::from_millis(5));
+        app.drain();
+    }
+    for media in app.attachment_media.values() {
+        if let Some(Ok(image)) = &media.image {
+            let _ = image.wait();
+        }
+    }
 }
 
 /// The stub app after the turn a `scripts/fixtures` file describes: the captain's question, the
@@ -2666,6 +2946,11 @@ mod tests {
         std::fs::write(home.join("release"), "").expect("release file");
     }
 
+    /// The words of each queued message, oldest first.
+    fn queued_texts(app: &App) -> Vec<&str> {
+        app.queue.iter().map(|q| q.text.as_str()).collect()
+    }
+
     fn runtime() -> Runtime<App> {
         runtime_with(stub())
     }
@@ -2737,6 +3022,266 @@ mod tests {
         rt.state.draft.text = "   ".into();
         tap(&mut rt, "send");
         assert_eq!(rt.state.ws.chat.len(), before);
+    }
+
+    // Attachments: pasted or dropped on the chat, shown as chips, sent with the message.
+
+    fn chart_png() -> Vec<u8> {
+        std::fs::read(fixture("chart.png")).unwrap()
+    }
+
+    fn copied(rt: &mut Runtime<App>) {
+        rt.frame(1.0 / 60.0);
+        wait(rt, |s| !s.adding_attachments());
+    }
+
+    fn focus_the_field(rt: &mut Runtime<App>) {
+        tap(rt, "chat-input");
+    }
+
+    #[test]
+    fn pasting_a_screenshot_into_the_field_attaches_it() {
+        let mut rt = runtime();
+        focus_the_field(&mut rt);
+        let shot = rune::ClipboardImage::from_png(chart_png()).unwrap();
+        rt.paste_content(ClipboardContent::new("").with_image(shot));
+        rt.frame(1.0 / 60.0);
+        copied(&mut rt);
+        let attached = &rt.state.attached;
+        assert_eq!(attached.len(), 1);
+        assert_eq!(attached[0].name, attach::PASTED_IMAGE);
+        assert_eq!(attached[0].kind, attach::Kind::Image);
+        assert!(
+            attached[0]
+                .path
+                .starts_with(rt.state.data.join(attach::DIR))
+        );
+        assert_eq!(std::fs::read(&attached[0].path).unwrap(), chart_png());
+        assert!(rt.state.draft.text.is_empty());
+        assert!(rt.find("attachment-0").is_some());
+        assert!(rt.find("attachment-0-thumb").is_some());
+    }
+
+    #[test]
+    fn pasting_with_no_field_focused_still_attaches() {
+        let mut rt = runtime();
+        let shot = rune::ClipboardImage::from_png(chart_png()).unwrap();
+        rt.paste_content(ClipboardContent::new("").with_image(shot));
+        copied(&mut rt);
+        assert_eq!(rt.state.attached.len(), 1);
+    }
+
+    #[test]
+    fn files_copied_in_finder_attach_and_their_names_do_not_paste() {
+        let mut rt = runtime();
+        focus_the_field(&mut rt);
+        let files = [
+            PathBuf::from(fixture("clip.mp4")),
+            fixture("notes.md").into(),
+        ];
+        // Finder puts each file's name and an icon beside the file URLs.
+        let icon = rune::ClipboardImage::from_png(chart_png()).unwrap();
+        rt.paste_content(
+            ClipboardContent::new("clip.mp4\nnotes.md")
+                .with_files(files.clone())
+                .with_image(icon),
+        );
+        copied(&mut rt);
+        let kinds: Vec<_> = rt.state.attached.iter().map(|a| a.kind).collect();
+        assert_eq!(kinds, [attach::Kind::Video, attach::Kind::File]);
+        assert!(rt.state.draft.text.is_empty());
+    }
+
+    #[test]
+    fn text_copied_with_a_picture_of_it_pastes_as_text() {
+        let mut rt = runtime();
+        focus_the_field(&mut rt);
+        let cells = rune::ClipboardImage::from_png(chart_png()).unwrap();
+        rt.paste_content(ClipboardContent::new("A1 B1").with_image(cells));
+        rt.frame(1.0 / 60.0);
+        assert!(rt.state.attached.is_empty());
+        assert_eq!(rt.state.draft.text, "A1 B1");
+    }
+
+    #[test]
+    fn dropping_files_on_the_chat_attaches_them() {
+        let mut rt = runtime();
+        let at = rt.find("messages").unwrap();
+        rt.drop_files(vec![fixture("notes.md").into()], Some(at));
+        copied(&mut rt);
+        assert_eq!(rt.state.attached.len(), 1);
+        assert_eq!(rt.state.attached[0].name, "notes.md");
+        assert!(!rt.state.drop_over, "the highlight ends with the drop");
+    }
+
+    #[test]
+    fn removing_an_attachment_deletes_its_copy() {
+        let mut rt = runtime();
+        rt.state.attach_files(&[fixture("notes.md").into()]);
+        copied(&mut rt);
+        rt.invalidate();
+        let copy = rt.state.attached[0].path.clone();
+        tap(&mut rt, "attachment-0-remove");
+        assert!(rt.state.attached.is_empty());
+        assert!(!copy.exists());
+        assert!(rt.find("attachments").is_none());
+    }
+
+    #[test]
+    fn a_folder_or_a_file_over_the_cap_says_why_and_the_rest_attach() {
+        let mut rt = runtime();
+        let big = rt.state.data.join("huge.mov");
+        std::fs::File::create(&big)
+            .unwrap()
+            .set_len(attach::MAX_BYTES * 2)
+            .unwrap();
+        let folder = rt.state.data.join("photos");
+        std::fs::create_dir_all(&folder).unwrap();
+        rt.state
+            .attach_files(&[big, fixture("notes.md").into(), folder]);
+        copied(&mut rt);
+        rt.invalidate();
+        rt.frame(1.0 / 60.0);
+        assert_eq!(rt.state.attached.len(), 1);
+        let why = rt.state.attach_problem.clone().unwrap();
+        assert!(why.contains("\u{201c}huge.mov\u{201d} is 100 MB"), "{why}");
+        assert!(why.contains("\u{201c}photos\u{201d} is a folder"), "{why}");
+        assert!(rt.find("attach-problem").is_some());
+    }
+
+    #[test]
+    fn a_message_carries_at_most_the_cap_of_attachments() {
+        let mut rt = runtime();
+        let notes: Vec<PathBuf> = (0..attach::MAX_PER_MESSAGE + 1)
+            .map(|_| fixture("notes.md").into())
+            .collect();
+        rt.state.attach_files(&notes);
+        assert_eq!(
+            rt.state.pending.len(),
+            attach::MAX_PER_MESSAGE,
+            "the cap counts files still being added"
+        );
+        copied(&mut rt);
+        assert_eq!(rt.state.attached.len(), attach::MAX_PER_MESSAGE);
+        assert!(
+            rt.state
+                .attach_problem
+                .as_ref()
+                .unwrap()
+                .contains("up to 10")
+        );
+    }
+
+    #[test]
+    fn attachments_alone_send_and_stay_on_the_message() {
+        let mut rt = runtime();
+        rt.state.attach_files(&[fixture("chart.png").into()]);
+        copied(&mut rt);
+        let before = rt.state.ws.chat.len();
+        tap(&mut rt, "send");
+        let chat = &rt.state.ws.chat;
+        assert_eq!(chat.len(), before + 2);
+        assert_eq!(chat[before].attachments.len(), 1);
+        assert!(
+            chat[before].attachments[0].path.exists(),
+            "a sent copy is kept"
+        );
+        assert!(chat[before + 1].text.contains("with 1 attachment"));
+        assert!(rt.state.attached.is_empty());
+        assert!(rt.find(&format!("msg-{before}-attachments-0")).is_some());
+    }
+
+    #[test]
+    fn claude_code_gets_the_image_as_image_content_and_every_file_by_path() {
+        let mut rt = runtime_with(fake_in(Mode::Run));
+        rt.state
+            .attach_files(&[fixture("chart.png").into(), fixture("notes.md").into()]);
+        copied(&mut rt);
+        rt.state.draft.text = "Look at these".into();
+        tap(&mut rt, "send");
+        wait(&mut rt, replied);
+        let reply = &rt.state.ws.chat.last().unwrap().text;
+        assert_eq!(
+            reply,
+            "You said: Look at these [image blocks: 1, files listed: 2]"
+        );
+    }
+
+    #[test]
+    fn a_file_shows_as_adding_and_send_refuses_until_its_copy_finishes() {
+        let mut rt = runtime();
+        rt.state.attach_files(&[fixture("notes.md").into()]);
+        rt.invalidate();
+        rt.frame(1.0 / 60.0);
+        assert!(rt.state.attached.is_empty());
+        assert_eq!(rt.state.pending.len(), 1);
+        assert!(rt.find("adding-0-status").is_some());
+        let before = rt.state.ws.chat.len();
+        rt.state.send();
+        assert_eq!(rt.state.ws.chat.len(), before, "send waits for the copy");
+        copied(&mut rt);
+        assert!(rt.find("adding-0").is_none());
+        assert!(rt.find("attachment-0").is_some());
+        rt.state.send();
+        assert_eq!(rt.state.ws.chat[before].attachments.len(), 1);
+    }
+
+    #[test]
+    fn a_copy_that_fails_says_why_on_its_chip_and_can_be_removed() {
+        use std::os::unix::fs::PermissionsExt;
+        let mut rt = runtime();
+        let locked = rt.state.data.join("locked.pdf");
+        std::fs::write(&locked, b"secret").unwrap();
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+        rt.state.attach_files(std::slice::from_ref(&locked));
+        copied(&mut rt);
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o600)).unwrap();
+        assert!(rt.state.attached.is_empty());
+        let why = rt.state.pending[0].failed.clone().expect("a failed copy");
+        assert!(
+            why.contains("\u{201c}locked.pdf\u{201d} could not be copied"),
+            "{why}"
+        );
+        assert!(rt.state.attach_problem.is_none());
+        assert!(rt.find("adding-0-problem").is_some());
+        let before = rt.state.ws.chat.len();
+        rt.state.draft.text = "Here".into();
+        rt.state.send();
+        assert_eq!(
+            rt.state.ws.chat.len(),
+            before + 2,
+            "a failed chip does not hold Send"
+        );
+        assert!(rt.state.pending.is_empty());
+        rt.state.attach_files(&[locked]);
+        std::fs::set_permissions(
+            rt.state.data.join("locked.pdf"),
+            std::fs::Permissions::from_mode(0o000),
+        )
+        .unwrap();
+        copied(&mut rt);
+        tap(&mut rt, "adding-1-remove");
+        assert!(rt.state.pending.is_empty());
+    }
+
+    #[test]
+    fn removing_a_chip_still_being_added_deletes_its_copy_when_it_lands() {
+        let mut rt = runtime();
+        rt.state.attach_files(&[fixture("notes.md").into()]);
+        let id = rt.state.pending[0].id;
+        rt.state.remove_pending(id);
+        assert!(!rt.state.adding_attachments());
+        let folder = rt.state.data.join(attach::DIR);
+        let deadline = Instant::now() + Duration::from_secs(20);
+        loop {
+            rt.state.drain();
+            let empty = std::fs::read_dir(&folder).map_or(true, |d| d.count() == 0);
+            if empty && rt.state.attached.is_empty() {
+                break;
+            }
+            assert!(Instant::now() < deadline, "the copy was kept");
+            std::thread::sleep(Duration::from_millis(5));
+        }
     }
 
     #[test]
@@ -5613,6 +6158,34 @@ mod tests {
     }
 
     #[test]
+    fn attachments_come_back_with_the_kept_conversation_and_go_when_it_is_cleared() {
+        let data = scratch("unused");
+        let mut first = App::new(Box::new(Stub::default()), installed_firstmate(), &data);
+        first.attach_files(&[fixture("chart.png").into()]);
+        settle_attachments(&mut first);
+        first.draft.text = "The chart.".into();
+        first.send();
+        let said = first.ws.chat[first.ws.chat.len() - 2].clone();
+        assert_eq!(said.attachments.len(), 1);
+        let copy = said.attachments[0].path.clone();
+        drop(first);
+
+        let mut rt = runtime_with(App::new(
+            Box::new(Stub::default()),
+            installed_firstmate(),
+            &data,
+        ));
+        assert_eq!(rt.state.ws.chat[0], said);
+        assert!(rt.state.attachment_media.contains_key(&copy));
+        assert!(rt.find("msg-0-attachments-0-thumb").is_some());
+        rt.state.clear_history();
+        assert!(
+            !copy.exists(),
+            "clearing the history deletes its attachments"
+        );
+    }
+
+    #[test]
     fn a_messages_link_button_copies_its_link() {
         let mut rt = runtime();
         let board = rune::clipboard::memory();
@@ -6053,7 +6626,51 @@ mod tests {
         rt.state.draft.text = "Then tag it.".into();
         enter(&mut rt);
         enter(&mut rt);
-        assert_eq!(rt.state.queue, ["Then tag it."]);
+        assert_eq!(queued_texts(&rt.state), ["Then tag it."]);
+    }
+
+    #[test]
+    fn a_queued_message_keeps_its_attachments_until_it_goes_out() {
+        let (mut app, finish) = working_stub();
+        app.delivery.change(|d| *d = messages::Delivery::Queue);
+        app.draft.text = "Start.".into();
+        app.send();
+        app.attach_files(&[fixture("notes.md").into()]);
+        settle_attachments(&mut app);
+        app.send();
+        assert_eq!(app.queue.len(), 1);
+        assert_eq!(app.queue[0].text, "");
+        assert_eq!(app.queue[0].attachments[0].name, "notes.md");
+        let mut rt = runtime_with(app);
+        assert!(texts_under(&rt, "queued-0-text")[0].ends_with("\u{b7} 1 attachment"));
+        finish.finish();
+        rt.frame(1.0 / 60.0);
+        assert!(rt.state.queue.is_empty());
+        let sent = rt
+            .state
+            .ws
+            .chat
+            .iter()
+            .rfind(|m| m.author == Author::Captain)
+            .unwrap();
+        assert_eq!(sent.attachments.len(), 1);
+    }
+
+    #[test]
+    fn deleting_a_queued_message_deletes_its_attachment_copies() {
+        let (mut app, _finish) = working_stub();
+        app.delivery.change(|d| *d = messages::Delivery::Queue);
+        app.draft.text = "Start.".into();
+        app.send();
+        app.attach_files(&[fixture("notes.md").into()]);
+        settle_attachments(&mut app);
+        app.send();
+        let copy = app.queue[0].attachments[0].path.clone();
+        assert!(copy.exists());
+        app.delete_queued(0);
+        assert!(app.queue.is_empty());
+        assert!(!copy.exists());
+        assert!(!app.attachment_media.contains_key(&copy));
     }
 
     #[test]
@@ -6061,7 +6678,7 @@ mod tests {
         let (app, finish) = queued_while_working();
         let mut rt = runtime_with(app);
         assert_eq!(
-            rt.state.queue,
+            queued_texts(&rt.state),
             [
                 "Then open the release PR.",
                 "Tag it once CI is green.",
@@ -6077,7 +6694,7 @@ mod tests {
         tap(&mut rt, "queued-1-edit");
         rt.state.editing.as_mut().unwrap().1.text = "Tag it v0.2.0 once CI is green.".into();
         tap(&mut rt, "queued-1-save");
-        assert_eq!(rt.state.queue[1], "Tag it v0.2.0 once CI is green.");
+        assert_eq!(rt.state.queue[1].text, "Tag it v0.2.0 once CI is green.");
         // A long message with a link takes the same path.
         let long = format!(
             "See https://example.com/notes?x=1 and {}",
@@ -6154,7 +6771,7 @@ mod tests {
         tap(&mut rt, "send");
         rt.state.draft.text = "Waits.".into();
         tap(&mut rt, "send");
-        assert_eq!(rt.state.queue, ["Waits."]);
+        assert_eq!(queued_texts(&rt.state), ["Waits."]);
         drop(rt);
         // After a restart the setting holds; queued messages lived in memory only.
         let app = App::new(Box::new(Stub::default()), installed_firstmate(), &dir);
@@ -6270,7 +6887,7 @@ mod tests {
         tap(&mut rt, "send");
         rt.state.draft.text = "second".into();
         tap(&mut rt, "send");
-        assert_eq!(rt.state.queue, ["second"]);
+        assert_eq!(queued_texts(&rt.state), ["second"]);
         release_slow_turn(&home);
         wait(&mut rt, |s| {
             !s.working
