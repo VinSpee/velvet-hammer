@@ -272,12 +272,14 @@ impl App {
             Event::Activity(entry) => self.activity.record(entry),
             Event::Notice(text) => self.ws.chat.push(Message::new(Author::App, text)),
             Event::AddMate(scope) => {
-                self.ws.chat.push(Message::new(
-                    Author::App,
+                let words = if self.add_mate(Some(scope)) {
                     "Your chief of staff opened Add a second mate. Answer its questions there; \
-                     nothing is created until you say yes.",
-                ));
-                self.add_mate(Some(scope));
+                     nothing is created until you say yes."
+                } else {
+                    "Your chief of staff tried to open Add a second mate, but firstmate is busy. \
+                     Try again when it finishes."
+                };
+                self.ws.chat.push(Message::new(Author::App, words));
             }
             // A view tool use arrives first as it starts streaming, then whole.
             Event::Tool(tool) => {
@@ -3662,6 +3664,46 @@ mod tests {
         );
         assert!(notices(&rt)[0].contains("opened Add a second mate"));
         assert!(calls(&lab, "fm-home-seed.sh").is_empty());
+    }
+
+    #[test]
+    fn the_chief_of_staff_keeps_answers_already_given_and_only_fills_an_empty_scope() {
+        let lab = Lab::new();
+        let mut app = mates_app(&lab);
+        app.add_mate(None);
+        assert!(app.add_mate(Some("billing".into())));
+        assert_eq!(app.mates.adding.charter.text, "billing");
+        assert!(app.add_mate(Some("something else".into())));
+        assert_eq!(app.mates.adding.charter.text, "billing");
+    }
+
+    #[test]
+    fn the_chief_of_staff_says_so_when_firstmate_is_busy_and_nothing_opens() {
+        let lab = Lab::new();
+        let mut app = mates_app(&lab);
+        app.confirm_mate(secondmates::Op::Start("docs".into()));
+        app.confirmed_mate();
+        assert!(app.mates.running().is_some());
+        app.take(Event::AddMate("billing".into()));
+        assert_ne!(app.showing, Showing::AddMate);
+        let note = &app.ws.chat.last().unwrap().text;
+        assert!(note.contains("busy"), "{note}");
+        assert!(!note.contains("opened"), "{note}");
+        app.settle_mates();
+    }
+
+    #[test]
+    fn a_message_firstmate_would_read_as_an_option_is_kept_and_not_sent() {
+        let lab = Lab::new();
+        let mut app = mates_app(&lab);
+        app.open_mate("docs");
+        for text in ["--key abc hello", "--fire-and-forget now", "--resolve-key=k go"] {
+            app.mates.draft("docs").text = text.into();
+            app.send_to_mate("docs");
+            assert_eq!(app.mates.draft("docs").text, text);
+            assert!(app.mates.outcomes["docs"].words.contains("option"));
+        }
+        assert!(calls(&lab, "fm-send.sh").is_empty());
     }
 
     #[test]

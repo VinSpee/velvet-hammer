@@ -85,7 +85,7 @@ pub(super) fn mate_list(s: &App, t: Theme, dark: bool) -> El {
     if s.firstmate.installed() && s.chief.workplace().is_some() {
         list = list.child(
             row().child(small_button("add-mate", "Add second mate", t, |s| {
-                s.add_mate(None)
+                s.add_mate(None);
             })),
         );
     }

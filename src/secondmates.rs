@@ -623,6 +623,14 @@ pub struct Outcome {
     pub corr: Option<String>,
 }
 
+/// Whether `bin/fm-send.sh` would take the first word of a message as one of its options.
+fn reads_as_option(text: &str) -> bool {
+    let first = text.split_whitespace().next().unwrap_or("");
+    matches!(first, "--key" | "--resolve-key" | "--fire-and-forget")
+        || first.starts_with("--resolve-key=")
+        || first.starts_with("--fire-and-forget=")
+}
+
 /// Runs `op` with the scripts of the firstmate clone `clone` against home `home`. It blocks:
 /// call it off the UI thread.
 pub fn perform(clone: &Path, home: &Path, op: Op) -> Outcome {
@@ -1138,18 +1146,21 @@ impl App {
         self.showing = Showing::Mate(id.to_string());
     }
 
-    /// Opens the guided flow for adding a second mate, with the scope filled in when the chief
-    /// of staff opened it from the chat.
-    pub fn add_mate(&mut self, scope: Option<String>) {
+    /// Opens the guided flow for adding a second mate, keeping any answers already given. The
+    /// scope the chief of staff offers from the chat only fills an empty one. False when an
+    /// action is running and nothing opened.
+    pub fn add_mate(&mut self, scope: Option<String>) -> bool {
         if self.mates.running().is_some() {
-            return;
+            return false;
         }
-        let mut flow = AddMate::default();
-        if let Some(scope) = scope {
+        let flow = &mut self.mates.adding;
+        if let Some(scope) = scope
+            && flow.charter.text.trim().is_empty()
+        {
             flow.charter.text = scope.trim().to_string();
         }
-        self.mates.adding = flow;
         self.showing = Showing::AddMate;
+        true
     }
 
     /// Takes the answer to the current question and moves to the next one.
@@ -1250,6 +1261,24 @@ impl App {
             Some((mate, key)) if mate == id => Some(key.clone()),
             _ => None,
         };
+        if reads_as_option(&words) {
+            self.mates.outcomes.insert(
+                id.to_string(),
+                Outcome {
+                    op: Op::Send {
+                        id: id.to_string(),
+                        text: words,
+                        hold: None,
+                    },
+                    ok: false,
+                    words: "Firstmate would read the start of this message as an option. Begin \
+                            it with other words."
+                        .into(),
+                    corr: None,
+                },
+            );
+            return;
+        }
         let text = match &hold {
             Some(key) => format!("The captain's answer to your captain hold {key}: {words}"),
             None => words,
