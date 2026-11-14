@@ -1470,7 +1470,10 @@ mod tests {
         );
         let home = firstmate.home_dir();
         std::fs::create_dir_all(&home).unwrap();
-        let app = App::new(Box::new(Stub::default()), firstmate, &root.join("data"));
+        let claude = Claude::new(FAKE_CLAUDE)
+            .env("FAKE_CLAUDE_HOME", scratch("signed-in").to_string_lossy())
+            .in_firstmate(firstmate.clone_dir(), home.clone());
+        let app = App::new(Box::new(claude), firstmate, &root.join("data"));
         assert_eq!(std::fs::read_dir(&home).unwrap().count(), 0);
         assert_eq!(app.nicknames.settings().presets.len(), 1);
     }
