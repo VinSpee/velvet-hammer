@@ -52,8 +52,8 @@
 # a firstmate Stop hook wakes an idle session.
 #
 # With --replay-user-messages, each message is echoed back as the turn that takes it in starts, as
-# the real `claude` does. A message "slow: TEXT" takes a second before its reply, so a message sent
-# meanwhile waits for the next turn, as the real `claude` holds one when the turn has no step left.
+# the real `claude` does. A message "slow: TEXT" holds its turn open until the file "release" appears in
+# FAKE_CLAUDE_HOME (or 30 seconds pass), so a message sent meanwhile waits for the next turn, as the real `claude` holds one when the turn has no step left.
 set -eu
 home=${FAKE_CLAUDE_HOME:?FAKE_CLAUDE_HOME must name a scratch directory}
 state=$(cat "$home/state" 2>/dev/null || echo signed-out)
@@ -168,7 +168,10 @@ auth)
       ;;
     *envcheck*) text="api-key:${ANTHROPIC_API_KEY:+reached} token:${ANTHROPIC_AUTH_TOKEN:+reached}" ;;
     *whereami*) text="cwd=$(pwd -P) FM_HOME=${FM_HOME:-unset}" ;;
-    slow:*) sleep 1 ;;
+    slow:*)
+      i=0
+      while [ ! -e "$home/release" ] && [ $i -lt 300 ]; do sleep 0.1; i=$((i + 1)); done
+      ;;
     stuck:*)
       # A turn that never finishes, and ignores its hooks and input, until it is signalled.
       i=0

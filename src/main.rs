@@ -1204,6 +1204,11 @@ fn fake_in_firstmate(lab: &Lab, install: bool) -> App {
     app
 }
 
+/// Lets the fake `claude` finish the turn a "slow:" message holds open.
+fn release_slow_turn(home: &std::path::Path) {
+    std::fs::write(home.join("release"), "").expect("release file");
+}
+
 fn settled(s: &App) -> bool {
     s.status != Status::Checking
 }
@@ -6001,7 +6006,8 @@ mod tests {
 
     #[test]
     fn a_message_sent_mid_turn_reaches_claude_code_and_is_answered_after_the_turn() {
-        let mut rt = runtime_with(fake("signed-in", &[]));
+        let home = scratch("signed-in");
+        let mut rt = runtime_with(on_fake(FAKE_CLAUDE, &home, &[]));
         wait(&mut rt, settled);
         rt.state.draft.text = "slow: first".into();
         tap(&mut rt, "send");
@@ -6015,6 +6021,7 @@ mod tests {
                 ("second".to_string(), true)
             ]
         );
+        release_slow_turn(&home);
         wait(&mut rt, |s| {
             !s.working
                 && s.ws
@@ -6066,7 +6073,8 @@ mod tests {
 
     #[test]
     fn in_queue_mode_a_message_waits_for_claude_codes_turn_to_end() {
-        let mut rt = runtime_with(fake("signed-in", &[]));
+        let home = scratch("signed-in");
+        let mut rt = runtime_with(on_fake(FAKE_CLAUDE, &home, &[]));
         rt.state.delivery.change(|d| *d = messages::Delivery::Queue);
         wait(&mut rt, settled);
         rt.state.draft.text = "slow: first".into();
@@ -6074,6 +6082,7 @@ mod tests {
         rt.state.draft.text = "second".into();
         tap(&mut rt, "send");
         assert_eq!(rt.state.queue, ["second"]);
+        release_slow_turn(&home);
         wait(&mut rt, |s| {
             !s.working
                 && s.ws
