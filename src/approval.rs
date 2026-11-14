@@ -20,15 +20,15 @@
 //! the API-billing variables from every `claude` it starts, and it never pushes, publishes or
 //! merges anything itself.
 
-use std::fs::{self, File, OpenOptions};
-use std::io::{self, Write};
+use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use rune::TextEdit;
 use serde_json::{Value, json};
 
-use crate::store::{self, Saved, Shared, suffixed};
+use crate::store::{self, Saved, Shared, create_private_dir, make_private, open_private, suffixed};
 
 /// The settings file in the data directory.
 pub const SETTINGS_FILE: &str = "tool-approval.json";
@@ -330,38 +330,6 @@ impl Saved for Settings {
         }
         Ok(Settings { mode, rules })
     }
-}
-
-/// Creates the directory, and any missing parents, readable by its owner only.
-fn create_private_dir(dir: &Path) -> io::Result<()> {
-    let mut builder = fs::DirBuilder::new();
-    builder.recursive(true);
-    #[cfg(unix)]
-    std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o700);
-    builder.create(dir)
-}
-
-/// Opens the log for appending, creating it with owner-only permissions and tightening a log an
-/// earlier version made.
-fn open_private(path: &Path) -> io::Result<File> {
-    let mut options = OpenOptions::new();
-    options.create(true).append(true);
-    #[cfg(unix)]
-    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
-    let file = options.open(path)?;
-    make_private(path)?;
-    Ok(file)
-}
-
-#[cfg(unix)]
-fn make_private(path: &Path) -> io::Result<()> {
-    use std::os::unix::fs::PermissionsExt;
-    fs::set_permissions(path, fs::Permissions::from_mode(0o600))
-}
-
-#[cfg(not(unix))]
-fn make_private(_: &Path) -> io::Result<()> {
-    Ok(())
 }
 
 /// One tool use and what was decided.

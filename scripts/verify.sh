@@ -33,7 +33,14 @@ for scene in chat replied empty peek signed-out signing-in signed-in expired cli
   formatted formatted-all formatted-streaming tool-image tool-image-broken tool-video tool-generic tool-picture \
   view-static view-streaming view-state view-action view-unknown view-too-large \
   choice-ask choice-answered choice-multiple choice-enforced \
-  visuals-settings visuals-enforced visuals-capped rules-settings rules-merge-ask rules-project-ask; do
+  visuals-settings visuals-enforced visuals-capped rules-settings rules-merge-ask rules-project-ask \
+  find find-stepped find-none history link-copied link-opened link-context link-missing \
+  settings settings-clear menu-windows menu-linux \
+  mates-none mates-listed mate-idle mate-working mate-stopped mate-mismatch mate-peek \
+  add-mate-scope add-mate-projects add-mate-name add-mate-runtime add-mate-confirm add-mate-created add-mate-refused \
+  mate-retire-confirm mate-retire-refused mate-message mate-replied mate-escalation mate-escalation-answered \
+  mate-routed mate-from-chat \
+  workers-fresh workers-settings workers-claude-refused workers-crew; do
   headless --scene "$scene" --snap "$out/$scene.png"
   headless --scene "$scene" --tree "$out/$scene.json"
 done
@@ -43,6 +50,29 @@ done
 headless --scene chat --script "$walk" --at mark:sent --tree "$out/walk-sent.json"
 headless --scene chat --script "$walk" --at mark:end --tree "$out/walk-end.json"
 headless --scene chat --script "$walk" --at mark:end --snap "$out/walk-end.png"
+
+# Find through the keyboard on a long chat: Cmd+F (Ctrl+F off macOS), typing, Enter and Cmd+G,
+# then Escape back to the message field.
+find=$root/scripts/find.json
+for mark in found stepped closed; do
+  headless --scene long-chat --script "$find" --at "mark:$mark" --tree "$out/find-keys-$mark.json"
+done
+headless --scene long-chat --script "$find" --at mark:stepped --snap "$out/find-keys.png"
+
+# A message link the system opened with the app (macOS and Windows deliver these to
+# App::on_open_url), then the highlight fading.
+links=$root/scripts/open-link.json
+for mark in opened faded; do
+  headless --scene long-chat --script "$links" --at "mark:$mark" --tree "$out/open-link-$mark.json"
+done
+headless --scene long-chat --script "$links" --at mark:opened --snap "$out/open-link.png"
+
+# The menus: Settings and Find picked from the menu bar (macOS's native items, which headless
+# runs keep on every platform), then Settings again with Cmd+, (Ctrl+, off macOS).
+menus=$root/scripts/menus.json
+for mark in settings find shortcut; do
+  headless --scene chat --script "$menus" --at "mark:$mark" --tree "$out/menus-$mark.json"
+done
 
 failures=0
 check() { # check FILE yes|no PATTERN
@@ -127,8 +157,8 @@ check approved.json yes '"key": "needs-input-empty"'
 # Tool approval: the settings page with the recommended mode, three rules and an example; an ask
 # rule bringing up the full-input question while running without asking; the activity log of
 # the fake's real tool uses; and a settings file the app could not read.
-check chat.json yes '"key": "approvals"'
-check chat.json yes '"text": "Run without asking"'
+check settings.json yes '"key": "approvals"'
+check settings.json yes '"text": "Run without asking"'
 check approval-settings.json yes '"key": "approvals-page"'
 check approval-settings.json yes '"text": "● Run without asking (Recommended)"'
 check approval-settings.json yes 'will edit files, run commands and use tools without stopping for you, and every tool use is still logged'
@@ -153,13 +183,12 @@ check approval-activity.json no  '"key": "activity-empty"'
 check approval-corrupt.json yes '"key": "approvals-problem"'
 check approval-corrupt.json yes 'so every tool use asks you'
 check approval-corrupt.json yes '"text": "● Ask every time"'
-# The managed firstmate clone: a card under the agents, and its page in each state.
-check chat.json yes '"key": "firstmate"'
-check chat.json yes '"text": "up to date"'
+# The managed firstmate clone: a card in Settings, and its page in each state.
+check settings.json yes '"key": "firstmate"'
+check settings.json yes '"text": "up to date"'
 check chat.json no  '"key": "firstmate-page"'
 check firstmate-missing.json yes '"text": "Firstmate is not installed"'
 check firstmate-missing.json yes '"key": "firstmate-install"'
-check firstmate-missing.json yes '"text": "not installed"'
 check firstmate-missing.json no  '"key": "firstmate-check"'
 check firstmate-missing.json no  '"key": "chat"'
 check firstmate-installing.json yes '"text": "Installing firstmate"'
@@ -179,7 +208,6 @@ check firstmate-modified.json no  '"key": "firstmate-update"'
 check firstmate-blocked.json yes '"text": "The firstmate update is blocked"'
 check firstmate-blocked.json yes '"key": "firstmate-conflicts"'
 check firstmate-blocked.json yes '"text": "AGENTS.md"'
-check firstmate-blocked.json yes '"text": "update blocked"'
 check firstmate-blocked.json no  '"key": "firstmate-update"'
 # The chat running as firstmate: in the managed clone, with its own operational home.
 check firstmate-session.json yes '"key": "chat-input"'
@@ -314,8 +342,8 @@ check choice-enforced.json yes 'with the option'
 check choice-enforced.json yes 'yolo-off'
 # Visual replies: the settings page, a list sent back once and shown as a view, and a reply that
 # ignored the feedback, sent back only once.
-check chat.json yes '"key": "visuals"'
-check chat.json yes '"text": "Enforce"'
+check settings.json yes '"key": "visuals"'
+check settings.json yes '"text": "Enforce"'
 check visuals-settings.json yes '"key": "visuals-page"'
 check visuals-settings.json yes '"text": "● Enforce (Recommended)"'
 check visuals-settings.json yes '"key": "visual-mode-nudge"'
@@ -332,10 +360,35 @@ check visuals-capped.json yes 'the reply lists 3 items.'
 check visuals-capped.json yes '"text": "Left as text."'
 check visuals-capped.json no  'looped'
 check visuals-capped.json no  '"text": "Chief of staff'"'"'s view"'
+# Settings: every section moved off the main window, the history controls, the confirmation
+# before clearing, and the in-window menus.
+check settings.json yes '"key": "settings-page"'
+check settings.json yes '"key": "approvals"'
+check settings.json yes '"key": "visuals"'
+check settings.json yes '"key": "rules"'
+check settings.json yes '"key": "firstmate"'
+check settings.json yes '"key": "history-section"'
+check settings.json yes '"text": "● Keep the conversation (Recommended)"'
+check settings.json yes '"key": "history-clear"'
+check settings.json no  '"key": "history-clear-confirm"'
+check settings-clear.json yes '"key": "history-clear-confirm"'
+check settings-clear.json yes '"key": "history-clear-cancel"'
+check chat.json no  '"key": "approvals"'
+check chat.json no  '"key": "history-section"'
+check menu-windows.json yes '"key": "menu-bar"'
+check menu-windows.json yes '"key": "menu-item-settings"'
+check menu-windows.json yes '"text": "Ctrl+,"'
+check menu-windows.json yes '"text": "Settings"'
+check menu-linux.json yes '"text": "Preferences"'
+check menu-linux.json yes '"key": "menu-item-find"'
+check menus-settings.json yes '"key": "settings-page"'
+check menus-find.json yes '"key": "find-bar"'
+check menus-find.json yes '"text": "1 of 1"'
+check menus-shortcut.json yes '"key": "settings-page"'
 # Firstmate's rules: the page with what two rules did, a merge question that names the pull
 # request, and a write into a project waiting for the captain.
-check chat.json yes '"key": "rules"'
-check chat.json yes '"text": "7 of 7 on"'
+check settings.json yes '"key": "rules"'
+check settings.json yes '"text": "8 of 8 on"'
 check rules-settings.json yes '"key": "rules-page"'
 check rules-settings.json yes '"key": "guard-merge-through-script"'
 check rules-settings.json yes '"key": "guard-publish-asks-captain-toggle"'
@@ -348,6 +401,135 @@ check rules-merge-ask.json yes 'Firstmate'"'"'s hard rule 2: never merge a pull 
 check rules-merge-ask.json yes '"key": "answer-1-0"'
 check rules-project-ask.json yes 'Let the chief of staff edit /tmp/velvet-hammer/rules-project-ask/data/home/projects/site/README.md?'
 check rules-project-ask.json yes '"key": "answer-1-1"'
+# Workers on other providers: nothing set up, pi installed from a stand-in release with
+# firstmate pointed at it, a Claude model refused for pi, and what each worker runs on.
+check settings.json yes '"key": "workers"'
+check settings.json yes '"text": "1 nickname · pi not installed"'
+check workers-fresh.json yes '"key": "workers-page"'
+check workers-fresh.json yes '"text": "pi 1.5.2 is not installed."'
+check workers-fresh.json yes '"key": "workers-install"'
+check workers-fresh.json yes '"text": "No opencode Go key is in the keychain yet."'
+check workers-fresh.json yes '"key": "workers-connect"'
+check workers-fresh.json yes '"key": "nickname-0"'
+check workers-fresh.json yes 'pi · opencode-go/deepseek-v4.1-flash'
+check workers-settings.json yes 'It lists 6 models for the keys it has.'
+check workers-settings.json yes '"text": "Your opencode Go key is in the keychain."'
+check workers-settings.json yes 'may spend only opencode Go.'
+check workers-settings.json no  '"key": "workers-connect"'
+check workers-settings.json yes '"key": "nickname-1"'
+check workers-settings.json yes 'claude · opus · effort high'
+check workers-claude-refused.json yes '"key": "nickname-problem"'
+check workers-claude-refused.json yes 'never through pi. Choose Claude Code for a Claude model.'
+check workers-claude-refused.json no  '"key": "nickname-2"'
+check workers-crew.json yes '"key": "crew-lab-verify-runs"'
+check workers-crew.json yes '"text": "pi · opencode-go/deepseek-v4.1-flash"'
+check workers-crew.json yes '"text": "claude · claude-sonnet-5-5"'
+check rules-settings.json yes '"key": "guard-claude-on-subscription"'
+# Find in the conversation: the count and the highlighted matches, the current one after
+# stepping, no matches, and the history kept from an earlier session above its divider.
+check find.json yes '"key": "find-bar"'
+check find.json yes '"text": "1 of 4"'
+check find.json yes '"key": "find-0"'
+check find.json yes '"key": "find-3"'
+check find-stepped.json yes '"text": "3 of 4"'
+check find-none.json yes '"text": "No matches"'
+check find-none.json no  '"key": "find-0"'
+check history.json yes '"key": "earlier-divider"'
+check history.json yes '"text": "Remember the zeppelin plan for the launch."'
+check history.json yes '"text": "1 of 2"'
+check chat.json no  '"key": "find-bar"'
+check chat.json no  '"key": "earlier-divider"'
+check find-keys-found.json yes '"key": "find-bar"'
+check find-keys-found.json yes '"text": "release"'
+check find-keys-found.json yes '"text": "1 of 4"'
+check find-keys-stepped.json yes '"text": "3 of 4"'
+check find-keys-closed.json no  '"key": "find-bar"'
+check find-keys-closed.json yes '"text": "hi"'
+# Message links: the copy button, a link opened and highlighted, a link in the captain's message
+# drawn as a chip and quoted to the chief of staff, and a link to a missing message.
+check link-copied.json yes '"key": "msg-1-link"'
+check link-copied.json yes '"text": "Link copied"'
+check chat.json yes '"text": "Copy link"'
+check link-opened.json yes '"text": "Reply 5: nothing new."'
+check link-context.json yes 'do what this answer says: ↪ Chief of staff: You said: Plan: merge the docs PR'
+check link-context.json yes '[Linked messages, quoted by Velvet Hammer]'
+check link-context.json yes ', written by you, the chief of staff:'
+check link-missing.json yes 'what did ⚠ Message not found say?'
+check link-missing.json yes ': message not found. No message in this chat has this link.'
+check open-link-opened.json yes '"text": "Reply 5: nothing new."'
+check open-link-faded.json yes '"text": "Reply 5: nothing new."'
+# Second mates: none yet, five listed in each state, each one's page, a peek at its terminal,
+# the guided add at each step with its outcome and a refusal, a refused retirement, a message
+# and its reply, an escalation answered, work the chief of staff routed, and the add opened from
+# the chat.
+check mates-none.json yes '"key": "mates-none"'
+check mates-none.json yes '"key": "add-mate"'
+check mates-listed.json yes '"key": "mate-docs"'
+check mates-listed.json yes '"text": "running · idle"'
+check mates-listed.json yes '"text": "running · working"'
+check mates-listed.json yes '"text": "stopped · idle"'
+check mates-listed.json yes '"text": "running · waiting on you"'
+check mates-listed.json yes '"key": "mate-web-mismatch"'
+check mates-listed.json no  '"key": "mate-docs-mismatch"'
+check mates-listed.json yes '"key": "hold-support-refund-window"'
+check mates-listed.json yes '"key": "answer-support-refund-window"'
+check mate-idle.json yes '"key": "mate-page"'
+check mate-idle.json yes 'Scope: documentation site work: pages, examples and the docs build'
+check mate-idle.json yes '"key": "mate-interrupt"'
+check mate-idle.json yes '"key": "mate-relaunch"'
+check mate-idle.json yes '"key": "mate-retire"'
+check mate-idle.json yes '"key": "mate-children-none"'
+check mate-idle.json yes 'The docs build passes on main; the last run took 41 seconds.'
+check mate-idle.json yes '"key": "mate-edit-note"'
+check mate-working.json yes '"key": "mate-child-invoice-retries"'
+check mate-working.json yes '"text": "working · running the retry tests"'
+check mate-working.json yes '"key": "mate-child-billing-dashboard"'
+check mate-stopped.json yes '"text": "Session: stopped · idle"'
+check mate-stopped.json yes '"key": "mate-start"'
+check mate-stopped.json no  '"key": "mate-interrupt"'
+check mate-mismatch.json yes '"key": "mate-mismatch"'
+check mate-mismatch.json yes 'invalid home: not a seeded secondmate home'
+check mate-peek.json yes '"text": "Peeking at second mate docs"'
+check mate-peek.json yes 'no routed work; waiting quietly'
+check mate-peek.json yes '"text": "Back to its page"'
+check add-mate-scope.json yes '"key": "add-mate-scope"'
+check add-mate-scope.json yes '"text": "Step 1 of 4"'
+check add-mate-projects.json yes '"key": "add-mate-project-site"'
+check add-mate-projects.json yes 'local-only projects stay with the main firstmate'
+check add-mate-projects.json yes '"key": "add-mate-no-projects"'
+check add-mate-name.json yes '"key": "add-mate-name"'
+check add-mate-name.json yes '/data/secondmates/site.'
+check add-mate-runtime.json yes '"key": "add-mate-runtime-0"'
+check add-mate-runtime.json yes "codex (firstmate's default for second mates)"
+check add-mate-runtime.json yes '"key": "add-mate-runtime-1"'
+check add-mate-confirm.json yes '"key": "add-mate-yes"'
+check add-mate-confirm.json yes '"text": "Yes, create payments"'
+check add-mate-confirm.json yes "1. Run firstmate's bin/fm-home-seed.sh payments"
+check add-mate-confirm.json yes 'bin/fm-spawn.sh payments --secondmate --harness claude'
+check add-mate-confirm.json yes 'Nothing remote is created, pushed or published'
+check add-mate-created.json yes '"key": "mate-payments"'
+check add-mate-created.json yes 'Firstmate created payments with its home at'
+check add-mate-created.json no  '"key": "mate-mismatch"'
+check add-mate-refused.json yes '"key": "add-mate-problem"'
+check add-mate-refused.json yes 'Firstmate refused to create payments'
+check add-mate-refused.json yes 'is not initialized for no-mistakes; refusing to mutate preexisting clone'
+check mate-retire-confirm.json yes '"key": "mate-confirm"'
+check mate-retire-confirm.json yes '"text": "Retire billing?"'
+check mate-retire-confirm.json yes 'Velvet Hammer never forces a retirement'
+check mate-retire-refused.json yes 'Firstmate refused to retire billing, and nothing was changed.'
+check mate-retire-refused.json yes 'REFUSED: secondmate billing still has in-flight work'
+check mate-retire-refused.json no  'WARNING: watcher'
+check mate-message.json yes '"text": "Is the search page live yet?"'
+check mate-message.json yes "Delivered to docs's inbox."
+check mate-replied.json yes 'waits for its pull request to merge.'
+check mate-replied.json no  '**built**'
+check mate-escalation.json yes '"key": "mate-hold-refund-window"'
+check mate-escalation.json yes '"key": "mate-answering"'
+check mate-escalation-answered.json yes "The captain's answer to your captain hold refund-window: 30 days, counted from delivery."
+check mate-escalation-answered.json no  '"key": "mate-answering"'
+check mate-routed.json yes '"text": "Routed to second mate docs"'
+check mate-from-chat.json yes '"key": "add-mate-page"'
+check mate-from-chat.json yes 'the billing service, its invoices and payment retries'
 # The scripted run.
 check walk-sent.json yes '"text": "Ship it when CI is green."'
 check walk-sent.json yes 'Got it:'

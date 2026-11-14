@@ -2,9 +2,10 @@
 //! 127.0.0.1 that `claude` calls back into. It serves two things, both passed to that one session
 //! as command-line flags so the captain's own Claude settings are never written:
 //!
-//! - an MCP server (`--mcp-config`) with two tools: `app_note`, which puts a note in the
-//!   captain's For you to do panel, and `app_ui`, which shows a json-render view in the chat
-//!   (see [`crate::ui`]);
+//! - an MCP server (`--mcp-config`) with three tools: `app_note`, which puts a note in the
+//!   captain's For you to do panel, `app_ui`, which shows a json-render view in the chat
+//!   (see [`crate::ui`]), and `app_secondmate`, which opens the guided flow for adding a second
+//!   mate (see [`crate::secondmates`]);
 //! - a PreToolUse hook (`--settings`), which applies firstmate's rules (see [`crate::guard`])
 //!   and the captain's tool-approval settings (see [`crate::approval`]) to each tool use: it
 //!   allows it, denies it, or asks the captain to allow or deny it in the Needs your input panel.
@@ -27,6 +28,7 @@ use std::time::{Duration, Instant};
 use serde_json::{Value, json};
 
 use crate::approval::{self, Effect, Entry, Policy, Settings};
+use crate::crew;
 use crate::guard::{self, Home};
 use crate::store::Shared;
 use crate::ui;
@@ -35,6 +37,7 @@ use crate::visual::{self, Turn};
 /// The MCP server's name; Claude Code calls its tools `mcp__velvet-hammer__<tool>`.
 pub const SERVER: &str = "velvet-hammer";
 const NOTE_TOOL: &str = "app_note";
+const SECONDMATE_TOOL: &str = "app_secondmate";
 /// Claude Code's timeout for the hook, in seconds (its default).
 const HOOK_TIMEOUT_SECS: u64 = 600;
 /// Claude Code's timeout for the prompt and stop hooks, which answer at once.
@@ -55,6 +58,8 @@ static NEXT_TICKET: AtomicU64 = AtomicU64::new(1);
 pub enum Call {
     /// `app_note` was called with this text.
     Note(String),
+    /// `app_secondmate` was called with the scope the captain described.
+    AddMate(String),
     /// `claude` wants to use a tool; `title` is the question for the captain, such as "Allow
     /// Bash?", and `input` is all of what it would do, as text, after any firstmate rule's
     /// reason. Send true to allow it,
@@ -81,6 +86,10 @@ pub struct Policies {
     pub approval: Policy,
     pub visual: Shared<visual::Mode>,
     pub rules: Shared<guard::Settings>,
+    /// The captain's worker nicknames and the models the pi runtime lists, for the standing
+    /// crew instruction while the chief of staff runs as firstmate.
+    pub nicknames: Shared<crew::Nicknames>,
+    pub models: Shared<Vec<String>>,
 }
 
 impl Policies {
@@ -91,6 +100,8 @@ impl Policies {
             approval: Arc::new(RwLock::new(Settings::ask_every_time())),
             visual: Arc::new(RwLock::new(visual::Mode::Off)),
             rules: Arc::new(RwLock::new(guard::Settings::default())),
+            nicknames: Arc::new(RwLock::new(crew::Nicknames::default())),
+            models: Arc::new(RwLock::new(Vec::new())),
         }
     }
 }
@@ -102,6 +113,8 @@ struct Serving {
     home: Option<Home>,
     /// The reply in progress, for the stop hook.
     turn: Mutex<Turn>,
+    /// The session has been told about message links (see [`crate::links::INSTRUCTION`]).
+    told_links: AtomicBool,
 }
 
 fn read<T: Clone>(shared: &Shared<T>) -> T {
@@ -133,6 +146,7 @@ impl Bridge {
             policies,
             home,
             turn: Mutex::new(Turn::default()),
+            told_links: AtomicBool::new(false),
         });
         let (expected, done, on_call) = (
             format!("Bearer {token}"),
@@ -265,7 +279,9 @@ fn serve(
             ("/hooks/pre-tool-use", Ok(input)) => {
                 Reply::Json(pre_tool_use(&input, &stream, serving, on_call))
             }
-            ("/hooks/user-prompt-submit", Ok(_)) => Reply::Json(user_prompt_submit(serving)),
+            ("/hooks/user-prompt-submit", Ok(input)) => {
+                Reply::Json(user_prompt_submit(&input, serving))
+            }
             ("/hooks/stop", Ok(input)) => Reply::Json(stop(&input, serving, on_call)),
             (
                 "/mcp" | "/hooks/pre-tool-use" | "/hooks/user-prompt-submit" | "/hooks/stop",
@@ -316,6 +332,21 @@ fn mcp(request: &Value, serving: &Serving, on_call: &dyn Fn(Call)) -> Option<Val
             "name": ui::TOOL,
             "description": ui::description(),
             "inputSchema": ui::input_schema(),
+        }, {
+            "name": SECONDMATE_TOOL,
+            "description": "Open Velvet Hammer's guided flow for adding a persistent second mate, \
+                            with the scope the captain described filled in. Use it when the \
+                            captain asks you to create a second mate. The app asks the captain \
+                            the remaining questions one at a time (projects, name, runtime), \
+                            shows exactly what will be created, and runs firstmate's \
+                            bin/fm-home-seed.sh and bin/fm-spawn.sh only after the captain's \
+                            yes, then tells you the outcome so you can hand the new mate its \
+                            work. Do not seed or launch the mate yourself as well.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {"scope": {"type": "string", "description": "What the second mate should be responsible for, in the captain's words."}},
+                "required": ["scope"],
+            },
         }]})),
         "tools/call" if params["name"] == NOTE_TOOL => {
             let text = params["arguments"]["text"]
@@ -328,6 +359,15 @@ fn mcp(request: &Value, serving: &Serving, on_call: &dyn Fn(Call)) -> Option<Val
                 on_call(Call::Note(text.to_string()));
                 json!({"content": [{"type": "text", "text": "Added to the captain's For you to do panel."}]})
             })
+        }
+        "tools/call" if params["name"] == SECONDMATE_TOOL => {
+            let scope = params["arguments"]["scope"]
+                .as_str()
+                .unwrap_or_default()
+                .trim();
+            on_call(Call::AddMate(scope.to_string()));
+            Ok(json!({"content": [{"type": "text", "text":
+                "Opened Add a second mate for the captain. Velvet Hammer will tell you the outcome."}]}))
         }
         // The chat draws the view from the tool use itself; the call only checks it, so the
         // model learns what was refused or left out.
@@ -390,16 +430,33 @@ fn lock(turn: &Mutex<Turn>) -> std::sync::MutexGuard<'_, Turn> {
 }
 
 /// A message from the captain starts a new reply, and carries the standing instruction to use
-/// views when the visual-replies mode asks for one.
-fn user_prompt_submit(serving: &Serving) -> Value {
+/// views when the visual-replies mode asks for one. The session's first message also says how
+/// message links work, once. While the chief of staff runs as firstmate, each message also
+/// carries the worker nicknames and what the app made of a request for a worker (see
+/// [`crate::crew`]).
+fn user_prompt_submit(input: &Value, serving: &Serving) -> Value {
     lock(&serving.turn).prompt();
-    match read(&serving.policies.visual).instruction() {
-        Some(text) => json!({"hookSpecificOutput": {
-            "hookEventName": "UserPromptSubmit",
-            "additionalContext": text,
-        }}),
-        None => json!({}),
+    let links =
+        (!serving.told_links.swap(true, Ordering::SeqCst)).then_some(crate::links::INSTRUCTION);
+    let crew = serving.home.as_ref().map(|_| {
+        crew::context(
+            input["prompt"].as_str().unwrap_or_default(),
+            &read(&serving.policies.nicknames),
+            &read(&serving.policies.models),
+        )
+    });
+    let context: Vec<&str> = links
+        .into_iter()
+        .chain(read(&serving.policies.visual).instruction())
+        .chain(crew.as_deref())
+        .collect();
+    if context.is_empty() {
+        return json!({});
     }
+    json!({"hookSpecificOutput": {
+        "hookEventName": "UserPromptSubmit",
+        "additionalContext": context.join("\n\n"),
+    }})
 }
 
 /// Decides one Stop hook: a final reply of a qualifying shape with no view in its turn is sent
@@ -521,6 +578,8 @@ mod tests {
             approval: Arc::new(RwLock::new(settings)),
             visual: Arc::new(RwLock::new(visual::Mode::Enforce)),
             rules: Arc::new(RwLock::new(guard::Settings::default())),
+            nicknames: Arc::new(RwLock::new(crew::Nicknames::default())),
+            models: Arc::new(RwLock::new(Vec::new())),
         };
         let bridge = Bridge::start(policies.clone(), home, move |call| {
             tx.lock().unwrap().send(call).unwrap()
@@ -623,6 +682,28 @@ mod tests {
         );
         assert_eq!(called["result"]["isError"], Value::Null);
         assert!(matches!(calls.try_recv(), Ok(Call::Note(text)) if text == "Renew the domain"));
+    }
+
+    #[test]
+    fn app_secondmate_opens_the_guided_add_with_the_scope() {
+        let (bridge, calls) = bridge();
+        let auth = bearer(&bridge);
+        let (_, list) = post(
+            &bridge,
+            "/mcp",
+            Some(&auth),
+            json!({"jsonrpc": "2.0", "id": 1, "method": "tools/list"}),
+        );
+        assert_eq!(list["result"]["tools"][2]["name"], "app_secondmate");
+        let (_, called) = post(
+            &bridge,
+            "/mcp",
+            Some(&auth),
+            json!({"jsonrpc": "2.0", "id": 2, "method": "tools/call",
+            "params": {"name": "app_secondmate", "arguments": {"scope": " billing work "}}}),
+        );
+        assert_eq!(called["result"]["isError"], Value::Null);
+        assert!(matches!(calls.try_recv(), Ok(Call::AddMate(scope)) if scope == "billing work"));
     }
 
     #[test]
@@ -958,6 +1039,66 @@ mod tests {
                 "{mode:?}"
             );
         }
+    }
+
+    #[test]
+    fn a_firstmate_session_learns_the_nicknames_and_how_a_request_resolved() {
+        let (bridge, _, policies) = bridge_on(Settings::default(), Some(Home::new("/home")));
+        *policies.visual.write().unwrap() = visual::Mode::Off;
+        *policies.models.write().unwrap() = vec!["opencode-go/kimi-k3".into()];
+        let auth = bearer(&bridge);
+        let context = |prompt: &str| {
+            let out = post(
+                &bridge,
+                "/hooks/user-prompt-submit",
+                Some(&auth),
+                json!({"hook_event_name": "UserPromptSubmit", "prompt": prompt}),
+            )
+            .1;
+            out["hookSpecificOutput"]["additionalContext"]
+                .as_str()
+                .unwrap_or_default()
+                .to_string()
+        };
+        assert!(context("status?").contains("\u{201c}hacker\u{201d} is --harness pi"));
+        assert!(
+            context("send a kimi k3 worker to look").contains("as the model opencode-go/kimi-k3")
+        );
+
+        // Outside firstmate there is no crew to send.
+        let (plain, _, policies) = bridge_on(Settings::default(), None);
+        *policies.visual.write().unwrap() = visual::Mode::Off;
+        let out = post(
+            &plain,
+            "/hooks/user-prompt-submit",
+            Some(&bearer(&plain)),
+            json!({"hook_event_name": "UserPromptSubmit", "prompt": "send a hacker"}),
+        )
+        .1;
+        let context = out["hookSpecificOutput"]["additionalContext"]
+            .as_str()
+            .unwrap_or_default();
+        assert!(!context.contains("hacker"), "{context}");
+    }
+
+    #[test]
+    fn the_first_message_of_a_session_says_how_message_links_work_once() {
+        let (bridge, _, policies) = bridge_on(Settings::default(), None);
+        *policies.visual.write().unwrap() = visual::Mode::Off;
+        let auth = bearer(&bridge);
+        let prompt = json!({"hook_event_name": "UserPromptSubmit", "prompt": "hello"});
+        let (_, first) = post(
+            &bridge,
+            "/hooks/user-prompt-submit",
+            Some(&auth),
+            prompt.clone(),
+        );
+        assert_eq!(
+            first["hookSpecificOutput"]["additionalContext"],
+            crate::links::INSTRUCTION
+        );
+        let (_, second) = post(&bridge, "/hooks/user-prompt-submit", Some(&auth), prompt);
+        assert_eq!(second, json!({}));
     }
 
     #[test]

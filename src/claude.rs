@@ -236,6 +236,10 @@ impl Claude {
             self.out.push(Event::Activity(entry));
             return;
         }
+        if let Call::AddMate(scope) = call {
+            self.out.push(Event::AddMate(scope));
+            return;
+        }
         // The reply so far ends here, so the captain sees it was sent back before the view.
         if let Call::Nudged(why) = call {
             self.finish_reply();
@@ -246,7 +250,7 @@ impl Claude {
         }
         let id = self.item_id();
         let item = match call {
-            Call::Expired(_) | Call::Logged(_) | Call::Nudged(_) => return,
+            Call::Expired(_) | Call::Logged(_) | Call::Nudged(_) | Call::AddMate(_) => return,
             Call::Note(text) => {
                 self.notes.insert(id, text.clone());
                 Item {
@@ -438,7 +442,7 @@ impl ChiefOfStaff for Claude {
         self.policies = policies;
     }
 
-    fn act(&mut self, _ws: &Workspace, action: &Action) {
+    fn act(&mut self, ws: &Workspace, action: &Action) {
         // A tool-use answer goes back to the hook that asked, not into the chat.
         if let Action::Answer { item, choice } = action
             && let Some(approval) = self.approvals.remove(item)
@@ -451,13 +455,14 @@ impl ChiefOfStaff for Claude {
             return;
         }
         let text = match action {
-            Action::Say(text) => text.clone(),
+            // The captain's words, with any message they link to quoted (see crate::links).
+            Action::Say(text) => crate::links::outgoing(ws, text),
             Action::Answer { item, choice } => format!("My answer to item {item}: {choice}"),
             Action::Done { item } => match self.notes.remove(item) {
                 Some(note) => format!("I have done this: {note}"),
                 None => format!("I have done item {item}."),
             },
-            Action::Ui(ui) => ui.message(),
+            Action::Ui(ui) => crate::links::outgoing(ws, &ui.message()),
         };
         if let Err(problem) = self.say(&text) {
             self.end_session();
