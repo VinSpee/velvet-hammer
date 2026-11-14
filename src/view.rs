@@ -15,14 +15,19 @@ use crate::links;
 use crate::model::{Action, Agent, Author, Item, ItemKind, Message, Plan, Status};
 use crate::projects::Project;
 
+mod mates;
 mod policy;
 mod remind;
+mod repos;
 mod settings;
 mod tool;
 mod ui;
+mod workers;
 use policy::{rules_page, visuals_page};
+use repos::repo_picker;
 use settings::{all_settings, menu_bar, settings_page};
 use tool::{picture_page, tool_use};
+use workers::{workers_page, workers_summary};
 
 pub fn view(s: &App, cx: &mut Cx<App>) -> El {
     let t = tok::theme(cx.system_dark());
@@ -33,6 +38,8 @@ pub fn view(s: &App, cx: &mut Cx<App>) -> El {
     let main = match (&s.showing, peeked, &s.status) {
         (Showing::Crew(id), ..) => crew_peek(s, id, t, cx.system_dark()),
         (Showing::Settings, ..) => settings_page(s, t, cx.system_dark()),
+        (Showing::Mate(id), ..) => mates::mate_page(s, id, t, cx.system_dark()),
+        (Showing::AddMate, ..) => mates::add_page(s, t, cx.system_dark()),
         (Showing::Firstmate, ..) => firstmate_page(s, t, cx.system_dark()),
         (Showing::Approvals, ..) => approvals_page(s, t, cx.system_dark()),
         (Showing::Activity, ..) => activity_page(s, t, cx.system_dark()),
@@ -40,6 +47,7 @@ pub fn view(s: &App, cx: &mut Cx<App>) -> El {
         (Showing::Rules, ..) => rules_page(s, t, cx.system_dark()),
         (Showing::Reminders, ..) => remind::reminders_page(s, t, cx.system_dark()),
         (Showing::ReminderSettings, ..) => remind::settings_page(s, t, cx.system_dark()),
+        (Showing::Workers, ..) => workers_page(s, t, cx.system_dark()),
         (Showing::Picture(id), ..) => picture_page(s, id, t, cx.system_dark()),
         (_, Some(agent), _) => peek(s, agent, t, cx.system_dark()),
         // A chief of staff that runs in the managed clone cannot chat until it is installed.
@@ -94,6 +102,11 @@ fn agents(s: &App, t: Theme, dark: bool) -> El {
         .py(space::S6)
         .gap(space::S1)
         .fill(t.card)
+        // The agents, second mates and projects can outgrow the window.
+        .min_h(0.0)
+        .scroll(ScrollSpec {
+            stick_bottom: false,
+        })
         .child(heading("Agents", t));
     for a in &s.ws.agents {
         let id = a.id;
@@ -122,30 +135,37 @@ fn agents(s: &App, t: Theme, dark: bool) -> El {
     for crew in &s.captain.crew {
         let id = crew.id.clone();
         let selected = s.showing == Showing::Crew(id.clone());
-        list = list.child(
-            col()
-                .key(format!("crew-{id}"))
-                .role("button")
-                .label(format!("Peek at {}", crew.name))
-                .focusable(true)
-                .padding(space::S2)
-                .gap(2.0)
-                .radius(radius::SM)
-                .fill(if selected { t.control_off } else { t.card })
-                .on_press(move |s: &mut App| s.showing = Showing::Crew(id.clone()))
-                .child(
-                    text(crew.name.clone())
-                        .font(type_::TITLE)
-                        .color(t.text)
-                        .wrap(),
-                )
-                .child(
-                    text(format!("{} \u{b7} {}", crew.state, crew.doing))
-                        .font(type_::LABEL)
-                        .color(t.text_secondary)
-                        .wrap(),
-                ),
-        );
+        list =
+            list.child(
+                col()
+                    .key(format!("crew-{id}"))
+                    .role("button")
+                    .label(format!("Peek at {}", crew.name))
+                    .focusable(true)
+                    .padding(space::S2)
+                    .gap(2.0)
+                    .radius(radius::SM)
+                    .fill(if selected { t.control_off } else { t.card })
+                    .on_press(move |s: &mut App| s.showing = Showing::Crew(id.clone()))
+                    .child(
+                        text(crew.name.clone())
+                            .font(type_::TITLE)
+                            .color(t.text)
+                            .wrap(),
+                    )
+                    .child(
+                        text(format!("{} \u{b7} {}", crew.state, crew.doing))
+                            .font(type_::LABEL)
+                            .color(t.text_secondary)
+                            .wrap(),
+                    )
+                    .children(crew.runs.as_ref().map(|runs| {
+                        note(&format!("crew-{}-runs", crew.id), runs, t).wrap_anywhere()
+                    })),
+            );
+    }
+    if s.mates.records.is_some() {
+        list = list.child(mates::mate_list(s, t, dark));
     }
     if let Some(projects) = &s.projects {
         list = list.child(project_list(s, projects, t, dark));
@@ -1114,9 +1134,10 @@ fn adding(s: &App, t: Theme, dark: bool) -> El {
         .child(note(
             "adding-help",
             "Adding a project with your chief of staff. Answer in the chat; a chosen folder's \
-             path goes into your message for you to send.",
+             path or GitHub repository's address goes into your message for you to send.",
             t,
         ))
+        .child(repo_picker(s, t, dark))
         .child(buttons);
     if let Some(problem) = &s.pick_problem {
         bar = bar.child(warning("add-pick-problem", problem, dark));
@@ -1318,13 +1339,21 @@ fn warning(key: &str, words: &str, dark: bool) -> El {
 /// steers a crewmate through the chief of staff.
 fn crew_peek(s: &App, id: &str, t: Theme, dark: bool) -> El {
     let crew = s.captain.crew.iter().find(|c| c.id == id);
+    let mate = s.captain.mate(id).is_some() || s.mates.get(id).is_some();
     let (name, doing) = match crew {
         Some(crew) => (
-            crew.name.as_str(),
+            crew.name.clone(),
             format!("{} \u{b7} {}", crew.state, crew.doing),
         ),
-        None => (id, "No longer in flight.".to_string()),
+        None if mate => (
+            format!("second mate {id}"),
+            s.captain
+                .mate(id)
+                .map_or(String::new(), |m| m.doing.clone()),
+        ),
+        None => (id.to_string(), "No longer in flight.".to_string()),
     };
+    let back = id.to_string();
     let header = row()
         .gap(space::S2)
         .center_y()
@@ -1335,9 +1364,15 @@ fn crew_peek(s: &App, id: &str, t: Theme, dark: bool) -> El {
                 .child(heading(&format!("Peeking at {name}"), t))
                 .child(note("crew-doing", &doing, t)),
         )
-        .child(button("peek-close", "Back to chat", t, |s| {
-            s.showing = Showing::Chat
-        }));
+        .child(if mate {
+            button("peek-close", "Back to its page", t, move |s| {
+                s.open_mate(&back)
+            })
+        } else {
+            button("peek-close", "Back to chat", t, |s| {
+                s.showing = Showing::Chat
+            })
+        });
     let pane = match s.peek.as_ref().and_then(|p| p.pane.as_ref()) {
         None => note("crew-peek-reading", "Reading its terminal\u{2026}", t),
         Some(Err(problem)) => warning("crew-peek-problem", problem, dark),
@@ -1368,8 +1403,13 @@ fn crew_peek(s: &App, id: &str, t: Theme, dark: bool) -> El {
         .child(pane)
         .child(note(
             "crew-peek-help",
-            "The last 40 lines of this crewmate's terminal, read by firstmate's bin/fm-peek.sh. \
-             To steer it, tell your chief of staff.",
+            if mate {
+                "The last 40 lines of this second mate's terminal, read by firstmate's \
+                 bin/fm-peek.sh. To steer it, send it a message from its page."
+            } else {
+                "The last 40 lines of this crewmate's terminal, read by firstmate's \
+                 bin/fm-peek.sh. To steer it, tell your chief of staff."
+            },
             t,
         ))
 }
@@ -1687,6 +1727,29 @@ fn needs_input(s: &App, t: Theme, dark: bool) -> El {
     }
     for hold in &s.captain.holds {
         let key = hold.key.clone();
+        // A second mate's hold is answered to that mate, which owns it.
+        if let Some(owner) = hold.owner.clone() {
+            let answering = s.mates.answering == Some((owner.clone(), key.clone()));
+            rows.push(
+                words_card(
+                    &format!("hold-{owner}-{key}"),
+                    &format!("{key} \u{b7} from second mate {owner}"),
+                    &hold.question,
+                    t,
+                )
+                .child(row().child(button(
+                    &format!("answer-{owner}-{key}"),
+                    if answering {
+                        "Answering on its page"
+                    } else {
+                        "Answer"
+                    },
+                    t,
+                    move |s| s.answer_mate_hold(&owner, &key),
+                ))),
+            );
+            continue;
+        }
         let answering = s.answering.as_deref() == Some(&hold.key);
         rows.push(
             words_card(&format!("hold-{key}"), &hold.key, &hold.question, t).child(row().child(

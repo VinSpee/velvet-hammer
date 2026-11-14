@@ -236,6 +236,10 @@ impl Claude {
             self.out.push(Event::Activity(entry));
             return;
         }
+        if let Call::AddMate(scope) = call {
+            self.out.push(Event::AddMate(scope));
+            return;
+        }
         // The reply so far ends here, so the captain sees it was sent back before the view.
         if let Call::Nudged(why) = call {
             self.finish_reply();
@@ -250,7 +254,11 @@ impl Claude {
         }
         let id = self.item_id();
         let item = match call {
-            Call::Expired(_) | Call::Logged(_) | Call::Nudged(_) | Call::Reminded => return,
+            Call::Expired(_)
+            | Call::Logged(_)
+            | Call::Nudged(_)
+            | Call::AddMate(_)
+            | Call::Reminded => return,
             Call::Note(text) => {
                 self.notes.insert(id, text.clone());
                 Item {

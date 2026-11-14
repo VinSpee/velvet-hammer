@@ -20,6 +20,8 @@
 # about a Bash command far larger than the app will show, and "abandon: COMMAND" asks about
 # COMMAND but hangs up after a second, as Claude Code does when it stops waiting.
 #
+# A message "mate: SCOPE" calls the `app_secondmate` tool the same way, with SCOPE as the scope.
+#
 # A message "show: PATH" uses the Read tool on PATH, the way the real `claude` reports it: a
 # tool_use record, then a tool_result with the image as a base64 block for a .png, or a line of
 # text for anything else. "shell: COMMAND" uses Bash, whose result is three lines of text.
@@ -40,6 +42,10 @@
 # A message "remind: WHEN | TEXT" calls the `app_remind` tool with TEXT and WHEN, where WHEN is
 # "in AMOUNT UNIT" or one of the keywords such as tomorrow_morning, and answers with the tool's
 # text. A message "reminders?" calls `app_reminders` and answers with its text.
+#
+# A message "ask: QUESTION" is answered with QUESTION as text, then the Stop hook is asked about
+# it the same way. If the hook sends it back, the fake asks it with a Choice view (yolo off,
+# recommended, or yolo on) as tool use toolu_fake_choice, and ends with "Pick one above.".
 #
 # A message containing "whereami" is answered with the session's working directory and FM_HOME.
 # After a message "wake: TEXT" and its reply, a second turn nobody asked for says TEXT, the way
@@ -188,6 +194,15 @@ auth)
       printf '%s\n' "{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"result\":\"$answer\"}"
       continue
       ;;
+    mate:*)
+      scope=${text#mate: }
+      post "$mcp_url" "$mcp_auth" '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"fake-claude","version":"9.9.9"}}}' >/dev/null
+      if post "$mcp_url" "$mcp_auth" "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\"params\":{\"name\":\"app_secondmate\",\"arguments\":{\"scope\":\"$scope\"}}}" | grep -q '"content"'; then
+        text="I opened Add a second mate for you, with that scope filled in."
+      else
+        text="the app_secondmate tool did not answer"
+      fi
+      ;;
     run:* | abandon:* | big:* | write:* | read:*)
       case $text in
       run:*) tool=Bash what=${text#run: } patience=600 input="{\"command\":\"${text#run: }\"}" ;;
@@ -217,6 +232,24 @@ auth)
       continue
     fi
     case $text in
+    ask:*)
+      reply=${text#ask: }
+      final=$reply
+      echo '{"type":"stream_event","event":{"type":"message_start","message":{"role":"assistant","content":[]}}}'
+      echo "{\"type\":\"stream_event\",\"event\":{\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"$reply\"}}}"
+      if stop "$reply" false | grep -q additionalContext; then
+        spec="{\"root\":\"merge\",\"elements\":{\"merge\":{\"type\":\"Choice\",\"props\":{\"question\":\"$reply\",\"options\":[{\"value\":\"yolo-off\",\"label\":\"yolo off\",\"hint\":\"Every merge waits for your word.\"},{\"value\":\"yolo-on\",\"label\":\"yolo on\",\"hint\":\"I merge green pull requests on my own.\"}],\"recommended\":\"yolo-off\"},\"children\":[]}}}"
+        post "$mcp_url" "$mcp_auth" "{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"tools/call\",\"params\":{\"name\":\"app_ui\",\"arguments\":$spec}}" >/dev/null
+        echo "{\"type\":\"assistant\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"tool_use\",\"id\":\"toolu_fake_choice\",\"name\":\"mcp__velvet-hammer__app_ui\",\"input\":$spec}]},\"parent_tool_use_id\":null}"
+        echo '{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_fake_choice","content":"The view is shown."}]},"parent_tool_use_id":null}'
+        final="Pick one above."
+        echo '{"type":"stream_event","event":{"type":"message_start","message":{"role":"assistant","content":[]}}}'
+        echo '{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Pick one above."}}}'
+        stop "$final" true >/dev/null
+      fi
+      printf '%s\n' "{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"result\":\"$final\"}"
+      continue
+      ;;
     list:* | stubborn:*)
       # The reply as Markdown, and as JSON with its line breaks escaped.
       items=${text#*: }

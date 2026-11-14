@@ -30,7 +30,11 @@ agents list shows the tasks firstmate has in flight, and selecting one shows tha
 terminal. The **Projects** list shows the projects in firstmate's records, and **Add project**
 starts a guided conversation in which the chief of staff adds one with firstmate's own procedure;
 with no projects yet, the chat opens with a prompt to add the first (see
-[Projects](docs/firstmate.md#projects)). [Where the integration stands](docs/firstmate.md#where-the-integration-stands) lists
+[Projects](docs/firstmate.md#projects)). **Second mates** lists firstmate's second mates with
+how each one stands; **Add second mate** walks you through creating one and runs firstmate's
+own scripts after your yes, and each mate's page starts, interrupts, relaunches or retires it,
+peeks at its terminal, and holds a conversation with it and the questions it escalated (see
+[Second mates](docs/firstmate.md#second-mates)). [Where the integration stands](docs/firstmate.md#where-the-integration-stands) lists
 what works end to end and what is not verified. A stub with sample data stands in for the agent layer in headless scenes and tests. The interface
 and code will change.
 
@@ -43,8 +47,9 @@ The window has three columns, and every setting is in **Settings** (see
 [Settings and menus](#settings-and-menus)):
 
 - **Agents** (left): the subagents the chief of staff manages. Selecting one opens a peek at its
-  transcript in place of the chat; **Back to chat** closes it. Under them, **Projects** lists the
-  projects in firstmate's records with **Add project**.
+  transcript in place of the chat; **Back to chat** closes it. Under them, **Second mates** lists
+  firstmate's second mates with **Add second mate**, and selecting one opens its page; then
+  **Projects** lists the projects in firstmate's records with **Add project**.
   The **Reminders** card at the bottom of the column shows how many are set and opens
   their page; their settings are the **Reminders** section of Settings.
 - **Chief of staff** (middle): the conversation, with a message field and a **Send** button. A
@@ -52,7 +57,9 @@ The window has three columns, and every setting is in **Settings** (see
   plan". When Claude Code is not ready, a sign-in screen takes the conversation's place. With no
   projects yet, a card above the conversation explains them and offers **Add a project**; while
   you add one, a row above the message field offers **Choose a folder…**, **Yes**, **No** and
-  **Done adding**.
+  **Done adding**, under a combobox of your GitHub repositories, listed with the GitHub CLI you
+  already signed in with, your own private ones first and filtered as you type (see
+  [Projects](docs/firstmate.md#projects)).
   Cmd+F (Ctrl+F on Windows and Linux) opens a find bar that searches the whole conversation,
   and the conversation is kept across restarts in the app's data directory, earlier sessions
   above a divider (see [The conversation: find and history](docs/conversation.md)). Every
@@ -69,15 +76,23 @@ The window has three columns, and every setting is in **Settings** (see
   **Open in your video player**, and any other tool shows its name, its main argument and its
   result folded behind a button. See [Tool calls in the chat](docs/tool-calls.md).
   The chief of staff can also show you a small interactive view, a json-render spec it passes to
-  the app's `app_ui` tool: cards, tables, badges, progress bars, buttons, text fields and
-  checkboxes, drawn natively and filling in as the spec streams. Ticking, typing and adding
-  stay in the view; a submit comes back to the chief of staff as a message from you, with the
-  values you entered. Nothing in a view runs code, reads files or reaches the network. See
+  the app's `app_ui` tool: cards, tables, badges, progress bars, buttons, text fields,
+  checkboxes and choice selectors, drawn natively and filling in as the spec streams. Ticking,
+  typing and adding stay in the view; a submit comes back to the chief of staff as a message from
+  you, with the values you entered. A question with a fixed set of answers, such as yes or no,
+  comes as a selector with the recommended option marked, and your click goes back as that
+  option's exact value. Nothing in a view runs code, reads files or reaches the network. See
   [Views in the chat](docs/json-render.md).
 - **Needs your input** and **For you to do** (right): questions the agents are waiting on, each
   with answer buttons, and steps only you can take, each with a **Done** button. Reminders that
   came due come first in For you to do, with **Done**, **Snooze** and **Delete**, and a banner
   over the middle column shows the latest.
+- **Workers** (a section of Settings): crewmates on models other than Claude, such as
+  DeepSeek V4.1 Flash on an opencode Go plan. They run on pi, which the app installs and checks
+  itself, with the provider key kept in the macOS keychain; Claude workers stay on Claude Code
+  and your subscription. The page also edits worker nicknames, so "send a hacker to look into
+  it" sends that preset, and each worker in the agents list shows what it runs on. See
+  [Workers on other providers](docs/worker-providers.md).
 
 ## Settings and menus
 
@@ -125,7 +140,7 @@ input** and **For you to do**.
   replies, problems). `Stub` simulates it for headless scenes and tests.
 - `src/claude.rs`: `Claude`, the chief of staff on the user's own Claude Code. It runs only the
   `claude` command, as described below.
-- `src/bridge.rs`: the server the chat session's `claude` calls back into: four MCP tools and
+- `src/bridge.rs`: the server the chat session's `claude` calls back into: five MCP tools and
   three hooks, PreToolUse, UserPromptSubmit and Stop (see [docs/extending.md](docs/extending.md)).
 - `src/reminders.rs`: the captain's reminders: the forms of *when* and the times they stand for,
   the file they are kept in, and the `app_remind` and `app_reminders` tools' answers (see
@@ -141,10 +156,21 @@ input** and **For you to do**.
   standing instruction and the stop check with its retry cap (see
   [docs/visual-replies.md](docs/visual-replies.md)).
 - `src/store.rs`: a settings file in the data directory, written whole and shared with the hooks;
-  tool approval, visual replies, firstmate's rules and reminders each keep one.
+  tool approval, visual replies, firstmate's rules and reminders each keep one, and the worker
+  nicknames keep one in the firstmate home's `config/`.
+- `src/crew.rs`: worker nicknames, reading a "send a … worker" request and resolving it against
+  the nicknames and the models pi lists, and what the hook tells the chief of staff (see
+  [docs/worker-providers.md](docs/worker-providers.md)).
+- `src/pi.rs`: the pi runtime the app installs for workers on other providers, the keychain
+  check, and firstmate's pi account setting.
 - `src/projects.rs`: the projects in firstmate's records (its registry `data/projects.md` and
   the clones under `projects/`), re-read every two seconds, and the system folder dialog the add
   flow uses.
+- `src/repos.rs`: the captain's GitHub repositories for the add flow, listed with `gh api`, put
+  in order and fuzzy-filtered, and the combobox's state; its view is `src/view/repos.rs`.
+- `src/secondmates.rs`: firstmate's second mates: the registry and snapshot read into one record per
+  mate, the guided add, the actions that run firstmate's scripts, and each mate's conversation
+  (see [docs/firstmate.md](docs/firstmate.md#second-mates)). Its page is in `src/view/mates.rs`.
 - `src/bearings.rs`: what waits on the captain, read from firstmate's records by running its
   `bin/fm-bearings-snapshot.sh --json` whenever the records change.
 - `scripts/fake-claude`: a stand-in for `claude` that speaks the same protocol without an account.
@@ -168,7 +194,8 @@ input** and **For you to do**.
 - `src/view.rs`: the Rune view, with the tool-use views in `src/view/tool.rs`, the
   json-render views in `src/view/ui.rs`, the visual-replies and firstmate-rules pages in
   `src/view/policy.rs`, the Settings page and the drawn menu bar in `src/view/settings.rs`,
-  and the reminders' banner, card and pages in `src/view/remind.rs`. Every element a
+  the Workers page in `src/view/workers.rs`, and the reminders' banner, card and pages in
+  `src/view/remind.rs`. Every element a
   test or script reaches has a key.
 - `src/main.rs`: the `App` state (workspace, chief of staff, sign-in status, firstmate clone,
   message draft, what the middle column shows), the headless scenes, and the tests.
@@ -239,8 +266,8 @@ are checked first; a rule's deny is final, and its question is asked whatever th
 - **Mode.** **Run without asking** (recommended, and what a fresh install uses): the chief of
   staff will edit files, run commands and use tools without stopping for you, and every tool use
   is still logged. **Auto-allow read-only tools**: `Read`, `Glob`, `Grep`, `LS`, `NotebookRead`,
-  `ToolSearch`, `TodoWrite` and the app's own tools (`app_note`, `app_ui`, `app_remind` and
-  `app_reminders`) run at once, and everything else waits
+  `ToolSearch`, `TodoWrite` and the app's own tools (`app_note`, `app_ui`, `app_secondmate`,
+  `app_remind` and `app_reminders`) run at once, and everything else waits
   for you. **Ask every time**: every tool use waits for you.
 - **Rules.** An ordered list of allow, ask and deny rules on top of the mode. A rule names a
   tool (`*` matches any text, so `mcp__github__*` covers a server's tools) and optionally a
@@ -363,6 +390,11 @@ It writes these files to `OUT_DIR`:
 | `projects-empty.png`, `projects-empty.json` | An installed home with no projects: the prompt to add the first one |
 | `projects-adding.png`, `projects-adding.json` | After **Add a project**: the request in the chat, the reply and the add controls |
 | `projects-listed.png`, `projects-listed.json` | Three projects from firstmate's registry |
+| `projects-repos.png`, `projects-repos.json` | Adding a project with the GitHub repository combobox open on sample repositories |
+| `projects-repos-filtered.png`, `projects-repos-filtered.json` | The combobox filtered by `ham`, with the matches marked |
+| `projects-repos-chosen.png`, `projects-repos-chosen.json` | A repository chosen: its address in the message |
+| `projects-repos-missing.png`, `projects-repos-missing.json` | No `gh` installed: how to install it and sign in, and **Try again** |
+| `projects-repos-signed-out.png`, `projects-repos-signed-out.json` | `gh` not signed in: how to sign in, and **Try again** |
 | `formatted.png`, `formatted.json` | A reply that once showed raw `**` asterisks, formatted |
 | `formatted-all.png`, `formatted-all.json` | Every Markdown construct the chat formats, and HTML shown as text |
 | `formatted-streaming.png`, `formatted-streaming.json` | A reply still arriving, with its bold not yet closed |
@@ -377,12 +409,20 @@ It writes these files to `OUT_DIR`:
 | `view-action.png`, `view-action.json` | After **Send the list**: what you did in the chat, and the reply to the submit |
 | `view-unknown.png`, `view-unknown.json` | A view naming a component the catalog lacks, shown as a placeholder |
 | `view-too-large.png`, `view-too-large.json` | A view over the element limit, refused with why |
+| `choice-ask.png`, `choice-ask.json` | A question with a fixed set of answers asked with a Choice: yolo off recommended, yolo on, and an Other field |
+| `choice-answered.png`, `choice-answered.json` | After choosing **yolo off**: the answered Choice, your choice in the chat, and the reply to its exact value |
+| `choice-multiple.png`, `choice-multiple.json` | A Choice that takes several picks, with two picked and an answer of your own typed |
+| `choice-enforced.png`, `choice-enforced.json` | A question the fake asked in prose, sent back by the stop hook, asked again with a Choice and answered |
 | `visuals-settings.png`, `visuals-settings.json` | The Visual replies page: Enforce recommended, the shapes, the instruction and an example |
 | `visuals-enforced.png`, `visuals-enforced.json` | A list the fake sent as text, sent back once by the stop hook and shown as a view |
 | `visuals-capped.png`, `visuals-capped.json` | A reply that ignored the feedback, sent back only once |
 | `rules-settings.png`, `rules-settings.json` | The Firstmate rules page after a forced push was denied and a merge was asked about and allowed |
 | `rules-merge-ask.png`, `rules-merge-ask.json` | A merge through firstmate's script waiting for you, naming the pull request |
 | `rules-project-ask.png`, `rules-project-ask.json` | A write into a project waiting for you, naming the file |
+| `workers-fresh.png`, `workers-fresh.json` | The Workers page before anything is set up, with the example nickname |
+| `workers-settings.png`, `workers-settings.json` | pi installed from a stand-in release, the key found, firstmate pointed at the runtime, and a second nickname |
+| `workers-claude-refused.png`, `workers-claude-refused.json` | A Claude model refused for a pi nickname |
+| `workers-crew.png`, `workers-crew.json` | The agents list showing what each worker runs on |
 | `find.png`, `find.json` | The find bar on a long chat: four matches, the first current |
 | `find-stepped.png`, `find-stepped.json` | The third match current, scrolled into view |
 | `find-none.png`, `find-none.json` | A query with no matches |
@@ -409,13 +449,19 @@ It writes these files to `OUT_DIR`:
 The first four scenes, `approval-settings`, the `formatted` scenes, the `view` scenes,
 `visuals-settings` and the `reminder` scenes use the stub, the reminder scenes on a fixed clock in
 US Eastern time; the other `visuals` scenes have the fake `claude` call the prompt
-and stop hooks; the `rules` scenes run the fake `claude` as firstmate in a scratch clone under
-`/tmp/velvet-hammer`; the `tool`
+and stop hooks; the `rules` and `workers` scenes run the fake `claude` as firstmate in a scratch clone under
+`/tmp/velvet-hammer`, and the `workers` scenes install a stand-in pi release from a `file://` URL
+there; the `tool`
 scenes have the fake `claude` use Read and Bash on the files in `scripts/fixtures`. The sign-in scenes run the app on `scripts/fake-claude`, so
 they need no Claude account; each waits for the fake's real processes before rendering. The
 firstmate and projects scenes run `git` on a scratch upstream repository under `target/`, so
 they need no network; the projects scenes write the registry firstmate's procedure would write,
-because the fake `claude` cannot run that procedure. The
+because the fake `claude` cannot run that procedure. The `projects-repos` scenes list sample
+repositories through a stand-in for `gh`, except `projects-repos-missing`, which runs a `gh` that
+does not exist. The `mates`, `mate` and `add-mate` scenes run the fake
+`claude` as firstmate in a scratch home under `/tmp/velvet-hammer`, with stand-ins of
+firstmate's second-mate scripts that write what the real ones did (see
+[Second mates](docs/firstmate.md#second-mates)). The
 walkthrough runs on the stub's `chat` scene. The `.json` files are Rune element trees. The script then checks them for the keys and text each
 state must or must not have (for example `needs-input`, `input-1`, `for-you-empty`, `peek`) and
 exits non-zero if any check fails.

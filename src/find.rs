@@ -177,6 +177,14 @@ fn view_words(node: Option<&ui::Node>, out: &mut Vec<String>) {
         }
         What::Button { label, .. } | What::Checkbox { label, .. } => out.push(label.clone()),
         What::Input { label, value, .. } => out.extend([label.clone(), value.clone()]),
+        What::Choice {
+            question, options, ..
+        } => {
+            out.push(question.clone());
+            for option in options {
+                out.extend([option.label.clone(), option.hint.clone()]);
+            }
+        }
         What::Unknown(name) => out.push(name.clone()),
         What::Stack { .. } | What::Separator => {}
     }

@@ -19,6 +19,7 @@ rune-kit = { git = "https://github.com/anomalyco/rune", rev = "f3be67ace9631ea95
 # Rune's system notifications, for a reminder that comes due (macOS notification center).
 rune-notify = { git = "https://github.com/anomalyco/rune", rev = "f3be67ace9631ea95565b5263f7aa7c9dd73cdb4" }
 serde_json = "1"
+sha2 = "0.10"
 
 # Rune patches these crates in its own workspace; a dependency's [patch] does not reach this one,
 # so the app repeats Rune's [patch.crates-io] table from the same rev (see Rune's README,
