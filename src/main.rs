@@ -2723,6 +2723,10 @@ mod tests {
         rt.state.form.tool.text = "Bash".into();
         rt.state.form.pattern.text = "git push".into();
         tap(&mut rt, "rule-save");
+        rt.update(|_, tx| tx.scroll_center("rule-0".to_string()));
+        for _ in 0..30 {
+            rt.frame(1.0 / 60.0);
+        }
         assert!(rt.find("rule-0").is_some());
         assert_eq!(
             rt.state.approvals.settings().rules[0].describe(),
