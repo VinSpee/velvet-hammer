@@ -1,0 +1,24 @@
+# no-mistakes pipeline settings. README.md "Pipeline validation" explains them.
+#
+# The daemon reads `commands` and `test.instructions` from the default branch, never from the
+# pushed branch, so a change to this file takes effect for the runs after it merges.
+#
+# Homebrew's `rust` comes first on the daemon's PATH, cannot run, and ignores rust-toolchain.toml,
+# so every command puts rustup's proxies first. They run the toolchain rust-toolchain.toml pins.
+commands:
+  prepare: 'export PATH="/opt/homebrew/opt/rustup/bin:$PATH"; cargo fetch --locked'
+  test: 'export PATH="/opt/homebrew/opt/rustup/bin:$PATH"; cargo test --locked'
+  lint: 'export PATH="/opt/homebrew/opt/rustup/bin:$PATH"; cargo fmt --all -- --check && cargo clippy --locked --all-targets -- -D warnings'
+  format: 'export PATH="/opt/homebrew/opt/rustup/bin:$PATH"; cargo fmt --all'
+
+test:
+  # The live-validation runbook. no-mistakes collapses indentation, so keep it a flat list.
+  instructions: |
+    Velvet Hammer is a native Rust desktop app on Rune. Its live surface here is the real app binary run headless: Rune renders each scene offscreen on a fixed virtual clock, so no window, window server session, Claude account, network sign-in or secret is needed. scripts/fake-claude stands in for Claude Code, and the firstmate and projects scenes use scratch git repositories under target/ and /tmp/velvet-hammer.
+    1. In every shell you start, run export PATH="/opt/homebrew/opt/rustup/bin:$PATH" first. Otherwise Homebrew's cargo is found first, and it cannot run.
+    2. From the worktree root, run scripts/verify.sh "<evidence dir>/verify", where <evidence dir> is this run's evidence directory. It builds the app, runs cargo test, renders every scene to <scene>.png, dumps each scene's element tree to <scene>.json, and checks the trees. In a fresh worktree it takes about 11 minutes (3 to build, 7 to render), which is longer than a single 10-minute tool call can wait, so start it in the background with its output in a log file and wait for it to exit before you read the result. It passes only when it exits 0 and its last line is "All checks passed". Any other result is a fail: cite the FAIL or FAILED lines.
+    3. Pick the scenes the change affects. Scenes are defined in the scenes list in fn main in src/main.rs, rendered by the loop in scripts/verify.sh, and described in README.md "Verify headlessly". Open each affected <scene>.png and confirm it shows the change, and read <scene>.json for the keys and text the change adds or removes. For a UI change, the changed screen must have a scene that verify.sh renders and checks; if none does, report that scenario as a fail with the missing scene named.
+    4. To look at one scene by hand, use target/debug/velvet-hammer --scene NAME --snap OUT.png or --tree OUT.json. --list-scenes lists the scenes, --theme light renders the light theme, and --script scripts/walkthrough.json --at mark:end replays scripted input.
+    5. Each scenario that verify.sh or the app binary rendered in this run is live: name the scene, say it ran the real binary headless with synthetic inputs, and cite the PNG and JSON paths. Report verdict go when verify.sh passed and every affected scene shows the change.
+    Exclusions, which cannot run in the pipeline: a real Claude Code sign-in or subscription (claude auth login against Anthropic), the windowed app from cargo run with real input devices, and a real firstmate home that pushes or merges. Report scenarios that need them as untested with this reason; they do not make the verdict inconclusive. The fake-claude scenes signed-out, signing-in, signed-in, expired, cli-missing and claude-error, the rules and firstmate scenes, and the tests in src/main.rs cover the same code paths, and README.md "Trying the real sign-in" is the manual check for the real sign-in.
+    Cleanup: verify.sh leaves nothing running, because each scene waits for its fake claude processes to exit. Everything it builds is under target/, which git ignores. Do not run two copies of verify.sh at once, because the rules scenes share /tmp/velvet-hammer.
