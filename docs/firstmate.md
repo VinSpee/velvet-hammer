@@ -6,7 +6,7 @@ Velvet Hammer keeps its own git clone of it. This page explains where the clone 
 installed and updated, how to change it, and how to reset it.
 
 Velvet Hammer installs and updates the clone, runs the chief of staff inside it, fills the
-**Needs your input** panel, the agents list, the projects list and the second mates from
+fleet panel (see [The fleet panel](fleet.md)), the projects list and the second mates from
 firstmate's records, lets you peek at a crewmate's terminal, starts adding a project with the
 chief of staff, and adds, manages and talks to second mates through firstmate's own scripts. [Where the integration stands](#where-the-integration-stands) lists what
 works end to end and what is not verified.
@@ -147,7 +147,7 @@ Limits of the headless session:
   (see [Extending](extending.md)) uses the tool-approval mode **Run without asking** unless you
   choose otherwise on the **Tool approval** page, and logs every tool use. Firstmate's own
   `PreToolUse` command guards are separate hooks, and this setting does not change them. Choosing **Ask every time** puts each of firstmate's
-  script runs in **Needs your input**; see the README's
+  script runs in **Waiting on you**; see the README's
   [Tool approval](../README.md#tool-approval) section for the modes and rules.
 - **Firstmate's hard rules are also enforced by the app's hook.** Ahead of the tool-approval
   setting, the hook denies a merge around firstmate's merge script, an admin-bypass merge and a
@@ -166,32 +166,32 @@ When a session ends, or the app quits, the app closes its input and sends `claud
 signal at once, so that Claude Code stops firstmate's watcher instead of leaving it running. If
 `claude` has not exited after five seconds, the app kills it.
 
-## The panels and firstmate's records
+## Waiting on you and firstmate's records
 
 Firstmate keeps what waits on the captain in its own records and publishes them as one
 structured document, `bin/fm-bearings-snapshot.sh --json` (schema `fm-bearings.v1`). Its own rule
 is that a view renders that document and does not parse the record files. Velvet Hammer follows
 it: `src/bearings.rs` runs the script from the clone with `FM_HOME` set to the app's home and
 `FM_CREW_STATE_NO_FORGE=1`, so it makes no network request and writes nothing. It runs once when
-the app opens and again whenever a file in the home's `state/` or `data/` directory changes,
-which the app checks every two seconds. If a run fails, for example while the clone is being
-updated, the app runs it again every 30 seconds until it succeeds, even when nothing in the home
-changes. A change in the home still runs it at once, and the same error is shown only once.
+the app opens and again when firstmate's status logs or task records change, a turn finishes,
+you answer a card or you press **Refresh**, at most once every five seconds. If a run fails, for
+example while the clone is being updated, the app runs it again 30 seconds later, even when
+nothing in the home changes. [The fleet panel](fleet.md#when-it-refreshes) has the details.
 
-| Panel | Source in the snapshot | What you see |
+| Card in Waiting on you | Source in the snapshot | What you see |
 | --- | --- | --- |
-| **Needs your input** | `decisions_open[]`: tasks held for the captain | The task id and firstmate's whole question (`question`, never the shortened `summary`), with **Answer** |
-| **Needs your input** | `contributions.captain[]` rows with no `hold`: pull requests whose checks are green and which wait for a merge approval | The pull request, firstmate's reason, and **Approve** |
-| **For you to do** | No firstmate source (see below) | The notes the chief of staff adds with the app's `app_note` tool |
+| A decision | `decisions_open[]`: tasks held for the captain | The task id and firstmate's whole question (`question`, never the shortened `summary`), with **Answer** |
+| A merge | `contributions.captain[]` rows with no `hold`: pull requests whose checks are green and which wait for a merge approval | The pull request, firstmate's reason, **Open pull request** and **Approve** |
+| A note | No firstmate source (see below) | The notes the chief of staff adds with the app's `app_note` tool |
 
-**Why "For you to do" has no firstmate source.** Firstmate has one kind of captain call: a
+**Why notes have no firstmate source.** Firstmate has one kind of captain call: a
 task held for the captain. Its records do not say whether the captain must answer a question or
 do something himself, such as signing in. Firstmate's own guidance says that distinction is the
 agent's judgment and that nothing may classify a hold by reading its wording. So every hold
-appears under **Needs your input**, and the app does not guess. A structured marker on a hold
+appears as a decision, and the app does not guess. A structured marker on a hold
 that says "answer" or "act" would let the app split them; that is a change to firstmate and is
 proposed there, not made here. Until then the chief of staff can put a step that only you can
-take into **For you to do** with `app_note`.
+take into Waiting on you with `app_note`.
 
 **Answering.** **Answer** on a hold turns your next chat message into your answer: the app sends
 "My answer to the captain hold *task-id*: *your words*" to the chief of staff. Firstmate then
@@ -199,7 +199,7 @@ records your exact words with its own command, `bin/fm-captain-hold.sh answer`, 
 leaves the panel when firstmate's records say it is closed. **Approve** on a merge sends "I
 approve merging *url* (task *task-id*)." the same way, and firstmate checks the pull request
 again before it merges. When firstmate then runs its merge script, the rule **Every merge waits
-for your word** asks once more in **Needs your input**, naming the pull request, because the hook
+for your word** asks once more in **Waiting on you**, naming the pull request, because the hook
 cannot read your approval in the chat (see [Firstmate's rules](firstmate-rules.md)).
 
 The app does not call `fm-captain-hold.sh answer` or the keyed-answer intake
@@ -219,10 +219,10 @@ firstmate change.
 If the script fails, for example because `jq` or `tasks-axi` is missing or the home is in away
 mode, the panel shows firstmate's own error above the last items it read.
 
-## The agents list and peek
+## Underway and peek
 
-The agents column lists firstmate's tasks in flight, from `in_flight[]` in the same snapshot
-that fills the panel: each row shows the task's title, firstmate's word for its state (such as
+**Underway** in the fleet panel lists firstmate's tasks in flight, from `in_flight[]` in the same
+snapshot: each row shows the task's title, firstmate's word for its state (such as
 `working`, `parked` or `blocked`) and one line on what it is doing. Under that, a row shows what
 the worker runs on, such as `pi · opencode-go/deepseek-v4.1-flash`, read from the `harness=` and
 `model=` lines of firstmate's `state/<id>.meta`, because the snapshot does not carry them (see
@@ -357,7 +357,7 @@ firstmate's guarded scripts, from the managed clone, with `FM_HOME` set to the a
 - **Conversation**: the messages sent to it and its replies (see below);
 - **Last outcomes**: the newest lines on its parent channel that answer no message, such as a
   decision it held for you or a child's result;
-- **Peek at its terminal**, which reads it with `bin/fm-peek.sh` as the agents list does for a
+- **Peek at its terminal**, which reads it with `bin/fm-peek.sh` as Underway does for a
   crewmate.
 
 Where the records come from:
@@ -370,8 +370,8 @@ Where the records come from:
 | What was sent to it | Its steering inbox in the main home, `state/<mate>.inbox/` and `handled/`, in the record format `bin/fm-task-inbox-lib.sh` owns. |
 | What came back | Its parent channel, `state/<mate>.status` in the main home, which `docs/secondmate-parent-channel.md` describes. |
 
-The snapshot runs again when the main home's `state/` or `data/` changes, and also when a mate
-home's `state/` changes, because each mate publishes its summary there.
+The snapshot runs again when the main home's status logs, task records or `data/` change, and
+also when a mate home's status logs, task records or published summary change.
 
 ![A working second mate with two tasks in flight](screens/second-mates/mate-working.png)
 
@@ -516,8 +516,8 @@ chief of staff an empty backlog and no task records, and loses nothing in the cl
   update stops and names the files.
 - Starting the chief of staff as firstmate: the session-start digest reaches the model and the
   session takes the home's lock.
-- Reading a task held for the captain through firstmate's snapshot script into **Needs your
-  input**.
+- Reading a task held for the captain through firstmate's snapshot script into **Waiting on
+  you**.
 - Adding a project through the chat. Measured once with the ignored test
   `real_firstmate_adds_a_local_folder_as_a_project` (Claude Code 2.1.311 with Sonnet, firstmate
   `427056c4`, a scratch home): from **Add a project**, firstmate asked for the repository, the
@@ -540,7 +540,7 @@ delivered a message whose correlation id the app found, and a reply from the rea
 `bin/fm-secondmate-report.sh` paired with it.
 
 **Works against stand-ins only** (the fake `claude` and stand-in scripts in a scratch upstream):
-the answer flow, merge approvals, the agents list and the peek view. The projects list, its
+the answer flow, merge approvals, Underway and the peek view. The projects list, its
 empty state and the add controls also run on the fake `claude`, with the test writing the
 registry that firstmate's procedure would write. So do the second mates' list, pages, guided
 add, actions, conversation and escalations, with stand-ins of `bin/fm-home-seed.sh`,
@@ -555,7 +555,7 @@ shaped like the real one (`scripts/fixtures/bearings-mates.json`).
 - A merge approval row from a real pull request. The fixture's rows are written by hand in the
   shape firstmate's script produces.
 - A real crewmate in flight under the app: the watcher arming at turn end, a status change
-  waking the session, the supervision host, and the agents list and peek fed by it.
+  waking the session, the supervision host, and Underway and the peek fed by it.
 - Whether Claude Code stops firstmate's hook processes when the app ends a session.
 - The folder dialog. Tests replace it; `osascript` and `zenity` were not run by a test.
 - Adding a project from a git URL, which clones over the network and may set up no-mistakes, and
@@ -574,7 +574,7 @@ approves its own crew was not in scope and is unchanged.
 **Proposed firstmate changes** (none is made by this app):
 
 1. A structured marker on a captain hold that says whether the captain must answer or act, so
-   **For you to do** can be filled from firstmate's records.
+   notes in Waiting on you can be filled from firstmate's records.
 2. The close mode of each hold (close the task, or release held work) in the bearings snapshot,
    so the app can feed the keyed-answer intake directly and still tell the chief of staff.
 3. A way to start supervision when a session opens, so that a crewmate's status change is

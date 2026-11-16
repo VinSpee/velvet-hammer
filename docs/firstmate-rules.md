@@ -13,7 +13,7 @@ All rules are on by default.
 ## How a rule decides
 
 - A rule only **denies** a tool use, with a reason the model reads and can act on, or **asks**
-  the captain in **Needs your input**, with a question that names the exact pull request, task,
+  the captain in **Waiting on you**, with a question that names the exact pull request, task,
   file or remote, followed by the reason and the tool's whole input. A rule never allows.
 - Rules run before the [tool-approval settings](../README.md#tool-approval). A rule's deny is
   final. A rule's question is asked in every approval mode, including **Run without asking**, and

@@ -63,7 +63,7 @@ due shows in three places:
 - a **banner** over the middle column, outlined in orange, with the reminder's text, when it was
   set and when it was due, and **Done**, **Snooze** and **Delete**. If more than one is due, it
   shows the latest and a button to all reminders;
-- a card at the **top of For you to do**, with the same actions;
+- a card in **Waiting on you**, at the top of the fleet panel, with the same actions;
 - a **system notification**, where the platform and Rune allow it: on macOS, Notification Center,
   through Rune's `rune-notify`. Only an app run from a `.app` bundle may post there, and macOS asks
   the captain's permission the first time. Velvet Hammer run with `cargo run` is not bundled, and a
@@ -76,7 +76,7 @@ A reminder that came due while the app was not running shows as due, marked **ov
 as the app opens.
 
 **Set in this message.** A reminder keeps the id of the captain's message the chief of staff was
-answering when it set it, and shows **↪ Set in this message** in the banner, its For you to do
+answering when it set it, and shows **↪ Set in this message** in the banner, its Waiting on you
 card and the Reminders page. Pressing it goes to that message the way a
 [message link](links.md) does: the chat scrolls to it and highlights it briefly, or says it is
 not in the chat when the conversation history no longer holds it. `app_reminders` gives the
@@ -93,7 +93,7 @@ page.
 The **Reminders** card under the agents, which says how many are due, coming up and later, opens
 the **Reminders** page: **Due now**, **Coming up** in time order, and the **Later list**, each
 reminder with its time, its text, when it was set, and its actions. **All reminders** at the
-bottom of For you to do opens it too. **Reminder settings** is the **Reminders** section of
+bottom of Waiting on you opens it too. **Reminder settings** is the **Reminders** section of
 **Settings** (Cmd+, on macOS), whose card sums them up ("later today by 6:00 PM · mornings 9:00
 AM"); **Settings** on the Reminders page opens it too. It has each
 setting with **−** and **+** (hours one at a time, times by half an hour, the day of the week
@@ -140,7 +140,7 @@ outside the app.
 | State | Screenshot |
 | --- | --- |
 | The Reminders page with a reminder of each form | [reminders-list.png](screens/reminders/reminders-list.png) |
-| Two reminders due, one overdue: the banner and For you to do | [reminder-fired.png](screens/reminders/reminder-fired.png) |
+| Two reminders due, one overdue: the banner and Waiting on you | [reminder-fired.png](screens/reminders/reminder-fired.png) |
 | The snooze menu open on the banner | [reminder-snooze.png](screens/reminders/reminder-snooze.png) |
 | Reminder settings, with what each keyword means now | [reminder-settings.png](screens/reminders/reminder-settings.png) |
 | **Set in this message** pressed: the chat at the captain's message, highlighted | [reminder-link-opened.png](screens/reminders/reminder-link-opened.png) |

@@ -12,9 +12,10 @@ The app installs and updates its own clone of
 [firstmate](https://github.com/kunchenguid/firstmate), and the chief of staff runs inside it as
 firstmate, with its own operational home (see
 [The managed firstmate clone](docs/firstmate.md)).
-**Needs your input** shows the tasks firstmate holds for you and the merges waiting for your
-approval, read from firstmate's own records, together with the tool uses waiting for your
-approval. Which tool uses wait for you is a setting: by default, as recommended, the chief of
+The fleet panel on the right shows how firstmate's fleet stands, from firstmate's own records
+and at no model cost, and pins **Waiting on you** at its top: the tasks firstmate holds for you,
+the merges waiting for your approval and the tool uses waiting for your approval (see
+[The fleet panel](docs/fleet.md)). Which tool uses wait for you is a setting: by default, as recommended, the chief of
 staff runs its tools without asking and every tool use is logged (see
 [Tool approval](#tool-approval)). Ahead of that setting, the same hook enforces the firstmate rules
 a tool call shows: a merge, a forced push, a teardown that discards work, a write into a project
@@ -24,13 +25,15 @@ digests, lists, choices and tables as views by default, and a reply of that kind
 text is sent back once for a view (see [Visual replies](docs/visual-replies.md)). A message you
 send while the chief of staff is working goes to it at once and is taken in at its next step;
 queueing such messages until it is done is a setting (see
-[Messages sent while the chief of staff works](docs/messages.md)). **For you to do** shows the notes Claude Code adds with the app's `app_note` tool. Telling
+[Messages sent while the chief of staff works](docs/messages.md)). Waiting on you also shows the notes Claude Code adds with the app's `app_note` tool. Telling
 the chief of staff "remind me in 20 minutes", "later today", "tomorrow morning", "in 3 days",
 "next week" or "later" sets a reminder with the app's `app_remind` tool; the app works out the
-time, and when it comes due it shows in a banner, at the top of For you to do and in Notification
-Center where the app may post (see [Reminders](docs/reminders.md)). The
-agents list shows the tasks firstmate has in flight, and selecting one shows that crewmate's
-terminal. The **Projects** list shows the projects in firstmate's records, and **Add project**
+time, and when it comes due it shows in a banner, in Waiting on you and in Notification
+Center where the app may post (see [Reminders](docs/reminders.md)). Under Waiting on you,
+**Underway** shows the tasks firstmate has in flight, and selecting one shows that crewmate's
+terminal; **Recently landed** and **Charted next** follow. **Ahoy** and **Bearings** ask the
+chief of staff for `/ahoy` and `/bearings`, and the app sends `/bearings` by itself once, on its
+first launch of a day. The **Projects** list shows the projects in firstmate's records, and **Add project**
 starts a guided conversation in which the chief of staff adds one with firstmate's own procedure;
 with no projects yet, the chat opens with a prompt to add the first (see
 [Projects](docs/firstmate.md#projects)). **Second mates** lists firstmate's second mates with
@@ -101,15 +104,18 @@ The window has three columns, and every setting is in **Settings** (see
   comes as a selector with the recommended option marked, and your click goes back as that
   option's exact value. Nothing in a view runs code, reads files or reaches the network. See
   [Views in the chat](docs/json-render.md).
-- **Needs your input** and **For you to do** (right): questions the agents are waiting on, each
-  with answer buttons, and steps only you can take, each with a **Done** button. Reminders that
-  came due come first in For you to do, with **Done**, **Snooze** and **Delete**, and a banner
-  over the middle column shows the latest.
+- **The fleet panel** (right): **Waiting on you** at the top, with the questions the agents are
+  waiting on, each with answer buttons, the holds and merges firstmate has for you, reminders that
+  came due, with **Done**, **Snooze** and **Delete**, and steps only you can take, each with a
+  **Done** button; a banner over the middle column also shows the latest reminder. Under it,
+  firstmate's fleet: **Underway**, **Recently landed** and **Charted next**, refreshed when
+  firstmate's records change, with **Refresh**, **Ahoy** and **Bearings**. See
+  [The fleet panel](docs/fleet.md).
 - **Workers** (a section of Settings): crewmates on models other than Claude, such as
   DeepSeek V4.1 Flash on an opencode Go plan. They run on pi, which the app installs and checks
   itself, with the provider key kept in the macOS keychain; Claude workers stay on Claude Code
   and your subscription. The page also edits worker nicknames, so "send a hacker to look into
-  it" sends that preset, and each worker in the agents list shows what it runs on. See
+  it" sends that preset, and each worker under Underway shows what it runs on. See
   [Workers on other providers](docs/worker-providers.md).
 
 ## Settings and menus
@@ -137,8 +143,8 @@ conversation**, and **Clear history**, which asks before it deletes anything (se
 [The conversation: find and history](docs/conversation.md#history)). The settings are kept in
 `history.json` beside the other settings files.
 
-The main window keeps what you use all the time: the agents and projects, the chat, **Needs your
-input** and **For you to do**.
+The main window keeps what you use all the time: the agents and projects, the chat and the fleet
+panel.
 
 | State | Screenshot |
 | --- | --- |
@@ -192,8 +198,14 @@ input** and **For you to do**.
 - `src/secondmates.rs`: firstmate's second mates: the registry and snapshot read into one record per
   mate, the guided add, the actions that run firstmate's scripts, and each mate's conversation
   (see [docs/firstmate.md](docs/firstmate.md#second-mates)). Its page is in `src/view/mates.rs`.
-- `src/bearings.rs`: what waits on the captain, read from firstmate's records by running its
-  `bin/fm-bearings-snapshot.sh --json` whenever the records change.
+- `src/bearings.rs`: what waits on the captain and how the fleet stands, read from firstmate's
+  records by running its `bin/fm-bearings-snapshot.sh --json` on a background thread when they
+  may have changed, and the last snapshot kept for the next launch.
+- `src/refresh.rs`: when that snapshot runs again: changes made together share one run, and runs
+  are at least five seconds apart.
+- `src/fleet.rs`: the fleet panel's state, the Ahoy and Bearings commands, and the `/bearings`
+  sent on the first launch of a day. Its view is `src/view/fleet.rs` (see
+  [docs/fleet.md](docs/fleet.md)).
 - `scripts/fake-claude`: a stand-in for `claude` that speaks the same protocol without an account.
   Tests and the sign-in scenes run the app on it.
 - `src/attach.rs`: attachments: copying a pasted or dropped file into the data directory, the
@@ -252,9 +264,9 @@ talks to Anthropic:
   links to quoted (see [Message links](docs/links.md)).
 - **Tools and hooks.** The chat session also gets `--mcp-config` and `--settings` flags that point
   at a server the app runs on `127.0.0.1` for that session only. Its `app_note` tool adds a note
-  to **For you to do**, its `app_ui` tool shows a view in the chat, and its PreToolUse hook applies
+  to **Waiting on you**, its `app_ui` tool shows a view in the chat, and its PreToolUse hook applies
   [firstmate's rules](docs/firstmate-rules.md) and your [tool-approval](#tool-approval) settings
-  to every tool use: it runs it, refuses it, or asks you in **Needs your input**. Its
+  to every tool use: it runs it, refuses it, or asks you in **Waiting on you**. Its
   UserPromptSubmit and Stop hooks carry [visual replies](docs/visual-replies.md). Your Claude
   settings files are not changed. See
   [docs/extending.md](docs/extending.md), which also covers skills, subagents, the Agent SDK and
@@ -308,7 +320,7 @@ are checked first; a rule's deny is final, and its question is asked whatever th
   not a sandbox: they compare text, so extra spaces (`git  push`), an `env` or `sudo` prefix,
   `bash -c "git push"`, a script that runs the command, or a relative or `..` path gets past
   one.
-- **Asking.** A tool use that waits for you appears in **Needs your input** with all of its
+- **Asking.** A tool use that waits for you appears in **Waiting on you** with all of its
   input, as before. An input larger than 64 KB that would be asked about is denied, because
   approving a partial view would approve what you never saw.
 - **Trying it.** The page shows what the settings decide for an example tool call you type.
@@ -386,9 +398,9 @@ It writes these files to `OUT_DIR`:
 
 | File | State |
 | --- | --- |
-| `chat.png`, `chat.json` | The chat with both panels populated |
+| `chat.png`, `chat.json` | The chat with Waiting on you filled (the simulated chief of staff has no fleet) |
 | `replied.png`, `replied.json` | After the captain sends a message and the stub replies |
-| `empty.png`, `empty.json` | Both panels empty |
+| `empty.png`, `empty.json` | Nothing waiting on you |
 | `peek.png`, `peek.json` | Peeking at a subagent's transcript |
 | `signed-out.png`, `signed-out.json` | Claude Code is not signed in: the sign-in screen |
 | `signing-in.png`, `signing-in.json` | `claude auth login` is running and printed its sign-in page |
@@ -396,7 +408,7 @@ It writes these files to `OUT_DIR`:
 | `expired.png`, `expired.json` | Anthropic rejected the sign-in for a message |
 | `cli-missing.png`, `cli-missing.json` | No `claude` on `PATH` |
 | `claude-error.png`, `claude-error.json` | A message failed, with Claude Code's error in the chat |
-| `noted.png`, `noted.json` | Claude Code called the `app_note` tool: a note in For you to do |
+| `noted.png`, `noted.json` | Claude Code called the `app_note` tool: a note in Waiting on you |
 | `approval.png`, `approval.json` | The PreToolUse hook is waiting for you to allow or deny a Bash command |
 | `approval-long.png`, `approval-long.json` | The same question for a very long command, shown whole in a scrollable block |
 | `approved.png`, `approved.json` | After you allowed it, with the reply |
@@ -411,8 +423,12 @@ It writes these files to `OUT_DIR`:
 | `firstmate-modified.png`, `firstmate-modified.json` | A file in the clone was edited |
 | `firstmate-blocked.png`, `firstmate-blocked.json` | An edit conflicts with the update, which is blocked |
 | `firstmate-session.png`, `firstmate-session.json` | The chat running as firstmate in the managed clone |
-| `firstmate-panels.png`, `firstmate-panels.json` | **Needs your input** filled from firstmate's records: two held tasks and a merge approval |
-| `firstmate-crew.png`, `firstmate-crew.json` | Peeking at a crewmate's terminal from the agents list |
+| `firstmate-panels.png`, `firstmate-panels.json` | **Waiting on you** filled from firstmate's records: two held tasks and a merge approval |
+| `firstmate-crew.png`, `firstmate-crew.json` | Peeking at a crewmate's terminal from Underway |
+| `fleet.png`, `fleet.json` | The fleet panel with every section filled: a decision, a merge, a blocked worker, landed work |
+| `fleet-charted.png`, `fleet-charted.json` | The fleet panel with Underway and Recently landed closed and Charted next open |
+| `fleet-empty.png`, `fleet-empty.json` | The fleet panel on an empty fleet |
+| `fleet-failed.png`, `fleet-failed.json` | A snapshot kept from an earlier launch while this launch's run fails |
 | `firstmate-answering.png`, `firstmate-answering.json` | After choosing **Answer** on a held task |
 | `projects-fresh.png`, `projects-fresh.json` | A fresh install: no home yet, no projects, and adding waits for the chat |
 | `projects-empty.png`, `projects-empty.json` | An installed home with no projects: the prompt to add the first one |
@@ -473,7 +489,7 @@ and stop hooks; the `rules` scenes run the fake `claude` as firstmate in a scrat
 | `workers-fresh.png`, `workers-fresh.json` | The Workers page before anything is set up, with the example nickname |
 | `workers-settings.png`, `workers-settings.json` | pi installed from a stand-in release, the key found, firstmate pointed at the runtime, and a second nickname |
 | `workers-claude-refused.png`, `workers-claude-refused.json` | A Claude model refused for a pi nickname |
-| `workers-crew.png`, `workers-crew.json` | The agents list showing what each worker runs on |
+| `workers-crew.png`, `workers-crew.json` | Underway showing what each worker runs on |
 | `find.png`, `find.json` | The find bar on a long chat: four matches, the first current |
 | `find-stepped.png`, `find-stepped.json` | The third match current, scrolled into view |
 | `find-none.png`, `find-none.json` | A query with no matches |
@@ -490,7 +506,7 @@ and stop hooks; the `rules` scenes run the fake `claude` as firstmate in a scrat
 | `menu-linux.png`, `menu-linux.json` | The same on Linux, with **Edit › Preferences** and Find open |
 | `menus-*.json` | `scripts/menus.json`: Settings and Find picked from the menu bar, then Cmd+, |
 | `reminders-list.png`, `reminders-list.json` | The Reminders page with a reminder of each form, on a fixed clock (Friday, 2:30 PM) |
-| `reminder-fired.png`, `reminder-fired.json` | Two reminders due, one overdue: the banner and the top of For you to do |
+| `reminder-fired.png`, `reminder-fired.json` | Two reminders due, one overdue: the banner and Waiting on you |
 | `reminder-snooze.png`, `reminder-snooze.json` | The snooze menu open on the banner |
 | `reminder-settings.png`, `reminder-settings.json` | Reminder settings, with what each keyword means now |
 | `reminder-link-opened.png`, `reminder-link-opened.json` | A due reminder's **Set in this message** pressed: the chat at the captain's message, highlighted |
@@ -517,7 +533,7 @@ does not exist. The `mates`, `mate` and `add-mate` scenes run the fake
 firstmate's second-mate scripts that write what the real ones did (see
 [Second mates](docs/firstmate.md#second-mates)). The
 walkthrough runs on the stub's `chat` scene. The `.json` files are Rune element trees. The script then checks them for the keys and text each
-state must or must not have (for example `needs-input`, `input-1`, `for-you-empty`, `peek`) and
+state must or must not have (for example `waiting`, `input-1`, `waiting-empty`, `peek`) and
 exits non-zero if any check fails.
 
 The individual commands, if you want to run one by hand:

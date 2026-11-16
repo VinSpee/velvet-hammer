@@ -24,7 +24,7 @@ The **Workers** section of Settings opens the page for all of this.
 | Nicknames | `config/crew-nicknames.json` in the app's firstmate home (gitignored with the rest of firstmate's `config/`). With no file, the app offers one example, `hacker`, from memory; the file is written only when the captain adds, edits or deletes a nickname on the Workers page. | `src/crew.rs` |
 | Request resolution | With each of the captain's messages, the app's `UserPromptSubmit` hook tells the chief of staff the nicknames and how to send a worker, and, when the message asks for one, what the app made of it. | `src/crew.rs` (`request`, `resolve`, `context`), `src/bridge.rs` |
 | Claude stays on the subscription | A Claude model never runs through pi. The registry refuses one, the resolver never offers one, and the firstmate rule **Claude workers run only on your subscription** denies a spawn that tries (see [Firstmate's rules](firstmate-rules.md)). | `src/crew.rs`, `src/guard.rs` |
-| The fleet view | Each worker in the agents list shows what it runs on, such as `pi · opencode-go/deepseek-v4.1-flash`, from the `harness=` and `model=` lines of firstmate's `state/<id>.meta`. | `src/bearings.rs` (`runs`) |
+| The fleet view | Each worker under Underway in the fleet panel shows what it runs on, such as `pi · opencode-go/deepseek-v4.1-flash`, from the `harness=` and `model=` lines of firstmate's `state/<id>.meta`. | `src/bearings.rs` (`runs`) |
 
 ### The registry's shape
 
@@ -97,7 +97,7 @@ so "send the report to Alice" adds nothing:
 | Nothing set up yet | [workers-fresh.png](screens/workers/workers-fresh.png) |
 | pi installed from a stand-in release, the key found, firstmate pointed at the runtime, and a second nickname | [workers-settings.png](screens/workers/workers-settings.png) |
 | A Claude model refused for pi | [workers-claude-refused.png](screens/workers/workers-claude-refused.png) |
-| The agents list showing what each worker runs on | [workers-crew.png](screens/workers/workers-crew.png) |
+| Underway showing what each worker runs on | [workers-crew.png](screens/workers/workers-crew.png) |
 
 ## What was verified
 
@@ -141,7 +141,7 @@ so "send the report to Alice" adds nothing:
    ```
 
 3. Ask the chief of staff "send a hacker to list the files in the README's directory" on a
-   scratch project, and watch the worker appear in the agents list as
+   scratch project, and watch the worker appear under Underway as
    `pi · opencode-go/deepseek-v4.1-flash`.
 
 ## Why pi, and not a worker built into the app
