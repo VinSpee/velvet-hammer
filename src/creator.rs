@@ -298,6 +298,9 @@ impl App {
             .trying()
             .is_some_and(|t| t.commit == change.commit)
         {
+            if self.working {
+                return;
+            }
             self.undo_change();
         }
         self.say(
