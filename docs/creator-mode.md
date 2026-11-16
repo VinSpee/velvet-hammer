@@ -55,7 +55,7 @@ This version is for macOS, changes views and styling only, and needs the app bui
    merge, `scripts/install-app.sh` installs it from `main`.
 6. **Undo.** The app swaps the last kept build back, which takes as long as a relaunch. The
    branch stays, so the worker can try again.
-7. **Discard.** The app undoes the trial if it is running, and asks your chief of staff to have
+7. **Discard.** The app undoes the trial if it is running (refused while your chief of staff is working, as Undo is), and asks your chief of staff to have
    the worker drop the branch.
 
 Only your press of **Try it**, **Undo** or **Discard** swaps the app. No tool your chief of
@@ -68,7 +68,7 @@ staff can call does, and it is told never to swap, rebuild or restart the app it
 | The branch changes more than views | The card says which paths, and the app is not changed. Deliver it as a pull request instead. |
 | The build fails | The card shows the compiler's last lines, and the app is not changed. The whole output is in `creator/job.log`. |
 | The new build does not start, or is not ready in 15 seconds | Rune's installer puts the previous build back and reopens it, and the card says the swap failed. |
-| The trial build stops later without your Quit | The build step watches the trial. It puts the last kept build back and opens it, and the card says so. Quit from the menu ends the watch instead, and opening the app again runs the trial build. |
+| The trial build stops later without your Quit | The build step watches the trial. It puts the last kept build back and opens it, and the card says so. Quit from the menu ends that watch, and opening the app again during the trial starts a new one, so a later crash is still caught. |
 | The interface is too broken to reach Undo | Open `creator/known-good/Velvet Hammer Dev.app` from Finder, or run `scripts/install-app.sh`. |
 
 `creator/` is in the app's data directory (`~/.velvet-hammer`, or `$VELVET_HAMMER_DATA`) and is
