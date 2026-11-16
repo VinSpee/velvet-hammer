@@ -114,7 +114,8 @@ unfinished.
 ## The chief of staff runs as firstmate
 
 The chat is one long-lived `claude -p` process (see the README). Velvet Hammer starts it with the
-clone as its working directory and `FM_HOME` set to `~/.velvet-hammer/home`, which it creates
+clone as its working directory and `FM_HOME` set to `~/.velvet-hammer/home` (or, with a
+[custom firstmate home](#a-custom-firstmate-home), that checkout and home), which it creates
 with the four directories firstmate expects. Claude Code then loads the clone's `AGENTS.md`,
 skills and `.claude/settings.json` hooks the way it does in a terminal, so firstmate's own
 contract governs the session. The line under the chat heading says "Running firstmate from", the
