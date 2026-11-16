@@ -1226,9 +1226,10 @@ impl App {
         }
     }
 
-    /// Where a new mate's home goes: beside the app's firstmate home.
+    /// Where a new mate's home goes: in the app's data directory, beside the managed home,
+    /// whichever home is in use.
     pub fn mates_dir(&self) -> PathBuf {
-        self.firstmate.home_dir().with_file_name("secondmates")
+        self.firstmate.mates_dir()
     }
 
     /// The captain said yes to the plan: firstmate's scripts create the mate.
@@ -1298,13 +1299,28 @@ impl App {
         self.open_mate(id);
     }
 
-    /// Runs `op` on a background thread; false when one is already running or firstmate is
-    /// not where the scripts are.
+    /// Runs `op` on a background thread; false when one is already running, firstmate is not
+    /// where the scripts are, or another session holds the home's lock. Firstmate's rule for a
+    /// session without the lock is to change nothing in the fleet, and the app keeps it too.
     fn perform_mate(&mut self, op: Op) -> bool {
         let Some(clone) = self.chief.workplace().map(Path::to_path_buf) else {
             return false;
         };
         if self.mates.running.is_some() {
+            return false;
+        }
+        if let Some(holder) = self.lock_holder() {
+            let words = format!(
+                "Another firstmate session holds this home's lock (pid {}), so Velvet Hammer \
+                 changed nothing. Ask that session, or wait until it ends.",
+                holder.pid
+            );
+            self.mate_done(Outcome {
+                op,
+                ok: false,
+                words,
+                corr: None,
+            });
             return false;
         }
         let home = self.firstmate.home_dir();

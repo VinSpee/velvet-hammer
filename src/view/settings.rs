@@ -58,7 +58,7 @@ pub fn settings_page(s: &App, t: Theme, dark: bool) -> El {
         .child(section_card(
             "firstmate",
             "Firstmate",
-            firstmate_summary(&s.firstmate).to_string(),
+            firstmate_summary(&s.firstmate),
             Showing::Firstmate,
             t,
         ))
@@ -79,7 +79,7 @@ pub fn settings_page(s: &App, t: Theme, dark: bool) -> El {
                     "When your messages reach your chief of staff while it works, how its tool \
                      uses are decided, how its replies are shown, \
                      the workers it can send on other providers, the firstmate rules its hook \
-                     enforces, the firstmate clone it runs on, and the times your reminders' \
+                     enforces, the firstmate home it runs on, and the times your reminders' \
                      words stand for. Each opens its page.",
                     t,
                 ))

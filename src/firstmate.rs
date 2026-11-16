@@ -9,6 +9,10 @@
 //! Beside the clone the app keeps firstmate's operational home, the directory firstmate calls
 //! `FM_HOME`: its backlog, task records and settings. The chief of staff runs with the clone as
 //! its working directory and that home in its environment (see [`crate::claude`]).
+//!
+//! The captain can choose a custom home instead (see [`crate::home`]). The clone is then left
+//! alone: nothing here installs, fetches or updates while a custom home is in use, and the
+//! custom checkout is never touched.
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -107,8 +111,33 @@ pub fn prepare_home(home: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
+/// Where the chief of staff runs firstmate: the checkout its `AGENTS.md`, skills, hooks and
+/// scripts come from, and the home (`FM_HOME`) they keep their records in. For a custom home
+/// both are the one folder the captain chose.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Place {
+    pub code: PathBuf,
+    pub home: PathBuf,
+    /// The captain chose this home; the app never writes to it.
+    pub custom: bool,
+}
+
+impl Place {
+    /// Creates the managed home's directories. A custom home is left as it is: firstmate's own
+    /// session start creates what it needs there.
+    pub fn prepare(&self) -> std::io::Result<()> {
+        if self.custom {
+            Ok(())
+        } else {
+            prepare_home(&self.home)
+        }
+    }
+}
+
 pub struct Firstmate {
     clone: PathBuf,
+    /// The custom home in use instead of the managed one, as [`crate::home::check`] found it.
+    custom: Option<PathBuf>,
     url: String,
     distro: Distro,
     work: Option<Work>,
@@ -143,6 +172,7 @@ impl Firstmate {
         let (tx, rx) = channel();
         Firstmate {
             clone,
+            custom: None,
             url: url.to_string(),
             distro,
             work,
@@ -165,17 +195,61 @@ impl Firstmate {
         }
     }
 
+    /// The managed clone.
     pub fn clone_dir(&self) -> &Path {
         &self.clone
     }
 
-    /// Firstmate's operational home, beside the clone.
-    pub fn home_dir(&self) -> PathBuf {
+    /// The managed home, beside the clone.
+    pub fn managed_home(&self) -> PathBuf {
         self.clone.with_file_name("home")
     }
 
+    /// The home in use: the custom one, or the managed one.
+    pub fn home_dir(&self) -> PathBuf {
+        self.place().home
+    }
+
+    /// Where the chief of staff runs firstmate now.
+    pub fn place(&self) -> Place {
+        match &self.custom {
+            Some(dir) => Place {
+                code: dir.clone(),
+                home: dir.clone(),
+                custom: true,
+            },
+            None => self.managed(),
+        }
+    }
+
+    /// The managed place, whichever is in use.
+    pub fn managed(&self) -> Place {
+        Place {
+            code: self.clone.clone(),
+            home: self.managed_home(),
+            custom: false,
+        }
+    }
+
+    /// The custom home in use, if one is.
+    pub fn custom(&self) -> Option<&Path> {
+        self.custom.as_deref()
+    }
+
+    /// Runs on the custom home `dir`, already checked, or on the managed one again.
+    pub fn use_custom(&mut self, dir: Option<PathBuf>) {
+        self.custom = dir;
+    }
+
+    /// Where second mates added from the app get their homes: beside the managed home, in the
+    /// app's data directory, whichever home is in use.
+    pub fn mates_dir(&self) -> PathBuf {
+        self.clone.with_file_name("secondmates")
+    }
+
+    /// Whether the firstmate in use is there to run: a custom home, or the installed clone.
     pub fn installed(&self) -> bool {
-        matches!(self.distro, Distro::Installed(_))
+        self.custom.is_some() || matches!(self.distro, Distro::Installed(_))
     }
 
     pub fn url(&self) -> &str {
@@ -195,7 +269,11 @@ impl Firstmate {
     }
 
     /// What the app does when it opens: install on first run, otherwise look for an update.
+    /// Nothing while a custom home is in use.
     pub fn start(&mut self) {
+        if self.custom.is_some() {
+            return;
+        }
         match self.distro {
             Distro::Missing => self.install(),
             Distro::Installed(_) => self.check(),
@@ -218,8 +296,10 @@ impl Firstmate {
         self.run(Work::Updating, update);
     }
 
+    /// Runs `op` in the managed clone. Never while a custom home is in use: the app installs
+    /// and updates only its own clone, and leaves a checkout the captain chose to the captain.
     fn run(&mut self, work: Work, op: impl FnOnce(&Path) -> Result<(), String> + Send + 'static) {
-        if self.work.is_some() {
+        if self.work.is_some() || self.custom.is_some() {
             return;
         }
         self.work = Some(work);
@@ -497,6 +577,13 @@ pub mod lab {
                  # Stands in for firstmate's bearings snapshot: prints what a test put in the home.\n\
                  cat \"$FM_HOME/data/bearings.json\" 2>/dev/null || echo '{\"schema\":\"fm-bearings.v1\"}'\n",
             );
+            lab.script(
+                "bin/fm-session-start.sh",
+                "#!/bin/sh\n\
+                 # Stands in for firstmate's session start, which a checkout must have.\n\
+                 echo 'SESSION START (stand-in)'\n",
+            );
+            lab.script("bin/fm-lock.sh", LOCK_STAND_IN);
             for (file, text) in SECONDMATE_SCRIPTS {
                 lab.script(file, &text.replacen("\n", STAND_IN, 1));
             }
@@ -562,6 +649,27 @@ pub mod lab {
         /// Firstmate's operational home in this lab.
         pub fn home(&self) -> PathBuf {
             self.data.join("home")
+        }
+
+        /// A firstmate the captain already runs, outside the app's data directory: a clone of
+        /// upstream that is also its own home, with the directories a session there created.
+        pub fn captain_home(&self) -> PathBuf {
+            let dir = self
+                .data
+                .parent()
+                .expect("the lab's root")
+                .join("captain-firstmate");
+            let _ = std::fs::remove_dir_all(&dir);
+            let ran = git(
+                None,
+                &["clone", "--quiet", &self.url(), &dir.to_string_lossy()],
+            )
+            .expect("git clone");
+            assert!(ran.ok(), "{}", ran.stderr);
+            for part in ["state", "data", "config", "projects"] {
+                std::fs::create_dir_all(dir.join(part)).expect("mkdir");
+            }
+            dir
         }
 
         /// A second mate registered in this lab's home, as `bin/fm-home-seed.sh` registers one:
@@ -656,6 +764,20 @@ pub mod lab {
         }
     }
 }
+
+/// Stands in for firstmate's `bin/fm-lock.sh status`, printing what the real one prints for a
+/// free lock, a live holder and a dead one. It never takes the lock.
+const LOCK_STAND_IN: &str = r#"#!/bin/sh
+[ "$1" = status ] || { echo "error: the lab's lock stand-in only reports status" >&2; exit 2; }
+lock="$FM_HOME/state/.lock"
+[ -e "$lock" ] || { echo "lock: free"; exit 0; }
+pid=$(sed -n 1p "$lock")
+if kill -0 "$pid" 2>/dev/null; then
+  echo "lock: held by live harness pid $pid"
+else
+  echo "lock: stale (pid $pid dead or not a harness)"
+fi
+"#;
 
 /// The start of each stand-in below, after its first line: it logs the call, then refuses if a
 /// test said to.

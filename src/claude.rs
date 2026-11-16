@@ -26,6 +26,7 @@ use serde_json::{Value, json};
 use crate::agent::{ChiefOfStaff, Event};
 use crate::attach::Attachment;
 use crate::bridge::{Bridge, Call, Policies};
+use crate::firstmate::Place;
 use crate::guard::Home;
 use crate::model::{Action, Id, Item, ItemKind, Plan, Status, Workspace};
 use crate::tools::{self, ToolUse};
@@ -42,7 +43,7 @@ const DENY: &str = "Deny";
 pub struct Claude {
     program: PathBuf,
     env: Vec<(String, String)>,
-    workplace: Option<Workplace>,
+    workplace: Option<Place>,
     outbox: Outbox,
     inbox: Receiver<Msg>,
     status: Status,
@@ -78,15 +79,6 @@ pub struct Claude {
     turn: bool,
     /// What [`Event::Working`] last said.
     working: bool,
-}
-
-/// Where a firstmate chief of staff runs: the managed clone is the working directory, so
-/// Claude Code loads its `AGENTS.md`, skills and hooks, and `home` is the `FM_HOME` its scripts
-/// keep their records in.
-#[derive(Clone)]
-struct Workplace {
-    clone: PathBuf,
-    home: PathBuf,
 }
 
 /// A tool use waiting on the captain.
@@ -136,13 +128,11 @@ impl Claude {
         self
     }
 
-    /// Runs the chat as firstmate: in the managed clone at `clone`, with `home` as firstmate's
-    /// operational home.
-    pub fn in_firstmate(mut self, clone: impl Into<PathBuf>, home: impl Into<PathBuf>) -> Self {
-        self.workplace = Some(Workplace {
-            clone: clone.into(),
-            home: home.into(),
-        });
+    /// Runs the chat as firstmate at `place`: its checkout is the working directory, so Claude
+    /// Code loads its `AGENTS.md`, skills and hooks, and its home is the `FM_HOME` its scripts
+    /// keep their records in.
+    pub fn in_firstmate(mut self, place: Place) -> Self {
+        self.workplace = Some(place);
         self
     }
 
@@ -519,7 +509,18 @@ impl ChiefOfStaff for Claude {
     }
 
     fn workplace(&self) -> Option<&Path> {
-        self.workplace.as_ref().map(|w| w.clone.as_path())
+        self.workplace.as_ref().map(|w| w.code.as_path())
+    }
+
+    fn move_to(&mut self, place: Place) {
+        if self.workplace.is_some() {
+            self.end_session();
+            self.workplace = Some(place);
+        }
+    }
+
+    fn session_pid(&self) -> Option<u32> {
+        self.session.as_ref()?.child.as_ref().map(Child::id)
     }
 
     fn approve_with(&mut self, policies: Policies) {
@@ -871,7 +872,7 @@ impl Session {
         id: u64,
         program: &PathBuf,
         env: &[(String, String)],
-        workplace: Option<&Workplace>,
+        workplace: Option<&Place>,
         policies: &Policies,
         outbox: &Outbox,
     ) -> io::Result<Session> {
@@ -881,9 +882,9 @@ impl Session {
             calls.send(Msg::Call(id, call))
         })?;
         let mut command = Command::new(program);
-        if let Some(Workplace { clone, home }) = workplace {
-            crate::firstmate::prepare_home(home)?;
-            command.current_dir(clone).env("FM_HOME", home);
+        if let Some(place) = workplace {
+            place.prepare()?;
+            command.current_dir(&place.code).env("FM_HOME", &place.home);
         }
         let mut child = subscription_only(
             command

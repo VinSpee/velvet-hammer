@@ -24,6 +24,8 @@ use std::time::{Duration, Instant, SystemTime};
 use rune::Waker;
 use serde_json::Value;
 
+use crate::firstmate::Place;
+
 /// How often the watcher looks at the home's records for a change.
 const POLL: Duration = Duration::from_secs(2);
 
@@ -192,29 +194,29 @@ pub struct Watcher {
 }
 
 impl Watcher {
-    /// Watches `home`'s records with the scripts of the firstmate clone at `clone`. It waits
-    /// quietly while the clone is not installed.
-    pub fn start(clone: &Path, home: &Path) -> Watcher {
-        Watcher::start_with(clone, home, POLL, RETRY)
+    /// Watches the records of the home at `place` with the scripts of its checkout. It waits
+    /// quietly while the checkout is not installed.
+    pub fn start(place: &Place) -> Watcher {
+        Watcher::start_with(place, POLL, RETRY)
     }
 
-    fn start_with(clone: &Path, home: &Path, poll: Duration, retry: Duration) -> Watcher {
+    fn start_with(place: &Place, poll: Duration, retry: Duration) -> Watcher {
         let (tx, rx) = channel();
         let wake: Arc<OnceLock<Waker>> = Arc::new(OnceLock::new());
         let stop = Arc::new(AtomicBool::new(false));
-        let (clone, home) = (clone.to_path_buf(), home.to_path_buf());
+        let place = place.clone();
         let (waker, stopped) = (wake.clone(), stop.clone());
         thread::spawn(move || {
             let mut seen = None;
             let mut failed_at: Option<Instant> = None;
             let mut last_problem: Option<String> = None;
             while !stopped.load(Ordering::Relaxed) {
-                let script = clone.join("bin/fm-bearings-snapshot.sh");
-                let stamp = script.exists().then(|| stamp(&home));
+                let script = place.code.join("bin/fm-bearings-snapshot.sh");
+                let stamp = script.exists().then(|| stamp(&place.home));
                 let retry_due = failed_at.is_some_and(|at| at.elapsed() >= retry);
                 if stamp.is_some() && (stamp != seen || retry_due) {
                     seen = stamp;
-                    let result = snapshot(&script, &clone, &home);
+                    let result = snapshot(&script, &place);
                     failed_at = result.is_err().then(Instant::now);
                     let repeat = matches!(&result, Err(p) if last_problem.as_ref() == Some(p));
                     last_problem = result.as_ref().err().cloned();
@@ -358,12 +360,14 @@ fn stamp(home: &Path) -> SystemTime {
     newest
 }
 
-fn snapshot(script: &PathBuf, clone: &Path, home: &Path) -> Result<Bearings, String> {
-    crate::firstmate::prepare_home(home)
+fn snapshot(script: &PathBuf, place: &Place) -> Result<Bearings, String> {
+    let home = &place.home;
+    place
+        .prepare()
         .map_err(|e| format!("Could not create {}: {e}", home.display()))?;
     let output = Command::new(script)
         .args(["--json", "--fields", "endpoints", "--all-secondmates"])
-        .current_dir(clone)
+        .current_dir(&place.code)
         .env("FM_HOME", home)
         // Firstmate's own switch for a snapshot that reads no forge.
         .env("FM_CREW_STATE_NO_FORGE", "1")
@@ -536,9 +540,13 @@ mod tests {
         .unwrap();
         std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
 
+        let place = Place {
+            code: clone,
+            home,
+            custom: false,
+        };
         let watcher = Watcher::start_with(
-            &clone,
-            &home,
+            &place,
             Duration::from_millis(20),
             Duration::from_millis(100),
         );

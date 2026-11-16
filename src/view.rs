@@ -16,6 +16,7 @@ use crate::model::{Action, Agent, Author, Item, ItemKind, Message, Plan, Status}
 use crate::projects::Project;
 
 mod attach;
+mod home;
 mod mates;
 mod messages;
 mod policy;
@@ -271,9 +272,12 @@ fn project_list(s: &App, projects: &Result<Vec<Project>, String>, t: Theme, dark
     }
 }
 
-/// The managed clone in a few words, for the card under the agents.
-fn firstmate_summary(fm: &Firstmate) -> &'static str {
-    match (fm.work(), fm.distro()) {
+/// The firstmate in use in a few words, for its card in Settings.
+fn firstmate_summary(fm: &Firstmate) -> String {
+    if let Some(dir) = fm.custom() {
+        return format!("your home at {}", dir.display());
+    }
+    let words = match (fm.work(), fm.distro()) {
         (Some(Work::Installing), _) => "installing\u{2026}",
         (Some(Work::Checking), _) => "checking for updates\u{2026}",
         (Some(Work::Updating), _) => "updating\u{2026}",
@@ -285,16 +289,28 @@ fn firstmate_summary(fm: &Firstmate) -> &'static str {
             Standing::Blocked => "update blocked",
             Standing::NotTracking => "not tracking upstream",
         },
-    }
+    };
+    words.to_string()
 }
 
-/// The managed firstmate clone: how it stands against upstream, and installing and updating it.
+/// The firstmate in use: a custom home, or the managed clone, how it stands against upstream,
+/// and installing and updating it. Then the choice of home.
 fn firstmate_page(s: &App, t: Theme, dark: bool) -> El {
     let fm = &s.firstmate;
     let path = fm.clone_dir().display().to_string();
     let mut body = col().key("firstmate-status").gap(space::S3).max_w(560.0);
     let mut buttons = row().gap(space::S2).flex_wrap();
     let (title, lede) = match fm.distro() {
+        _ if fm.custom().is_some() => (
+            "Running on your firstmate home",
+            format!(
+                "Your chief of staff runs on the firstmate at {}: its own AGENTS.md, skills, \
+                 hooks and scripts, and its fleet's records. Velvet Hammer reads it and never \
+                 installs, updates, resets or deletes anything there. Update it yourself with \
+                 git, in a terminal.",
+                fm.home_dir().display()
+            ),
+        ),
         Distro::Missing if fm.work().is_some() => (
             "Installing firstmate",
             format!("Cloning {} into {path}.", fm.url()),
@@ -324,7 +340,19 @@ fn firstmate_page(s: &App, t: Theme, dark: bool) -> El {
                 .color(t.text_secondary)
                 .wrap(),
         );
-    if let Distro::Installed(c) = fm.distro() {
+    if let Some(notice) = home::lock_notice(s, t, dark) {
+        body = body.child(notice);
+    } else if let Some(Ok(lock)) = &s.lock {
+        body = body.child(note(
+            "firstmate-lock",
+            &format!(
+                "Firstmate reports its session lock: \u{201c}{}\u{201d}.",
+                lock.said
+            ),
+            t,
+        ));
+    }
+    if let (Distro::Installed(c), None) = (fm.distro(), fm.custom()) {
         if !c.conflicts.is_empty() {
             body = body.child(warning(
                 "firstmate-conflicts",
@@ -353,6 +381,7 @@ fn firstmate_page(s: &App, t: Theme, dark: bool) -> El {
         body = body.child(warning("firstmate-problem", problem, dark));
     }
     match (fm.work(), fm.distro()) {
+        _ if fm.custom().is_some() => {}
         (Some(work), _) => {
             let words = match work {
                 Work::Installing => "This takes a moment\u{2026}",
@@ -389,7 +418,7 @@ fn firstmate_page(s: &App, t: Theme, dark: bool) -> El {
                 s.showing = Showing::Chat
             })),
     );
-    if matches!(fm.distro(), Distro::Installed(_)) {
+    if matches!(fm.distro(), Distro::Installed(_)) && fm.custom().is_none() {
         body = body.child(note(
             "firstmate-help",
             "This clone is yours to change: edit AGENTS.md, the skills under .agents/skills or \
@@ -407,12 +436,20 @@ fn firstmate_page(s: &App, t: Theme, dark: bool) -> El {
         .gap(space::S6)
         .child(heading("Firstmate", t))
         .child(
+            // Scrolls when a check's result and a question about work in flight outgrow it.
             col()
-                .padding(space::S6)
+                .min_h(0.0)
                 .radius(radius::LG)
                 .fill(t.card)
                 .border(1.0, t.card_border)
-                .child(body),
+                .scroll(ScrollSpec {
+                    stick_bottom: false,
+                })
+                .child(
+                    col()
+                        .padding(space::S6)
+                        .child(body.child(home::home_section(s, t, dark))),
+                ),
         )
 }
 
@@ -901,7 +938,7 @@ fn small_button(key: &str, label: &str, t: Theme, f: impl Fn(&mut App) + 'static
         .child(text(label.to_string()).font(type_::LABEL).color(t.text))
 }
 
-fn count(n: u32, what: &str) -> String {
+pub fn count(n: u32, what: &str) -> String {
     format!("{n} {what}{}", if n == 1 { "" } else { "s" })
 }
 
@@ -950,12 +987,23 @@ fn chat(s: &App, plan: &Plan, t: Theme, dark: bool) -> El {
         .gap(2.0)
         .child(heading("Chief of staff", t))
         .child(note("health", &health(plan), t));
-    if let Some(clone) = s.chief.workplace() {
+    if let Some(code) = s.chief.workplace() {
+        let which = if s.firstmate.custom().is_some() {
+            "your firstmate home"
+        } else {
+            "the managed home"
+        };
         header = header.child(note(
             "workplace",
-            &format!("Running firstmate from {}", clone.display()),
+            &format!("Running firstmate from {} \u{b7} {which}", code.display()),
             t,
         ));
+        if let Some(problem) = &s.home_problem {
+            header = header.child(warning("home-problem", problem, dark));
+        }
+        if let Some(notice) = home::lock_notice(s, t, dark) {
+            header = header.child(notice);
+        }
     }
     let hits = if s.find.open {
         find::search(s, &s.find.query.text)
