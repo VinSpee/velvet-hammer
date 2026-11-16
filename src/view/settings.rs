@@ -93,7 +93,8 @@ pub fn settings_page(s: &App, t: Theme, dark: bool) -> El {
                 ))
                 .child(sections),
         )
-        .child(history_section(s, t, dark));
+        .child(history_section(s, t, dark))
+        .child(super::creator::setting(s, t, dark));
     let actions = row()
         .gap(space::S2)
         .child(button("settings-close", "Back to chat", t, |s| {

@@ -154,6 +154,15 @@ conversation**, and **Clear history**, which asks before it deletes anything (se
 [The conversation: find and history](docs/conversation.md#history)). The settings are kept in
 `history.json` beside the other settings files.
 
+**Creator mode** (a Settings section, off by default, and only useful when the app is built from
+source) lets you change the app from inside it. Ask the chief of staff for a change to the app's
+views or styling; a worker makes it on a local branch, builds it and stops before pushing, and the
+change shows in Waiting on you. **Try it** swaps in the new build in a few seconds, in the same
+window with the same conversation, session and place; **Keep** asks the chief of staff to deliver
+the branch through the normal pull request path, and **Undo** swaps the last kept build back.
+**Discard** drops the change. Try it and Undo are refused while the chief of staff is working, and
+Try it is also refused while another change is being tried: Keep or Undo that one first.
+
 The main window keeps what you use all the time: the agents and projects, the chat and the fleet
 panel.
 
@@ -260,6 +269,12 @@ panel.
   and the commands they share with the keyboard shortcuts.
 - `src/markdown.rs`: prepares the chief of staff's Markdown for Rune's Markdown view, keeping
   line breaks and showing HTML as text.
+- `src/creator.rs`: creator mode: the setting, the changes to the app that workers have ready to
+  try (read from firstmate's task records), and Try it, Keep, Undo and Discard. Its build step,
+  `src/creator/build.rs`, runs as its own process (`velvet-hammer --creator try|undo DATA`): it
+  fetches the change into the app's own checkout, lets only views and styling through, builds,
+  swaps the bundle with Rune's installer, keeps the last kept build to go back to, and watches
+  the trial. The card, banner and setting are in `src/view/creator.rs`.
 - `src/view.rs`: the Rune view, with the attachment chips in `src/view/attach.rs`, the tool-use
   cards in `src/view/tool.rs` (the folding output block and the diff in `src/view/tool/`), the
   json-render views in `src/view/ui.rs`, the visual-replies and firstmate-rules pages in `src/view/policy.rs`, the Settings page and
