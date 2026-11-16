@@ -46,8 +46,12 @@ pub enum Event {
     },
     /// A new item for one of the captain's panels.
     Item(Item),
-    /// The item no longer needs the captain, such as a question whose session ended.
-    Withdrawn(Id),
+    /// The item's question can no longer be answered, for the reason given: nobody answered
+    /// in time, or its session ended. Its card stays, marked expired.
+    Expired {
+        item: Id,
+        why: String,
+    },
     /// A tool use and what was decided, for the activity log.
     Activity(Entry),
     /// Something Velvet Hammer itself did in the conversation, shown in the chat in its words.

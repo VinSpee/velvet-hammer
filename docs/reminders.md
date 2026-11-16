@@ -66,7 +66,8 @@ due shows in three places:
 - a card in **Waiting on you**, at the top of the fleet panel, with the same actions;
 - a **system notification**, where the platform and Rune allow it: on macOS, Notification Center,
   through Rune's `rune-notify`. Only an app run from a `.app` bundle may post there, and macOS asks
-  the captain's permission the first time. Velvet Hammer run with `cargo run` is not bundled, and a
+  the captain's permission the first time. `scripts/install-app.sh` installs the bundle (see
+  [Install the app](../README.md#install-the-app)). Velvet Hammer run with `cargo run` is not bundled, and a
   captain who refuses permission sees no notification; in both cases the banner and the card still
   show it. A notification is not posted while the window is in front, where the banner shows the
   reminder, and it is taken back when the captain deals with the reminder. On Windows Rune posts

@@ -139,7 +139,11 @@ fn ask_button(
 /// approval, due reminders and the steps the chief of staff left. It stays at the top, and only
 /// its own list scrolls.
 fn waiting(s: &App, t: Theme, dark: bool) -> El {
-    let mut rows: Vec<El> = s.ws.needs_input().map(|item| approval(item, t)).collect();
+    let mut rows: Vec<El> =
+        s.ws.needs_input()
+            .map(|item| approval(s, item, t))
+            .collect();
+    rows.extend(expired(s, t, dark));
     rows.extend(holds(s, t));
     rows.extend(merges(s, t));
     rows.extend(remind::panel_rows(s, t, dark));
@@ -213,7 +217,7 @@ fn waiting(s: &App, t: Theme, dark: bool) -> El {
 const WAITING_MAX_H: f32 = 380.0;
 
 /// A question from the chief of staff's hook, such as whether a tool may run.
-fn approval(item: &Item, t: Theme) -> El {
+fn approval(s: &App, item: &Item, t: Theme) -> El {
     let ItemKind::NeedsInput { options } = &item.kind else {
         unreachable!()
     };
@@ -232,7 +236,53 @@ fn approval(item: &Item, t: Theme) -> El {
             },
         ));
     }
-    card(&format!("input-{}", item.id), item, t).child(answers)
+    let key = format!("input-{}", item.id);
+    spotlit(s, card(&key, item, t), &key).child(answers)
+}
+
+/// Questions nobody answered in time stay, so the captain sees what was missed.
+fn expired(s: &App, t: Theme, dark: bool) -> Vec<El> {
+    s.ws.expired()
+        .map(|item| {
+            let ItemKind::Expired { why } = &item.kind else {
+                unreachable!()
+            };
+            let id = item.id;
+            words_card(
+                &format!("expired-{id}"),
+                &format!("Expired: {}", item.title),
+                &format!("{why}\n\n{}", item.detail),
+                t,
+            )
+            .border(1.0, tok::accent(3, dark))
+            .child(
+                row()
+                    .gap(space::S2)
+                    .center_y()
+                    .child(button(
+                        &format!("ask-again-{id}"),
+                        "Ask again",
+                        t,
+                        move |s| s.ask_again(id),
+                    ))
+                    .child(small_button(
+                        &format!("dismiss-{id}"),
+                        "Dismiss",
+                        t,
+                        move |s| s.dismiss(id),
+                    )),
+            )
+        })
+        .collect()
+}
+
+/// Outlines the card keyed `key` while a notification click has it highlighted.
+fn spotlit(s: &App, card: El, key: &str) -> El {
+    if s.spotlit(key) {
+        card.border(2.0, tok::accent(0, true))
+    } else {
+        card
+    }
 }
 
 /// The tasks firstmate holds for the captain. A second mate's hold is answered to that mate,
@@ -243,12 +293,17 @@ fn holds(s: &App, t: Theme) -> Vec<El> {
         let key = hold.key.clone();
         if let Some(owner) = hold.owner.clone() {
             let answering = s.mates.answering == Some((owner.clone(), key.clone()));
+            let card = format!("hold-{owner}-{key}");
             rows.push(
-                words_card(
-                    &format!("hold-{owner}-{key}"),
-                    &format!("Decision \u{b7} {key} \u{b7} from second mate {owner}"),
-                    &hold.question,
-                    t,
+                spotlit(
+                    s,
+                    words_card(
+                        &card,
+                        &format!("Decision \u{b7} {key} \u{b7} from second mate {owner}"),
+                        &hold.question,
+                        t,
+                    ),
+                    &card,
                 )
                 .child(row().child(button(
                     &format!("answer-{owner}-{key}"),
@@ -264,12 +319,12 @@ fn holds(s: &App, t: Theme) -> Vec<El> {
             continue;
         }
         let answering = s.answering.as_deref() == Some(&hold.key);
+        let card = format!("hold-{key}");
         rows.push(
-            words_card(
-                &format!("hold-{key}"),
-                &format!("Decision \u{b7} {key}"),
-                &hold.question,
-                t,
+            spotlit(
+                s,
+                words_card(&card, &format!("Decision \u{b7} {key}"), &hold.question, t),
+                &card,
             )
             .child(row().child(button(
                 &format!("answer-{key}"),
@@ -296,11 +351,16 @@ fn merges(s: &App, t: Theme) -> Vec<El> {
         .iter()
         .map(|merge| {
             let (task, url) = (merge.task.clone(), merge.url.clone());
-            words_card(
-                &format!("merge-{task}"),
-                &format!("Approve the merge for {task}?"),
-                &format!("{}\n{}", merge.url, merge.reason),
-                t,
+            let card = format!("merge-{task}");
+            spotlit(
+                s,
+                words_card(
+                    &card,
+                    &format!("Approve the merge for {task}?"),
+                    &format!("{}\n{}", merge.url, merge.reason),
+                    t,
+                ),
+                &card,
             )
             .child(
                 row()

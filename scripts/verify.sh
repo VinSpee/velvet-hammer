@@ -34,6 +34,7 @@ export VELVET_HAMMER_DATA=$real_data
 # The firstmate scenes run git on a scratch upstream under target/, so they need no network.
 for scene in chat replied empty peek signed-out signing-in signed-in expired cli-missing claude-error noted approval approval-long approved \
   approval-settings approval-by-rule approval-activity approval-corrupt \
+  attention-settings approval-expired attention-revealed quit-question \
   firstmate-missing firstmate-installing firstmate-up-to-date firstmate-update-available \
   firstmate-modified firstmate-blocked firstmate-session firstmate-panels firstmate-answering firstmate-crew \
   firstmate-home-checked firstmate-home-refused firstmate-home-custom firstmate-home-page firstmate-home-settings \
@@ -201,6 +202,24 @@ check approval-activity.json no  '"key": "activity-empty"'
 check approval-corrupt.json yes '"key": "approvals-problem"'
 check approval-corrupt.json yes 'so every tool use asks you'
 check approval-corrupt.json yes '"text": "● Ask every time"'
+# What gets the captain's attention: its settings, an expired question, a revealed card, and the
+# question before quitting with work in flight.
+check settings.json yes '"key": "attention"'
+check settings.json yes '4 of 4 kinds on · questions wait 8 hours'
+check attention-settings.json yes '"key": "attention-page"'
+check attention-settings.json yes '"text": "● 8 hours (Recommended)"'
+check attention-settings.json yes '"key": "attention-approval-toggle"'
+check attention-settings.json yes '"text": "Dock badge only"'
+check approval-expired.json yes '"text": "Expired: Allow Bash?"'
+check approval-expired.json yes 'Nobody answered within 1 second, so the tool use was denied.'
+check approval-expired.json yes '"key": "ask-again-1"'
+check approval-expired.json yes '"key": "dismiss-1"'
+check approval-expired.json no  '"key": "answer-1-0"'
+check attention-revealed.json yes '"key": "merge-lab-panels"'
+check quit-question.json yes '"key": "quit-question"'
+check quit-question.json yes 'Your chief of staff is in the middle of a turn, and 2 workers are in flight'
+check quit-question.json yes '"key": "quit-anyway"'
+check chat.json no  '"key": "quit-question"'
 # The managed firstmate clone: a card in Settings, and its page in each state.
 check settings.json yes '"key": "firstmate"'
 check settings.json yes '"text": "up to date"'

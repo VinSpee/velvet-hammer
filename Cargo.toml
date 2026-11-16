@@ -21,6 +21,14 @@ rune-notify = { git = "https://github.com/anomalyco/rune", rev = "f3be67ace9631e
 serde_json = "1"
 sha2 = "0.10"
 
+# The menu-bar item, the Dock badge and the question before quitting (src/menubar,
+# src/attention, src/lifecycle): AppKit through
+# the same objc2 versions Rune uses.
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.5.2"
+objc2-foundation = { version = "0.2.2", features = ["NSString", "NSThread"] }
+objc2-app-kit = { version = "0.2.2", features = ["NSApplication", "NSResponder", "NSStatusBar", "NSStatusItem", "NSStatusBarButton", "NSButton", "NSControl", "NSView", "NSMenu", "NSMenuItem", "NSImage", "NSCell", "NSDockTile"] }
+
 # Rune patches these crates in its own workspace; a dependency's [patch] does not reach this one,
 # so the app repeats Rune's [patch.crates-io] table from the same rev (see Rune's README,
 # "Depending on Rune").

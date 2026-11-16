@@ -31,7 +31,13 @@ queueing such messages until it is done is a setting (see
 the chief of staff "remind me in 20 minutes", "later today", "tomorrow morning", "in 3 days",
 "next week" or "later" sets a reminder with the app's `app_remind` tool; the app works out the
 time, and when it comes due it shows in a banner, in Waiting on you and in Notification
-Center where the app may post (see [Reminders](docs/reminders.md)). Under Waiting on you,
+Center where the app may post (see [Reminders](docs/reminders.md)). A tool use, a merge or a
+decision that waits on you posts a macOS notification and counts on the Dock icon, and a blocked
+or failed worker counts too; a question from the hook waits eight hours by default, and one
+nobody answered stays in Waiting on you as an expired card with **Ask again**. On macOS, closing
+the window keeps the app running behind a menu-bar item, and Quit asks first while work is in
+flight (see [What gets your attention](docs/attention.md)). `scripts/install-app.sh` builds and
+installs `Velvet Hammer.app` (see [Install the app](#install-the-app)). Under Waiting on you,
 **Underway** shows the tasks firstmate has in flight, and selecting one shows that crewmate's
 terminal; **Recently landed** and **Charted next** follow. **Ahoy** and **Bearings** ask the
 chief of staff for `/ahoy` and `/bearings`, and the app sends `/bearings` by itself once, on its
@@ -128,8 +134,8 @@ Configuration is out of the main window, behind the platform's Settings menu ite
   the standard text actions (Undo, Redo, Cut, Copy, Paste, Select All) and then **Find…**
   (Cmd+F), **Find Next** (Cmd+G) and **Find Previous** (Shift+Cmd+G). The Window menu has
   Minimize and Close, and Help has **Velvet Hammer Help**, which opens this README on GitHub.
-  Run from `cargo`, the application menu is titled with the binary's name, `velvet-hammer`; an
-  app bundle would give it the app's name.
+  Run from `cargo`, the application menu is titled with the binary's name, `velvet-hammer`; the
+  installed app (see [Install the app](#install-the-app)) titles it **Velvet Hammer**.
 - **Windows and Linux** get no native menu bar, because Rune has none there. The window draws the
   closest equivalent along its top instead: **File › Settings** (Ctrl+,) on Windows, **Edit ›
   Preferences** (Ctrl+,) on Linux, as GNOME and KDE apps say, **Edit › Find…** (Ctrl+F), **Find
@@ -137,7 +143,8 @@ Configuration is out of the main window, behind the platform's Settings menu ite
   Velvet Hammer Help**. Text actions stay on the usual keys; the drawn Edit menu does not list
   them.
 
-**Settings** shows each section with its setting in a few words: **Messages**, **Tool approval**, **Visual
+**Settings** shows each section with its setting in a few words: **Messages**, **Tool approval**,
+**Attention** (notifications, the Dock badge and how long a question waits), **Visual
 replies**, **Firstmate rules** and **Firstmate** (the firstmate home in use: the managed clone or
 a [custom home](docs/firstmate.md#a-custom-firstmate-home)) each open their page, which
 works as before and has **All settings** to come back. **Conversation history** is set on the
@@ -206,6 +213,17 @@ panel.
 - `src/secondmates.rs`: firstmate's second mates: the registry and snapshot read into one record per
   mate, the guided add, the actions that run firstmate's scripts, and each mate's conversation
   (see [docs/firstmate.md](docs/firstmate.md#second-mates)). Its page is in `src/view/mates.rs`.
+- `src/attention.rs`: what gets the captain's attention: the four kinds of waiting thing, the
+  notifications and Dock badge for them (each once, taken back when answered), the setting that
+  turns each kind off, and how long a hook question waits (see [docs/attention.md](docs/attention.md)).
+  Its page and the question before quitting are in `src/view/attention.rs`.
+- `src/lifecycle.rs`: closing the window and quitting: what is in flight, and on macOS the
+  question put in front of AppKit's quit request (`src/lifecycle/mac.rs`).
+- `src/menubar.rs`: the macOS menu-bar item that keeps the app reachable with its window closed
+  (`src/menubar/mac.rs`, AppKit's `NSStatusItem`).
+- `src/shell_path.rs`: the login shell's `PATH` for an app opened from Finder, so `claude` and
+  firstmate's tools are found.
+- `scripts/install-app.sh`: builds `Velvet Hammer.app` and installs it into `/Applications`.
 - `src/bearings.rs`: what waits on the captain and how the fleet stands, read from firstmate's
   records by running its `bin/fm-bearings-snapshot.sh --json` on a background thread when they
   may have changed, and the last snapshot kept for the next launch.
@@ -293,7 +311,9 @@ talks to Anthropic:
   the chat.
 
 The app looks for `claude` on its `PATH`. When you start it from a terminal with `cargo run`, that
-is your shell's `PATH`.
+is your shell's `PATH`. When Finder, the Dock or `open` starts it, macOS gives it only a bare
+`PATH`, so the app asks your login shell for its `PATH` and adds the folders Claude Code's
+installers use (`~/.local/bin`, `~/.claude/local`, `/opt/homebrew/bin` and `/usr/local/bin`).
 
 **How this fits Anthropic's terms.** Anthropic's Claude Code legal and compliance page
 (https://code.claude.com/docs/en/legal-and-compliance) says that third-party developers may not
@@ -330,8 +350,11 @@ are checked first; a rule's deny is final, and its question is asked whatever th
   `bash -c "git push"`, a script that runs the command, or a relative or `..` path gets past
   one.
 - **Asking.** A tool use that waits for you appears in **Waiting on you** with all of its
-  input, as before. An input larger than 64 KB that would be asked about is denied, because
-  approving a partial view would approve what you never saw.
+  input, as before, and posts a notification while the app is not in front. It waits eight hours
+  by default (a setting on the **Attention** page); then it is denied and its card stays, marked
+  expired, with **Ask again** (see [What gets your attention](docs/attention.md)). An input
+  larger than 64 KB that would be asked about is denied, because approving a partial view would
+  approve what you never saw.
 - **Trying it.** The page shows what the settings decide for an example tool call you type.
   **Reset to the recommended default** asks once before it deletes your rules.
 - **Activity log.** Every tool use, with the start of its command or path (200 characters) and
@@ -394,6 +417,43 @@ Rune is pinned to one rev of its `dev` branch in `Cargo.toml`, together with the
 `[patch.crates-io]` entries Rune's README asks dependent apps to repeat. Bump all of them
 together.
 
+## Install the app
+
+On a Mac, `scripts/install-app.sh` builds the release binary and installs it as
+`/Applications/Velvet Hammer.app`. Run it again to update: quit Velvet Hammer first, or quit and
+reopen it afterwards to run the new build. It takes another folder as its argument, such as
+`scripts/install-app.sh ~/Applications`. It needs the same toolchain as **Build and run**.
+
+```sh
+scripts/install-app.sh
+open "/Applications/Velvet Hammer.app"
+```
+
+The bundle has the identifier `io.github.vinspee.velvet-hammer` and uses `assets/AppIcon.icns`
+as its icon when that file exists; there is none yet, so macOS shows its generic icon. It is signed ad hoc for
+this Mac only, which is enough for notifications; local notifications need no entitlement. It is
+not signed with a developer ID or notarized, and it does not update itself.
+
+**First launch and Gatekeeper.** A bundle built on your Mac carries no quarantine flag, so
+Gatekeeper does not check it, and it opens with a double-click like any other app. (The script
+also clears the flag in case a copy picked one up.) If you copy the app to another Mac, or
+download it, macOS refuses to open it the first time because it is not notarized: Control-click
+it in Finder and choose **Open**, then **Open** again, or allow it under **System Settings ›
+Privacy & Security › Open Anyway**. Either way macOS remembers the choice. The first notification
+then asks for permission; allow it, or turn notifications on later under **System Settings ›
+Notifications › Velvet Hammer**.
+
+**Finding Claude Code.** An app opened from Finder, the Dock or Spotlight starts with the bare
+`PATH` `/usr/bin:/bin:/usr/sbin:/sbin`, which holds neither `claude` nor the `gh`, `jq` and other
+tools firstmate's scripts run. Opened as a bundle, Velvet Hammer asks your login shell for its
+`PATH` (as a terminal window gets it, with a five-second limit), and adds the folders Claude Code
+installs into (`~/.local/bin`, `~/.claude/local`, `/opt/homebrew/bin`, `/usr/local/bin`) that
+exist. Run from a terminal that already finds `claude`, it keeps that terminal's `PATH`.
+
+The app keeps its data in `~/.velvet-hammer` whichever way it starts; set `VELVET_HAMMER_DATA` to
+use another folder (`open "/Applications/Velvet Hammer.app" --env VELVET_HAMMER_DATA=/path`). To
+remove the app, quit it and move `Velvet Hammer.app` to the Trash; its data stays.
+
 ## Verify headlessly
 
 Rune renders the same frames without a window, on a fixed virtual clock. One command builds the
@@ -430,6 +490,10 @@ It writes these files to `OUT_DIR`:
 | `approval-by-rule.png`, `approval-by-rule.json` | An ask rule bringing up the full-input question while running without asking |
 | `approval-activity.png`, `approval-activity.json` | The activity log after a command run without asking, one denied by a rule and one you allowed |
 | `approval-corrupt.png`, `approval-corrupt.json` | The Tool approval page when its settings file could not be read |
+| `attention-settings.png`, `attention-settings.json` | The Attention page: each kind with its switch, and how long a question waits |
+| `approval-expired.png`, `approval-expired.json` | A question nobody answered within its wait (set to one second here), expired, with **Ask again** and **Dismiss** |
+| `attention-revealed.png`, `attention-revealed.json` | The merge card a notification click revealed, outlined |
+| `quit-question.png`, `quit-question.json` | The question before quitting while a turn runs and two workers are in flight |
 | `firstmate-missing.png`, `firstmate-missing.json` | The Firstmate page with no clone installed |
 | `firstmate-installing.png`, `firstmate-installing.json` | The clone is being installed |
 | `firstmate-up-to-date.png`, `firstmate-up-to-date.json` | The clone matches upstream |

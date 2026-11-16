@@ -16,6 +16,7 @@ use crate::model::{Agent, Author, Message, Plan, Status};
 use crate::projects::Project;
 
 mod attach;
+mod attention;
 mod fleet;
 mod home;
 mod mates;
@@ -47,6 +48,7 @@ pub fn view(s: &App, cx: &mut Cx<App>) -> El {
         (Showing::AddMate, ..) => mates::add_page(s, t, cx.system_dark()),
         (Showing::Firstmate, ..) => firstmate_page(s, t, cx.system_dark()),
         (Showing::Approvals, ..) => approvals_page(s, t, cx.system_dark()),
+        (Showing::Attention, ..) => attention::attention_page(s, t, cx.system_dark()),
         (Showing::Activity, ..) => activity_page(s, t, cx.system_dark()),
         (Showing::Visuals, ..) => visuals_page(s, t, cx.system_dark()),
         (Showing::Rules, ..) => rules_page(s, t, cx.system_dark()),
@@ -61,15 +63,27 @@ pub fn view(s: &App, cx: &mut Cx<App>) -> El {
         (_, None, Status::Ready(plan)) => chat(s, plan, t, cx.system_dark()),
         (_, None, status) => sign_in(status, s.queue.len(), t, cx.system_dark()),
     };
-    // A reminder that came due stays over whatever the middle column shows.
-    let main = match remind::banner(s, t, cx.system_dark()) {
-        Some(banner) => col()
+    // A reminder that came due, and the question before quitting, stay over whatever the
+    // middle column shows.
+    let over: Vec<El> = attention::quit_question(s, t, cx.system_dark())
+        .into_iter()
+        .chain(remind::banner(s, t, cx.system_dark()))
+        .collect();
+    let main = if over.is_empty() {
+        main
+    } else {
+        col()
             .grow(1.0)
             .h_full()
             .min_h(0.0)
-            .child(col().px(space::S6).pt(space::S6).child(banner))
-            .child(main),
-        None => main,
+            .child(
+                col()
+                    .px(space::S6)
+                    .pt(space::S6)
+                    .gap(space::S3)
+                    .children(over),
+            )
+            .child(main)
     };
     let window = row()
         .w_full()

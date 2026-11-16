@@ -114,6 +114,9 @@ pub enum ItemKind {
     NeedsInput { options: Vec<String> },
     /// A step only the captain can take; the agent waits for it to be marked done.
     ForYou,
+    /// A question that can no longer be answered, and why: its card stays so the captain sees
+    /// what was missed and can have it asked again.
+    Expired { why: String },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -197,6 +200,12 @@ impl Workspace {
         self.items
             .iter()
             .filter(|i| matches!(i.kind, ItemKind::NeedsInput { .. }))
+    }
+
+    pub fn expired(&self) -> impl Iterator<Item = &Item> {
+        self.items
+            .iter()
+            .filter(|i| matches!(i.kind, ItemKind::Expired { .. }))
     }
 
     pub fn for_you(&self) -> impl Iterator<Item = &Item> {
