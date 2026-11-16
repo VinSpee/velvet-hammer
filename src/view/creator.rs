@@ -70,10 +70,9 @@ fn card(s: &App, change: &Change, t: Theme, dark: bool) -> El {
     }
     if trial.is_some_and(|t| t.state == State::Trying) {
         let (keep, undo) = (change.clone(), key.clone());
-        buttons = buttons
-            .child(button(&format!("{key}-keep"), "Keep", t, move |s| {
-                s.keep_change(&keep)
-            }));
+        buttons = buttons.child(button(&format!("{key}-keep"), "Keep", t, move |s| {
+            s.keep_change(&keep)
+        }));
         if !s.working {
             buttons = buttons.child(button(&format!("{undo}-undo"), "Undo", t, |s| {
                 s.undo_change()
