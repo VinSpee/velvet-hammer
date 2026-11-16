@@ -212,7 +212,6 @@ fn waiting(s: &App, t: Theme, dark: bool) -> El {
 /// stays in view.
 const WAITING_MAX_H: f32 = 380.0;
 
-
 /// A question from the chief of staff's hook, such as whether a tool may run.
 fn approval(item: &Item, t: Theme) -> El {
     let ItemKind::NeedsInput { options } = &item.kind else {
