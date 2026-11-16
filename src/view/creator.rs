@@ -78,7 +78,7 @@ fn card(s: &App, change: &Change, t: Theme, dark: bool) -> El {
                 s.undo_change()
             }));
         }
-    } else if !building && !s.working {
+    } else if !building && !s.working && s.creator.trying().is_none() {
         let tried = change.clone();
         buttons = buttons.child(button(&format!("{key}-try"), "Try it", t, move |s| {
             s.try_change(&tried)

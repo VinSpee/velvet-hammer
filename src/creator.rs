@@ -239,7 +239,7 @@ impl App {
 
     /// Builds and swaps in `change`, at the captain's press of Try it.
     pub fn try_change(&mut self, change: &Change) {
-        if self.working {
+        if self.working || self.creator.trying().is_some() {
             return;
         }
         self.creator.start(&Job::Try {

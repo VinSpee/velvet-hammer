@@ -292,7 +292,10 @@ pub fn run(data: &Path, job: Job) {
 }
 
 fn try_change(dir: &Dir, data: &Path, commit: String, worktree: PathBuf) {
-    let before = dir.trial();
+    if dir.trial().is_some_and(|t| t.state == State::Trying) {
+        return;
+    }
+    let _ = fs::remove_file(dir.0.join("quit"));
     let mut trial = Trial {
         state: State::Building,
         commit,
@@ -312,11 +315,8 @@ fn try_change(dir: &Dir, data: &Path, commit: String, worktree: PathBuf) {
     if let Err(why) = built {
         return dir.mark(&mut trial, State::Failed, Some(why));
     }
-    // The installed build is the known-good one unless a trial is already running.
-    let trying = before.is_some_and(|t| t.state == State::Trying);
-    if (!trying || !dir.known_good().exists())
-        && let Err(why) = copy_bundle(&installed(), &dir.known_good())
-    {
+    // No trial is running, so the installed build is a kept one.
+    if let Err(why) = copy_bundle(&installed(), &dir.known_good()) {
         return dir.mark(&mut trial, State::Failed, Some(why));
     }
     if let Err(why) = swap(dir, data, &dir.stage()) {
@@ -807,6 +807,26 @@ mod tests {
             watch(&dir, "abc", || false, || panic!("restored an ended trial"));
             assert_eq!(dir.trial().unwrap().state, end);
         }
+    }
+
+    #[test]
+    fn a_new_trial_ignores_a_stale_quit_marker() {
+        let data = scratch("stale-quit");
+        let dir = Dir::new(&data);
+        let mut trial = trying(&dir, "abc");
+        quit_cleanly(&data);
+        dir.mark(&mut trial, State::Kept, None);
+        try_change(&dir, &data, "def".into(), "/missing".into());
+        assert!(!dir.0.join("quit").exists());
+    }
+
+    #[test]
+    fn a_try_while_another_trial_runs_leaves_that_trial_alone() {
+        let data = scratch("busy");
+        let dir = Dir::new(&data);
+        let before = trying(&dir, "abc");
+        try_change(&dir, &data, "def".into(), "/missing".into());
+        assert_eq!(dir.trial(), Some(before));
     }
 
     #[test]
