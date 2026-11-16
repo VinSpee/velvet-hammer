@@ -62,7 +62,9 @@ The snapshot runs only when something says the last one may be out of date, neve
 
 Changes that arrive together share one run, which starts 0.3 s after the first. Runs that changes
 ask for are at least five seconds apart, and the last change always gets its run, so a busy
-fleet costs at most one run every five seconds. **Refresh** runs at once.
+fleet costs at most one run every five seconds. **Refresh** runs at once. While the clone has no
+snapshot script yet, for example during its install, the app only checks again every two
+seconds and keeps the pending run until the script appears.
 
 A run happens on a background thread. While it runs, the panel keeps showing the last snapshot
 and adds "refreshing…" to its time. If a run fails, the panel keeps the last snapshot, shows
