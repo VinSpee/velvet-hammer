@@ -342,7 +342,8 @@ impl Watcher {
             loop {
                 let script = place.code.join("bin/fm-bearings-snapshot.sh");
                 let now = Instant::now();
-                if script.exists() {
+                let present = script.exists();
+                if present {
                     let stamp = Some(stamp(&place.home));
                     if seen.is_none() {
                         // The first run of a launch does not wait.
@@ -381,9 +382,13 @@ impl Watcher {
                         continue;
                     }
                 }
-                let wait = schedule
-                    .wait(now)
-                    .map_or(timing.poll, |w| w.min(timing.poll));
+                let wait = if present {
+                    schedule
+                        .wait(now)
+                        .map_or(timing.poll, |w| w.min(timing.poll))
+                } else {
+                    timing.poll
+                };
                 match asked.recv_timeout(wait) {
                     Ok(Ask::Invalidate) => schedule.invalidate(Instant::now()),
                     Ok(Ask::Refresh) => schedule.refresh(Instant::now()),
@@ -936,6 +941,32 @@ mod tests {
         drop(watcher);
         let _ = std::fs::remove_dir_all(&lab);
         assert_eq!(runs.lines().count(), 4);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_refresh_asked_before_the_script_is_installed_runs_once_it_appears() {
+        let (lab, place) = lab("late");
+        let script = place.code.join("bin/fm-bearings-snapshot.sh");
+        let installed = std::fs::read(&script).unwrap();
+        std::fs::remove_file(&script).unwrap();
+        std::fs::write(lab.join("ran"), "").unwrap();
+        let mut watcher = Watcher::start_with(&place, &lab.join(CACHE), QUICK);
+        watcher.refresh();
+        thread::sleep(Duration::from_millis(200));
+        assert!(watcher.poll().is_empty());
+        assert!(!lab.join("runs").exists());
+        std::fs::write(&script, installed).unwrap();
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        updates_until(&mut watcher, |got| reads(got).len() == 1);
+        thread::sleep(Duration::from_millis(200));
+        let runs = std::fs::read_to_string(lab.join("runs")).unwrap();
+        drop(watcher);
+        let _ = std::fs::remove_dir_all(&lab);
+        assert_eq!(runs.lines().count(), 1);
     }
 
     #[test]
