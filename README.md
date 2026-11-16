@@ -285,7 +285,8 @@ talks to Anthropic:
   chat. You can also run `claude auth login` in a terminal yourself and choose **Check again**.
 - **Chatting.** The first message starts one long-lived
   `claude -p --input-format stream-json --output-format stream-json --verbose
-  --include-partial-messages --replay-user-messages --no-session-persistence` process. Each
+  --include-partial-messages --replay-user-messages` process (plus `--no-session-persistence`
+  unless the conversation is kept, see [The conversation](docs/conversation.md#the-chief-of-staffs-session)). Each
   message is written to its standard input as you send it, even mid-turn, and the reply streams
   into the chat as Claude Code produces it. Claude Code echoes each message back as it takes it
   in, which tells the app when the chief of staff is done. The process
@@ -442,7 +443,8 @@ turn, asks the running app to quit, exchanges the two bundles atomically and ope
 in the same window frame. When the new build is not ready within 15 seconds, it puts the previous
 bundle back and reopens it, and the script fails. The quit for the swap does not ask about
 workers in flight, because they keep running and the new build supervises them at once; Quit from
-the menu still asks. The chief of staff starts a fresh session after the swap.
+the menu still asks. The new build resumes the chief of staff's session and opens on the page,
+draft and queued messages you left (see [The conversation](docs/conversation.md)).
 
 The bundle has the identifier `io.github.vinspee.velvet-hammer` and the icon in
 `assets/AppIcon.icns`, which is made from `assets/icon.svg`:

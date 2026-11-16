@@ -19,7 +19,7 @@ use std::path::{Path, PathBuf};
 
 use serde_json::{Value, json};
 
-use crate::attach::{Attachment, Kind};
+use crate::attach::Attachment;
 use crate::model::{Author, Message};
 use crate::store::{
     self, Saved, create_private_dir, make_private, make_private_dir, open_private, suffixed,
@@ -64,10 +64,12 @@ impl Keeping {
         if self.0 {
             "Each message is written to history.jsonl in Velvet Hammer's data directory, \
              readable by your user only, so the conversation, find and message links last \
-             across restarts. Images are not kept."
+             across restarts. Images are not kept. Claude Code keeps your chief of staff's \
+             session too, so it remembers the conversation after a restart."
         } else {
             "Nothing new is written. What is already kept stays until you clear it, and is not \
-             shown the next time Velvet Hammer opens."
+             shown the next time Velvet Hammer opens. Your chief of staff starts each session \
+             fresh."
         }
     }
 
@@ -254,28 +256,11 @@ fn to_json(message: &Message) -> Value {
         let kept: Vec<Value> = message
             .attachments
             .iter()
-            .map(|a| {
-                json!({
-                    "path": a.path.to_string_lossy(),
-                    "name": a.name,
-                    "bytes": a.bytes,
-                    "kind": a.kind.key(),
-                })
-            })
+            .map(Attachment::to_json)
             .collect();
         out["attachments"] = kept.into();
     }
     out
-}
-
-/// An attachment as kept; `None` for one this version cannot read.
-fn attachment_from(value: &Value) -> Option<Attachment> {
-    Some(Attachment {
-        path: PathBuf::from(value["path"].as_str()?),
-        name: value["name"].as_str()?.to_string(),
-        bytes: value["bytes"].as_u64()?,
-        kind: Kind::from_key(value["kind"].as_str()?)?,
-    })
 }
 
 /// A content block as kept: image data never is.
@@ -349,7 +334,7 @@ fn from_json(value: &Value) -> Option<Message> {
             list => list
                 .as_array()?
                 .iter()
-                .map(attachment_from)
+                .map(Attachment::from_json)
                 .collect::<Option<_>>()?,
         },
         while_working: false,
@@ -359,6 +344,7 @@ fn from_json(value: &Value) -> Option<Message> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::attach::Kind;
     use std::sync::Arc;
 
     fn image(bytes: &[u8]) -> Content {

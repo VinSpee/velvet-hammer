@@ -149,7 +149,7 @@ fn history_section(s: &App, t: Theme, dark: bool) -> El {
             option.explanation(),
             keeping == option,
             t,
-            move |s: &mut App| s.keeping.change(|k| *k = option),
+            move |s: &mut App| s.set_keeping(option),
         ));
     }
     let clear = if s.confirm_clear {
@@ -185,7 +185,8 @@ fn history_section(s: &App, t: Theme, dark: bool) -> El {
         &format!(
             "Kept in {}, readable by your user only. It holds what you and your chief of staff \
              wrote, as written, so avoid putting secrets in messages. Nothing kept is sent to \
-             your chief of staff unless you link to it.",
+             your chief of staff unless you link to it; it remembers its own last session, which \
+             Claude Code keeps.",
             s.history.path().display()
         ),
         t,

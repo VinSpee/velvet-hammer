@@ -54,6 +54,12 @@
 # After a message "wake: TEXT" and its reply, a second turn nobody asked for says TEXT, the way
 # a firstmate Stop hook wakes an idle session.
 #
+# Each session has an id, given in its init records. Without --no-session-persistence the fake
+# keeps the session's messages in FAKE_CLAUDE_HOME/sessions/ID, and --resume ID picks that session
+# up again, or reports it is not found and exits, as the real `claude` does. A message "recall?"
+# is answered with the session's first message. Each session's resume id, whether it is kept, and
+# whether --settings adds a SessionStart hook are appended to FAKE_CLAUDE_HOME/sessions.log.
+#
 # With --replay-user-messages, each message is echoed back as the turn that takes it in starts, as
 # the real `claude` does. A message "slow: TEXT" holds its turn open until the file "release" appears in
 # FAKE_CLAUDE_HOME (or 30 seconds pass), so a message sent meanwhile waits for the next turn, as the real `claude` holds one when the turn has no step left.
@@ -117,7 +123,7 @@ auth)
   ;;
 -p)
   # The app passes compact JSON; these pull out the one server and the one hook it names.
-  mcp_url='' hook_url='' hook_base='' mcp_auth='' hook_auth='' replay=''
+  mcp_url='' hook_url='' hook_base='' mcp_auth='' hook_auth='' replay='' resume='' keep=1 helm=''
   while [ $# -gt 0 ]; do
     case $1 in
     --mcp-config)
@@ -126,15 +132,37 @@ auth)
       shift
       ;;
     --replay-user-messages) replay=1 ;;
+    --no-session-persistence) keep='' ;;
+    --resume)
+      resume=$2
+      shift
+      ;;
     --settings)
       hook_base=$(printf '%s' "$2" | sed -E 's#.*"url":"(http://[^/"]*)/hooks/.*#\1#')
       hook_url=$hook_base/hooks/pre-tool-use
       hook_auth=$(printf '%s' "$2" | sed -E 's/.*"Authorization":"([^"]*)".*/\1/')
+      case $2 in *'"SessionStart"'*) helm=1 ;; esac
       shift
       ;;
     esac
     shift
   done
+  echo "resume=$resume keep=$keep helm=$helm" >>"$home/sessions.log"
+  if [ -n "$resume" ]; then
+    if [ ! -e "$home/sessions/$resume" ]; then
+      IFS= read -r _ || true
+      echo "{\"type\":\"result\",\"subtype\":\"error_during_execution\",\"is_error\":true,\"errors\":[\"No conversation found with session ID: $resume\"]}"
+      exit 1
+    fi
+    session=$resume
+  else
+    session=fake-$$
+  fi
+  if [ -n "$keep" ]; then
+    mkdir -p "$home/sessions"
+    touch "$home/sessions/$session"
+  fi
+  init="{\"type\":\"system\",\"subtype\":\"init\",\"apiKeySource\":\"none\",\"model\":\"fake\",\"session_id\":\"$session\"}"
   # POSTs JSON to the app: post URL AUTH BODY. Prints the response body.
   post() {
     curl -sf --max-time "${4:-600}" -H 'Content-Type: application/json' -H "Authorization: $2" \
@@ -163,6 +191,7 @@ auth)
     esac
     # The line the app adds giving the message's own link; the commands below ignore it.
     text=${text%%'\n\n[Velvet Hammer: this message'*}
+    [ -z "$keep" ] || printf '%s\n' "$text" >>"$home/sessions/$session"
     if [ -n "$replay" ] && [ "${text#swallow:}" = "$text" ]; then
       printf '%s\n' "{\"type\":\"user\",\"isReplay\":true,\"message\":{\"role\":\"user\",\"content\":\"$text\"},\"parent_tool_use_id\":null}"
     fi
@@ -182,6 +211,7 @@ auth)
       ;;
     *envcheck*) text="api-key:${ANTHROPIC_API_KEY:+reached} token:${ANTHROPIC_AUTH_TOKEN:+reached}" ;;
     *whereami*) text="cwd=$(pwd -P) FM_HOME=${FM_HOME:-unset}" ;;
+    'recall?') text="recall: $(head -1 "$home/sessions/$session" 2>/dev/null)" ;;
     slow:*)
       i=0
       while [ ! -e "$home/release" ] && [ $i -lt 300 ]; do sleep 0.1; i=$((i + 1)); done
@@ -217,7 +247,7 @@ auth)
       esac
       answer=$(post "$mcp_url" "$mcp_auth" "{\"jsonrpc\":\"2.0\",\"id\":4,\"method\":\"tools/call\",\"params\":$call}" |
         sed -E 's/.*"text":"(([^"\\]|\\.)*)".*/\1/')
-      echo '{"type":"system","subtype":"init","apiKeySource":"none","model":"fake"}'
+      printf '%s\n' "$init"
       # printf, not echo: the answer's \n escapes must reach the app as written.
       printf '%s\n' "{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"result\":\"$answer\"}"
       continue
@@ -253,7 +283,7 @@ auth)
       fi
       ;;
     esac
-    echo '{"type":"system","subtype":"init","apiKeySource":"none","model":"fake"}'
+    printf '%s\n' "$init"
     if [ "$state" = expired ]; then
       echo '{"type":"assistant","error":"authentication_failed","message":{"role":"assistant","content":[{"type":"text","text":"OAuth token has expired."}]}}'
       echo '{"type":"result","subtype":"success","is_error":true,"result":"OAuth token has expired.","api_error_status":401}'

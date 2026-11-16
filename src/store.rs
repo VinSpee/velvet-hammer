@@ -120,9 +120,9 @@ impl<T: Saved> Store<T> {
     /// over it.
     fn save(&self, settings: &T) -> io::Result<()> {
         let dir = self.path.parent().expect("the file is in a directory");
-        fs::create_dir_all(dir)?;
+        create_private_dir(dir)?;
         let temporary = suffixed(&self.path, &format!(".tmp-{}", std::process::id()));
-        let mut file = File::create(&temporary)?;
+        let mut file = create_private(&temporary)?;
         let written = serde_json::to_vec_pretty(&settings.to_json())
             .map_err(io::Error::other)
             .and_then(|bytes| file.write_all(&bytes))
@@ -172,6 +172,15 @@ pub fn create_private_dir(dir: &Path) -> io::Result<()> {
     builder.create(dir)
 }
 
+/// Creates a file, or empties it, readable by its owner only.
+fn create_private(path: &Path) -> io::Result<File> {
+    let mut options = OpenOptions::new();
+    options.create(true).write(true).truncate(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+    options.open(path)
+}
+
 /// Opens a log for appending, creating it with owner-only permissions and tightening a log an
 /// earlier version made.
 pub fn open_private(path: &Path) -> io::Result<File> {
@@ -205,4 +214,41 @@ pub fn make_private_dir(dir: &Path) -> io::Result<()> {
 #[cfg(not(unix))]
 pub fn make_private_dir(_: &Path) -> io::Result<()> {
     Ok(())
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    #[derive(Clone, Debug, Default, PartialEq)]
+    struct Note(String);
+
+    impl Saved for Note {
+        const FILE: &'static str = "note.json";
+        const FALLBACK: &'static str = "the note is empty";
+        fn fallback() -> Self {
+            Note::default()
+        }
+        fn to_json(&self) -> Value {
+            serde_json::json!({"version": VERSION, "text": self.0})
+        }
+        fn from_json(value: &Value) -> Result<Self, String> {
+            check_version(value)?;
+            Ok(Note(value["text"].as_str().unwrap_or_default().to_string()))
+        }
+    }
+
+    #[test]
+    fn a_saved_file_and_the_directory_it_made_are_readable_by_their_owner_only() {
+        let dir = std::env::temp_dir().join(format!("velvet-hammer-store-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let mut store = Store::<Note>::open(&dir);
+        store.change(|n| n.0 = "private".into());
+        let mode = |p: &Path| fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        assert_eq!(store.problem(), None);
+        assert_eq!(mode(store.path()), 0o600);
+        assert_eq!(mode(&dir), 0o700);
+        fs::remove_dir_all(&dir).unwrap();
+    }
 }

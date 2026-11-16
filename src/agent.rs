@@ -90,6 +90,10 @@ pub trait ChiefOfStaff {
     /// The captain's tool-approval, visual-replies and firstmate-rule settings, shared so a
     /// change applies at once.
     fn approve_with(&mut self, _policies: Policies) {}
+    /// Keeps the chat session on disk and its id in `data`, so the next launch resumes it, while
+    /// the captain keeps the conversation. `None` stops that and forgets the kept session: the
+    /// next session starts fresh.
+    fn keep_sessions(&mut self, _data: Option<&Path>) {}
 }
 
 /// Simulated chief of staff: fixed starting data and canned replies.
