@@ -260,6 +260,12 @@ panel.
   and the commands they share with the keyboard shortcuts.
 - `src/markdown.rs`: prepares the chief of staff's Markdown for Rune's Markdown view, keeping
   line breaks and showing HTML as text.
+- `src/creator.rs`: creator mode: the setting, the changes to the app that workers have ready to
+  try (read from firstmate's task records), and Try it, Keep, Undo and Discard. Its build step,
+  `src/creator/build.rs`, runs as its own process (`velvet-hammer --creator try|undo DATA`): it
+  fetches the change into the app's own checkout, lets only views and styling through, builds,
+  swaps the bundle with Rune's installer, keeps the last kept build to go back to, and watches
+  the trial. The card, banner and setting are in `src/view/creator.rs`.
 - `src/view.rs`: the Rune view, with the attachment chips in `src/view/attach.rs`, the tool-use
   cards in `src/view/tool.rs` (the folding output block and the diff in `src/view/tool/`), the
   json-render views in `src/view/ui.rs`, the visual-replies and firstmate-rules pages in `src/view/policy.rs`, the Settings page and

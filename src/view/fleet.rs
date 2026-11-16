@@ -145,6 +145,7 @@ fn waiting(s: &App, t: Theme, dark: bool) -> El {
             .collect();
     rows.extend(expired(s, t, dark));
     rows.extend(holds(s, t));
+    rows.extend(super::creator::rows(s, t, dark));
     rows.extend(merges(s, t));
     rows.extend(remind::panel_rows(s, t, dark));
     rows.extend(s.ws.for_you().map(|item| {

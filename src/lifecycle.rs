@@ -118,14 +118,25 @@ impl Guard {
 /// [`Guard::may_quit`] for the app's guard.
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 fn may_quit() -> bool {
-    guard().may_quit(relaunching)
+    let quits = guard().may_quit(relaunching);
+    // A quit the captain asked for, not a swap: a trial's watchdog stops watching (see
+    // creator/build.rs) instead of taking the quit for a crash.
+    if quits && !relaunching() {
+        crate::creator::build::quit_cleanly(&crate::firstmate::data_dir());
+    }
+    quits
 }
 
-/// Whether `scripts/install-app.sh` is swapping in a new build: while it runs, it keeps its pid in
-/// `relaunch` in the data directory.
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 fn relaunching() -> bool {
-    std::fs::read_to_string(crate::firstmate::data_dir().join("relaunch"))
+    relaunching_in(&crate::firstmate::data_dir())
+}
+
+/// Whether a new build is being swapped in for the app keeping its data in `data`:
+/// `scripts/install-app.sh` and creator mode's build step keep their pid in `relaunch` there
+/// while they swap.
+pub fn relaunching_in(data: &std::path::Path) -> bool {
+    std::fs::read_to_string(data.join("relaunch"))
         .ok()
         .and_then(|pid| pid.trim().parse::<i32>().ok())
         // SAFETY: signal 0 only asks whether the process exists.

@@ -11,6 +11,7 @@ mod bearings;
 mod bridge;
 mod carry;
 mod claude;
+mod creator;
 mod crew;
 mod find;
 mod firstmate;
@@ -95,6 +96,8 @@ pub struct App {
     /// holds only messages that went out; these are carried across a relaunch with the rest of
     /// the captain's place (see [`carry`]), while the conversation is kept.
     pub queue: Vec<Queued>,
+    /// Creator mode: changes to the app ready to try, and the trial under way.
+    pub creator: creator::Creator,
     /// Where the captain's place is kept across a relaunch; none in scenes and tests.
     pub carry: Option<carry::Carry>,
     /// The queued message being edited, by its place in `queue`, with its field.
@@ -405,6 +408,7 @@ impl App {
             working: false,
             queue: Vec::new(),
             carry: None,
+            creator: creator::Creator::open(data),
             editing: None,
             nicknames,
             crew_form: crew::Form::default(),
@@ -1663,10 +1667,34 @@ fn init() -> App {
         .in_firstmate(firstmate.place());
     let mut app = App::new(Box::new(claude), firstmate, &firstmate::data_dir());
     app.carry = Some(carry::Carry::open(&firstmate::data_dir()));
+    app.creator.go_live();
     app.restore_place();
     // After the saved home is applied, so a custom home is never installed or updated.
     app.firstmate.start();
     app.daily = Some(fleet::Daily::open(&firstmate::data_dir()));
+    app
+}
+
+/// The stub with a change to the app ready to try from the worker `vh-cards`, and its trial in
+/// `trial`'s state, with the words the build step recorded.
+fn creator_scene(trial: Option<(creator::build::State, Option<&str>)>) -> App {
+    let mut app = stub();
+    let change = creator::Change {
+        task: "vh-cards".into(),
+        name: "Wider message cards".into(),
+        commit: "8f3c2a1d9e0b4c7a6f5e4d3c2b1a09f8e7d6c5b4".into(),
+        worktree: "/Users/captain/.velvet-hammer/home/worktrees/vh-cards".into(),
+        summary: "Message cards use the full width of the chat, with more space between them."
+            .into(),
+    };
+    app.creator.trial = trial.map(|(state, detail)| creator::build::Trial {
+        state,
+        commit: change.commit.clone(),
+        worktree: change.worktree.clone(),
+        detail: detail.map(str::to_string),
+        at: 0,
+    });
+    app.creator.changes = vec![change];
     app
 }
 
@@ -1817,6 +1845,10 @@ fn poll(s: &mut App, now: f64, tx: &mut Tx) -> bool {
         changed = true;
     }
     s.carry_place(now, tx);
+    changed |= s.look_at_changes(now);
+    if s.creator.watching() {
+        tx.wake_after(Duration::from_secs(1));
+    }
     // Rune has hooked the system's quit by the first poll, so the question goes in front of it.
     if desktop() {
         lifecycle::install();
@@ -1916,6 +1948,10 @@ fn setup(s: &mut App, wake: Waker) {
 }
 
 fn main() {
+    // Creator mode's build step runs as its own process (see creator.rs), not as a window.
+    if let Some((data, job)) = creator::build::job_from_args() {
+        return creator::build::run(&data, job);
+    }
     let headless = rune::is_headless();
     // Opened from Finder, the app starts without the captain's PATH (see shell_path.rs).
     #[cfg(unix)]
@@ -2561,6 +2597,31 @@ fn main() {
                 *s = app;
                 finish.finish();
                 s.step();
+            }),
+            // Creator mode: a change ready to try, built, tried, refused by the gate, and the
+            // setting.
+            ("creator-change", |s| *s = creator_scene(None)),
+            ("creator-building", |s| {
+                *s = creator_scene(Some((creator::build::State::Building, None)))
+            }),
+            ("creator-trying", |s| {
+                *s = creator_scene(Some((creator::build::State::Trying, None)))
+            }),
+            ("creator-refused", |s| {
+                *s = creator_scene(Some((
+                    creator::build::State::Refused,
+                    Some(
+                        "Only views and styling (src/view.rs and src/view/) can be tried in the \
+                         app; this branch also changes src/guard.rs. Deliver it as a pull request \
+                         instead.",
+                    ),
+                )))
+            }),
+            ("creator-setting", |s| {
+                *s = stub();
+                s.creator.mode.change(|m| *m = creator::Mode(true));
+                s.showing = Showing::Settings;
+                s.scroll_to = Some("creator-section".into());
             }),
             ("queue-not-ready", |s| {
                 *s = queued_while_working().0;
@@ -4013,6 +4074,31 @@ mod tests {
         let mut rt = runtime_with(kept_on_firstmate(&lab, &fake, false));
         say_and_wait(&mut rt, "second");
         assert_eq!(sessions(&fake)[1], "resume= keep= helm=");
+    }
+
+    #[test]
+    fn keep_asks_the_chief_of_staff_to_deliver_the_change_as_a_pull_request() {
+        let mut rt = runtime_with(creator_scene(Some((creator::build::State::Trying, None))));
+        tap(&mut rt, "trial-keep");
+        let said: Vec<&str> = rt.state.ws.chat.iter().map(|m| m.text.as_str()).collect();
+        assert!(
+            said.contains(
+                &"Keep the Velvet Hammer change 8f3c2a1 from task vh-cards: deliver its branch \
+                  the normal way, through the pipeline and a pull request. I approve the merge \
+                  when it asks."
+            ),
+            "{said:?}"
+        );
+    }
+
+    #[test]
+    fn discard_asks_for_the_branch_to_be_dropped_and_a_change_not_tried_swaps_nothing() {
+        let mut rt = runtime_with(creator_scene(None));
+        tap(&mut rt, "change-vh-cards-discard");
+        assert!(rt.state.creator.problem.is_none());
+        assert!(rt.state.ws.chat.iter().any(|m| m.text
+            == "Discard the Velvet Hammer change 8f3c2a1 from task vh-cards: drop its branch; \
+                nothing of it is kept."));
     }
 
     #[test]

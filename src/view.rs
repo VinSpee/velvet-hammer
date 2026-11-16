@@ -17,6 +17,7 @@ use crate::projects::Project;
 
 mod attach;
 mod attention;
+mod creator;
 mod fleet;
 mod home;
 mod mates;
@@ -976,6 +977,9 @@ fn chat(s: &App, plan: &Plan, t: Theme, dark: bool) -> El {
         if let Some(notice) = home::lock_notice(s, t, dark) {
             header = header.child(notice);
         }
+    }
+    if let Some(banner) = creator::banner(s, t) {
+        header = header.child(banner);
     }
     let hits = if s.find.open {
         find::search(s, &s.find.query.text)

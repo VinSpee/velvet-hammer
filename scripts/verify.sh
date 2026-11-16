@@ -56,7 +56,8 @@ for scene in chat replied empty peek signed-out signing-in signed-in expired cli
   mate-retire-confirm mate-retire-refused mate-message mate-replied mate-escalation mate-escalation-answered \
   mate-routed mate-from-chat \
   workers-fresh workers-settings workers-claude-refused workers-crew \
-  send-while-working send-while-working-answered messages-settings queue-waiting queue-delivering queue-not-ready; do
+  send-while-working send-while-working-answered messages-settings queue-waiting queue-delivering queue-not-ready \
+  creator-change creator-building creator-trying creator-refused creator-setting; do
   headless --scene "$scene" --snap "$out/$scene.png"
   headless --scene "$scene" --tree "$out/$scene.json"
 done
@@ -772,6 +773,23 @@ check walk-end.json yes '"key": "input-2"'
 check walk-end.json no  '"key": "task-3"'
 check walk-end.json yes '"text": "Waiting on you (1)"'
 check walk-end.json yes '"text": "Peeking at verify"'
+
+# Creator mode: a change ready to try offers Try it and Discard; while it builds Try it is gone
+# and the banner says so; while it is tried the card and the banner offer Keep and Undo; the
+# gate's refusal is shown in its words; the setting is on the Settings page.
+check creator-change.json yes '"key": "change-vh-cards-try"'
+check creator-change.json yes '"key": "change-vh-cards-discard"'
+check creator-change.json no  '"key": "trial-banner"'
+check creator-building.json no  '"key": "change-vh-cards-try"'
+check creator-building.json yes '"key": "trial-banner"'
+check creator-trying.json yes '"key": "change-vh-cards-keep"'
+check creator-trying.json yes '"key": "change-vh-cards-undo"'
+check creator-trying.json yes '"key": "trial-keep"'
+check creator-trying.json yes '"key": "trial-undo"'
+check creator-refused.json yes 'this branch also changes src/guard.rs'
+check creator-refused.json yes '"key": "change-vh-cards-try"'
+check creator-setting.json yes '"key": "creator-on"'
+check creator-setting.json yes '"key": "creator-off"'
 
 # No scene opened the app's real data directory.
 if [[ -e $real_data ]]; then
