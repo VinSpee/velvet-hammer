@@ -14,6 +14,7 @@ mod find;
 mod firstmate;
 mod guard;
 mod history;
+mod home;
 mod links;
 mod markdown;
 mod menus;
@@ -126,16 +127,31 @@ pub struct App {
     /// The captain started adding a project with the chief of staff, so the chat offers the
     /// small controls that help answer its questions.
     pub adding: bool,
-    /// The folder dialog: [`projects::pick_folder`], or a stand-in in tests.
-    pub picker: fn() -> Result<Option<PathBuf>, String>,
-    /// The folder dialog that is open, while it is.
-    picking: Option<Receiver<Result<Option<PathBuf>, String>>>,
+    /// The folder dialog, titled with its prompt: [`projects::pick_folder`], or a stand-in in
+    /// tests.
+    pub picker: fn(&str) -> Picked,
+    /// The folder dialog that is open, while it is, and what its folder is for.
+    picking: Option<(Pick, Receiver<Picked>)>,
     /// Why the folder dialog could not open.
     pub pick_problem: Option<String>,
     /// The GitHub repository combobox, the other way to answer which repository to add.
     pub repos: repos::Chooser,
     /// Firstmate's second mates: their records, the flow that adds one, and the actions on them.
     pub mates: secondmates::Mates,
+    /// The firstmate home the captain chose: a custom one, or the managed one.
+    pub home_choice: store::Store<home::Choice>,
+    /// The Firstmate page's home chooser.
+    pub home_form: home::Form,
+    /// Why the saved custom home could not be used when the app opened, so it runs on the
+    /// managed home.
+    pub home_problem: Option<String>,
+    /// Keeps `lock` current for the home in use, when the chief of staff is firstmate.
+    lock_watch: Option<home::LockWatch>,
+    /// The home's session lock as firstmate last reported it, or why it could not be read.
+    pub lock: Option<Result<home::Lock, String>>,
+    /// The chief of staff's session ran while another session held the lock, so firstmate
+    /// runs it read-only until it starts again.
+    pub read_only_session: bool,
     wake: Option<Waker>,
     /// The captain hold the next message answers, by its key.
     pub answering: Option<String>,
@@ -200,6 +216,19 @@ pub struct App {
     media_wake: Waker,
 }
 
+/// The folder the captain chose in the folder dialog, `None` when they cancelled it, or why it
+/// could not open.
+pub type Picked = Result<Option<PathBuf>, String>;
+
+/// What a folder chosen in the folder dialog is for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Pick {
+    /// The answer to the chief of staff's question about a project's repository.
+    Project,
+    /// A custom firstmate home, on the Firstmate page.
+    Home,
+}
+
 /// A message waiting in the queue: the captain's words and the files attached to them.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Queued {
@@ -248,7 +277,8 @@ pub enum Showing {
     Mate(String),
     /// The guided flow for adding a second mate.
     AddMate,
-    /// The managed firstmate clone: its state, and installing and updating it.
+    /// The firstmate in use: the managed clone's state, installing and updating it, and the
+    /// choice of a custom home.
     Firstmate,
     /// The tool-approval settings.
     Approvals,
@@ -281,37 +311,35 @@ impl App {
     /// The app with reminders on `clock`, a fixed one in scenes and tests.
     pub fn with_clock(
         mut chief: Box<dyn ChiefOfStaff>,
-        firstmate: Firstmate,
+        mut firstmate: Firstmate,
         data: &Path,
         clock: reminders::Clock,
     ) -> Self {
-        let watcher = chief
-            .workplace()
-            .map(|clone| bearings::Watcher::start(clone, &firstmate.home_dir()));
-        let project_watcher = chief
-            .workplace()
-            .map(|_| projects::Watcher::start(&firstmate.home_dir()));
-        let home = firstmate.home_dir();
-        let mates = secondmates::Mates::new(chief.workplace().map(|_| home.as_path()), data);
+        // The saved custom home, checked again: it may have moved since it was chosen.
+        let home_choice = store::Store::<home::Choice>::open(data);
+        let home_problem = home_choice.settings().0.as_ref().and_then(|dir| {
+            match home::check(&dir.to_string_lossy(), &firstmate.managed()) {
+                Ok(checked) => {
+                    firstmate.use_custom(Some(checked.path));
+                    None
+                }
+                Err(why) => Some(format!(
+                    "Your chief of staff runs on the managed home, because the home you chose \
+                     cannot be used now: {why}"
+                )),
+            }
+        });
+        chief.move_to(firstmate.place());
         let approvals = Store::open(data);
         let visuals = store::Store::<visual::Mode>::open(data);
         let rules = store::Store::<guard::Settings>::open(data);
-        let home = firstmate.home_dir();
-        let nicknames = store::Store::<crew::Nicknames>::open(&home.join("config"));
+        let nicknames = store::Store::<crew::Nicknames>::open(&firstmate.home_dir().join("config"));
         let mut runtime = pi::Runtime::open(data, pi::Release::official());
         runtime.list_models();
         let keeping = store::Store::<history::Keeping>::open(data);
         let mut history = history::History::new(data);
         let reminder_settings = store::Store::<reminders::Settings>::open(data);
         let reminders = Reminders::open(data, reminder_settings.shared(), clock);
-        chief.approve_with(bridge::Policies {
-            approval: approvals.shared(),
-            visual: visuals.shared(),
-            rules: rules.shared(),
-            nicknames: nicknames.shared(),
-            models: runtime.models(),
-            reminders: reminders.clone(),
-        });
         let window_wake: Arc<OnceLock<Waker>> = Arc::new(OnceLock::new());
         let media_wake: Waker = Arc::new({
             let slot = window_wake.clone();
@@ -358,18 +386,24 @@ impl App {
             snoozing: None,
             snooze_amount: TextEdit::default(),
             snooze_problem: None,
-            watcher,
+            watcher: None,
             captain: Bearings::default(),
             captain_problem: None,
             peek: None,
-            project_watcher,
+            project_watcher: None,
             projects: None,
             adding: false,
             picker: projects::pick_folder,
             picking: None,
             pick_problem: None,
             repos: repos::Chooser::default(),
-            mates,
+            mates: secondmates::Mates::default(),
+            home_choice,
+            home_form: home::Form::default(),
+            home_problem,
+            lock_watch: None,
+            lock: None,
+            read_only_session: false,
             wake: None,
             answering: None,
             draft: TextEdit::default(),
@@ -404,6 +438,7 @@ impl App {
             window_wake,
             media_wake,
         };
+        app.watch_firstmate();
         // A tool use kept from an earlier session shows as it did, but for its image bytes.
         for i in 0..app.ws.earlier {
             if let Some(tool) = app.ws.chat[i].tool.clone()
@@ -469,16 +504,36 @@ impl App {
             self.projects = Some(projects);
             changed = true;
         }
-        if let Some(picked) = self.picking.as_ref().and_then(|rx| rx.try_recv().ok()) {
+        if let Some((pick, picked)) = self
+            .picking
+            .as_ref()
+            .and_then(|(pick, rx)| Some((*pick, rx.try_recv().ok()?)))
+        {
             self.picking = None;
-            match picked {
+            match (pick, picked) {
                 // The captain reads the path and sends it, like any other answer.
-                Ok(Some(folder)) => self.draft.text = folder.display().to_string(),
-                Ok(None) => {}
-                Err(problem) => self.pick_problem = Some(problem),
+                (Pick::Project, Ok(Some(folder))) => self.draft.text = folder.display().to_string(),
+                (Pick::Project, Err(problem)) => self.pick_problem = Some(problem),
+                // A chosen home is checked at once.
+                (Pick::Home, Ok(Some(folder))) => {
+                    self.home_form.path.text = folder.display().to_string();
+                    self.check_home();
+                }
+                (Pick::Home, Err(problem)) => self.home_form.problem = Some(problem),
+                (_, Ok(None)) => {}
             }
             changed = true;
         }
+        if let Some(lock) = self.lock_watch.as_mut().and_then(|w| w.poll()) {
+            self.lock = Some(lock);
+            changed = true;
+        }
+        // Firstmate runs a session that starts while another holds the lock read-only, and it
+        // stays so until it starts again.
+        let running = self.chief.session_pid().is_some();
+        let read_only = running && (self.read_only_session || self.lock_holder().is_some());
+        changed |= read_only != self.read_only_session;
+        self.read_only_session = read_only;
         while let Ok((id, copy)) = self.copies.try_recv() {
             self.take_copy(id, copy);
             changed = true;
@@ -1218,23 +1273,206 @@ impl App {
 
     /// Opens the folder dialog on a background thread; the chosen path lands in the draft.
     pub fn pick_folder(&mut self) {
+        self.pick_problem = None;
+        self.open_picker(Pick::Project, "Choose the project's folder");
+    }
+
+    /// Opens the folder dialog for a custom firstmate home, which is checked once chosen.
+    pub fn pick_home(&mut self) {
+        self.home_form.problem = None;
+        self.open_picker(Pick::Home, "Choose your firstmate home");
+    }
+
+    fn open_picker(&mut self, pick: Pick, prompt: &'static str) {
         if self.picking.is_some() {
             return;
         }
-        self.pick_problem = None;
         let (tx, rx) = channel();
         let (picker, wake) = (self.picker, self.wake.clone());
         std::thread::spawn(move || {
-            let _ = tx.send(picker());
+            let _ = tx.send(picker(prompt));
             if let Some(wake) = wake {
                 wake();
             }
         });
-        self.picking = Some(rx);
+        self.picking = Some((pick, rx));
+    }
+
+    /// Checks the folder typed or chosen on the Firstmate page, and reads who holds its lock.
+    pub fn check_home(&mut self) {
+        let form = &mut self.home_form;
+        form.problem = None;
+        form.confirming = None;
+        let checked = home::check(&form.path.text, &self.firstmate.managed());
+        form.lock = checked.as_ref().ok().and_then(|c| {
+            home::read_lock(&firstmate::Place {
+                code: c.path.clone(),
+                home: c.path.clone(),
+                custom: true,
+            })
+        });
+        form.checked = Some(checked);
+    }
+
+    /// The captain chose to run on `choice`. While work is in flight the switch waits for
+    /// their yes, which [`App::switch_home`] takes.
+    pub fn use_home(&mut self, choice: home::Choice) {
+        self.home_form.problem = None;
+        if self.mates.running().is_some() {
+            self.home_form.problem =
+                Some("A second mate action is running. Switch when it has finished.".into());
+            return;
+        }
+        if self.work_in_flight().is_empty() {
+            self.switch_home(choice);
+        } else {
+            self.home_form.confirming = Some(choice);
+        }
+    }
+
+    /// What a switch of home would interrupt, one sentence each; empty when nothing would.
+    pub fn work_in_flight(&self) -> Vec<String> {
+        let mut what = Vec::new();
+        if self.working {
+            what.push(
+                "Your chief of staff is in the middle of a turn. Switching ends its session \
+                 now, and the turn stops where it is."
+                    .to_string(),
+            );
+        }
+        if !self.queue.is_empty() {
+            what.push(format!(
+                "{} waiting to be sent will go to the new session.",
+                view::count(self.queue.len() as u32, "message")
+            ));
+        }
+        if !self.captain.crew.is_empty() {
+            what.push(format!(
+                "{} in flight keep running in their own terminals, under the home they were \
+                 started from. The chief of staff on the other home does not supervise them; \
+                 switch back to see them again.",
+                view::count(self.captain.crew.len() as u32, "crewmate")
+            ));
+        }
+        what
+    }
+
+    /// Runs the chief of staff on `choice` from now on, and keeps that choice: the session
+    /// that is running ends, and the next message starts one on the new home. A custom home is
+    /// checked again first, and switching back to the managed one installs or checks the clone
+    /// as opening the app does.
+    pub fn switch_home(&mut self, choice: home::Choice) {
+        self.home_form.confirming = None;
+        let dir = match &choice.0 {
+            None => None,
+            Some(dir) => match home::check(&dir.to_string_lossy(), &self.firstmate.managed()) {
+                Ok(checked) => Some(checked.path),
+                Err(why) => {
+                    self.home_form.checked = Some(Err(why));
+                    return;
+                }
+            },
+        };
+        let choice = home::Choice(dir.clone());
+        self.home_choice.change(|c| *c = choice.clone());
+        if self.home_choice.settings() != &choice {
+            // It could not be saved; the page says why, and nothing changes.
+            return;
+        }
+        self.home_problem = None;
+        self.firstmate.use_custom(dir);
+        self.firstmate.start();
+        self.chief.move_to(self.firstmate.place());
+        self.watch_firstmate();
+        if self.chief.workplace().is_some() {
+            let words = match self.firstmate.custom() {
+                Some(dir) => format!(
+                    "Your chief of staff now runs on your firstmate home at {}. Its session \
+                     ended; your next message starts a new one there.",
+                    dir.display()
+                ),
+                None => "Your chief of staff now runs on the managed firstmate home. Its \
+                         session ended; your next message starts a new one there."
+                    .into(),
+            };
+            self.take(Event::Notice(words));
+        }
+    }
+
+    /// Ends the chief of staff's session so the next message starts one, which takes the
+    /// home's lock if it is free.
+    pub fn restart_chief(&mut self) {
+        self.chief.move_to(self.firstmate.place());
+        self.read_only_session = false;
+        self.take(Event::Notice(
+            "Your chief of staff's session ended. Your next message starts a new one, which \
+             takes the home's lock now that it is free."
+                .into(),
+        ));
+    }
+
+    /// The live session that holds the home's lock, when it is not the chief of staff's own.
+    pub fn lock_holder(&self) -> Option<&home::Holder> {
+        match &self.lock {
+            Some(Ok(lock)) => lock.other(self.chief.session_pid()),
+            _ => None,
+        }
+    }
+
+    /// Points everything that reads firstmate's records at the home in use: the bearings,
+    /// projects and second-mate watchers, the worker nicknames, the lock, and the settings the
+    /// chief of staff's hooks read. What was read from another home is dropped.
+    fn watch_firstmate(&mut self) {
+        let place = self
+            .chief
+            .workplace()
+            .is_some()
+            .then(|| self.firstmate.place());
+        self.watcher = place.as_ref().map(bearings::Watcher::start);
+        self.project_watcher = place.as_ref().map(|p| projects::Watcher::start(&p.home));
+        self.lock_watch = place.as_ref().map(home::LockWatch::start);
+        self.mates = secondmates::Mates::new(place.as_ref().map(|p| p.home.as_path()), &self.data);
+        self.nicknames = store::Store::open(&self.firstmate.home_dir().join("config"));
+        self.captain = Bearings::default();
+        self.captain_problem = None;
+        self.projects = None;
+        self.peek = None;
+        self.answering = None;
+        self.lock = None;
+        self.read_only_session = false;
+        if let Some(wake) = self.wake.clone() {
+            self.connect_watchers(wake);
+        }
+        self.chief.approve_with(bridge::Policies {
+            approval: self.approvals.shared(),
+            visual: self.visuals.shared(),
+            rules: self.rules.shared(),
+            nicknames: self.nicknames.shared(),
+            models: self.runtime.models(),
+            reminders: self.reminders.clone(),
+        });
+    }
+
+    fn connect_watchers(&mut self, wake: Waker) {
+        if let Some(watcher) = &mut self.watcher {
+            watcher.connect(wake.clone());
+        }
+        if let Some(watcher) = &mut self.project_watcher {
+            watcher.connect(wake.clone());
+        }
+        if let Some(watcher) = &mut self.lock_watch {
+            watcher.connect(wake.clone());
+        }
+        self.mates.connect(wake);
     }
 
     pub fn picking(&self) -> bool {
         self.picking.is_some()
+    }
+
+    /// The folder dialog is open for a custom home.
+    pub fn picking_home(&self) -> bool {
+        matches!(self.picking, Some((Pick::Home, _)))
     }
 
     /// Opens the Workers page, checking the keychain for the provider key on the way.
@@ -1330,15 +1568,17 @@ pub const ADD_PROJECT: &str = "I want to add a project. Follow your project-mana
     ask whether I want to add another.";
 
 fn init() -> App {
-    let mut firstmate = Firstmate::open(&firstmate::data_dir(), firstmate::UPSTREAM);
-    firstmate.start();
+    let firstmate = Firstmate::open(&firstmate::data_dir(), firstmate::UPSTREAM);
     // The pi runtime goes first on the chief of staff's PATH, where firstmate's spawn finds it
     // for pi workers. Claude Code itself is found and signed in as before.
     let path = pi::Runtime::open(&firstmate::data_dir(), None).path_env(std::env::var_os("PATH"));
     let claude = Claude::new("claude")
         .env("PATH", path.to_string_lossy())
-        .in_firstmate(firstmate.clone_dir(), firstmate.home_dir());
-    App::new(Box::new(claude), firstmate, &firstmate::data_dir())
+        .in_firstmate(firstmate.place());
+    let mut app = App::new(Box::new(claude), firstmate, &firstmate::data_dir());
+    // After the saved home is applied, so a custom home is never installed or updated.
+    app.firstmate.start();
+    app
 }
 
 fn stub() -> App {
@@ -1440,7 +1680,7 @@ fn fake_in_firstmate(lab: &Lab, install: bool) -> App {
     let mut firstmate = lab.firstmate();
     let claude = Claude::new(FAKE_CLAUDE)
         .env("FAKE_CLAUDE_HOME", scratch("signed-in").to_string_lossy())
-        .in_firstmate(firstmate.clone_dir(), firstmate.home_dir());
+        .in_firstmate(firstmate.place());
     if install {
         firstmate.install();
     }
@@ -1561,14 +1801,8 @@ fn notify(reminder: &Reminder) {
 
 fn setup(s: &mut App, wake: Waker) {
     s.firstmate.connect(wake.clone());
-    if let Some(watcher) = &mut s.watcher {
-        watcher.connect(wake.clone());
-    }
-    if let Some(watcher) = &mut s.project_watcher {
-        watcher.connect(wake.clone());
-    }
+    s.connect_watchers(wake.clone());
     s.runtime.connect(wake.clone());
-    s.mates.connect(wake.clone());
     s.wake = Some(wake.clone());
     let _ = s.window_wake.set(wake.clone());
     s.chief.connect(wake);
@@ -1736,6 +1970,55 @@ fn main() {
                 *s = fake_in_firstmate(&lab, true);
                 s.settle(|s| !s.captain.is_empty());
                 s.answering = Some("lab-window-size".into());
+            }),
+            // A custom firstmate home: a firstmate the captain already runs, typed on the
+            // Firstmate page and checked, a folder that is not one, the chat and the page once
+            // it is in use, its card in Settings, another session holding its lock, and the
+            // question before a switch that would stop a turn.
+            ("firstmate-home-checked", |s| {
+                *s = home_lab("firstmate-home-checked").0
+            }),
+            ("firstmate-home-refused", |s| {
+                let (app, _, home) = home_lab("firstmate-home-refused");
+                *s = app;
+                let plain = home.with_file_name("notes");
+                std::fs::create_dir_all(&plain).expect("mkdir");
+                s.home_form.path.text = plain.display().to_string();
+                s.check_home();
+            }),
+            ("firstmate-home-custom", |s| {
+                *s = on_captain_home("firstmate-home-custom").0;
+                s.draft.text = "whereami".into();
+                s.send();
+                s.settle(replied);
+            }),
+            ("firstmate-home-page", |s| {
+                *s = on_captain_home("firstmate-home-page").0;
+                s.showing = Showing::Firstmate;
+            }),
+            ("firstmate-home-settings", |s| {
+                *s = on_captain_home("firstmate-home-settings").0;
+                s.showing = Showing::Settings;
+            }),
+            ("firstmate-home-locked", |s| {
+                let (app, _, home) = home_lab("firstmate-home-locked");
+                *s = app;
+                // Dies when the app exits, which closes its input.
+                std::mem::forget(terminal_session(&home));
+                s.check_home();
+                let choice = home::Choice(Some(std::fs::canonicalize(&home).expect("home")));
+                s.use_home(choice);
+                s.showing = Showing::Chat;
+                s.settle(|s| s.lock_holder().is_some());
+            }),
+            ("firstmate-home-confirm", |s| {
+                let (app, _, home) = home_lab("firstmate-home-confirm");
+                *s = app;
+                s.draft.text = "slow: Drafting the release notes".into();
+                s.send();
+                s.settle(|s| s.working);
+                let choice = home::Choice(Some(std::fs::canonicalize(&home).expect("home")));
+                s.use_home(choice);
             }),
             // Projects from firstmate's records: none yet in a fresh install, none in an
             // installed home, adding the first one with the chief of staff, and three listed.
@@ -2556,6 +2839,46 @@ fn rules_lab(name: &str) -> App {
     app
 }
 
+/// The fake `claude` running as firstmate on the managed home of a lab under
+/// `/tmp/velvet-hammer/NAME`, showing the Firstmate page with a firstmate the captain already
+/// runs (the lab's `captain-firstmate`) typed and checked. Returns the app, the lab and that
+/// home.
+fn home_lab(name: &str) -> (App, Lab, PathBuf) {
+    let lab = Lab::at(&Path::new("/tmp/velvet-hammer").join(name));
+    let home = lab.captain_home();
+    let mut app = fake_in_firstmate(&lab, true);
+    app.showing = Showing::Firstmate;
+    app.home_form.path.text = home.display().to_string();
+    app.check_home();
+    (app, lab, home)
+}
+
+/// [`home_lab`], switched to the captain's home, whose records hold three projects and what
+/// the bearings fixture reports.
+fn on_captain_home(name: &str) -> (App, Lab, PathBuf) {
+    let (mut app, lab, home) = home_lab(name);
+    std::fs::write(home.join("data/projects.md"), projects::SAMPLE_REGISTRY).expect("registry");
+    std::fs::write(home.join("data/bearings.json"), bearings::SNAPSHOT).expect("bearings");
+    let choice = home::Choice(Some(std::fs::canonicalize(&home).expect("home")));
+    app.use_home(choice);
+    app.showing = Showing::Chat;
+    app.settle(|s| s.projects.as_ref().is_some_and(|p| p.is_ok()) && s.captain.read);
+    (app, lab, home)
+}
+
+/// Stands in for the captain's terminal firstmate: a process named `claude`, which firstmate's
+/// own lock reads as a live harness, holding `home`'s session lock until its input closes.
+fn terminal_session(home: &Path) -> std::process::Child {
+    let child = std::process::Command::new("bash")
+        .args(["-c", "exec -a claude cat"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null())
+        .spawn()
+        .expect("start the stand-in");
+    std::fs::write(home.join("state/.lock"), format!("{}\n", child.id())).expect("lock");
+    child
+}
+
 /// The fake `claude` running as firstmate in a lab under `/tmp/velvet-hammer/NAME`, with the pi
 /// runtime installable from a stand-in release. When `ready`, pi is installed, firstmate is
 /// pointed at it, the keychain stand-in has the key, and a second nickname is added.
@@ -2995,7 +3318,7 @@ mod tests {
         std::fs::create_dir_all(&home).unwrap();
         let claude = Claude::new(FAKE_CLAUDE)
             .env("FAKE_CLAUDE_HOME", scratch("signed-in").to_string_lossy())
-            .in_firstmate(firstmate.clone_dir(), home.clone());
+            .in_firstmate(firstmate.place());
         let app = App::new(Box::new(claude), firstmate, &root.join("data"));
         assert_eq!(std::fs::read_dir(&home).unwrap().count(), 0);
         assert_eq!(app.nicknames.settings().presets.len(), 1);
@@ -3442,7 +3765,7 @@ mod tests {
             "{}",
             String::from_utf8_lossy(&held.stderr)
         );
-        let mut watcher = bearings::Watcher::start(clone, &home);
+        let mut watcher = bearings::Watcher::start(&firstmate.place());
         let captain = loop {
             assert!(Instant::now() < deadline, "no snapshot arrived");
             match watcher.poll() {
@@ -3620,7 +3943,7 @@ mod tests {
         tap(&mut rt, "add-project");
         wait(&mut rt, replied);
         let sent = rt.state.ws.chat.len();
-        rt.state.picker = || Ok(Some(PathBuf::from("/Users/captain/code/notes")));
+        rt.state.picker = |_| Ok(Some(PathBuf::from("/Users/captain/code/notes")));
         tap(&mut rt, "add-pick-folder");
         wait(&mut rt, |s| !s.picking());
         assert_eq!(rt.state.draft.text, "/Users/captain/code/notes");
@@ -3631,11 +3954,11 @@ mod tests {
         );
         // Cancelling the dialog changes nothing; a dialog that cannot open says why.
         rt.state.draft.clear();
-        rt.state.picker = || Ok(None);
+        rt.state.picker = |_| Ok(None);
         tap(&mut rt, "add-pick-folder");
         wait(&mut rt, |s| !s.picking());
         assert!(rt.state.draft.text.is_empty());
-        rt.state.picker = || Err("Could not open a folder dialog.".into());
+        rt.state.picker = |_| Err("Could not open a folder dialog.".into());
         tap(&mut rt, "add-pick-folder");
         wait(&mut rt, |s| !s.picking());
         assert!(rt.find("add-pick-problem").is_some());
@@ -3761,6 +4084,54 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "clones firstmate from GitHub"]
+    fn a_real_firstmate_home_passes_the_check_and_its_lock_is_read_without_writing() {
+        let root = scratch("unused");
+        let home = root.join("firstmate");
+        let cloned = std::process::Command::new("git")
+            .args(["clone", "--quiet", firstmate::UPSTREAM])
+            .arg(&home)
+            .status()
+            .unwrap();
+        assert!(cloned.success());
+        // A checkout firstmate has run in has these, which are not in git.
+        for dir in ["state", "data", "config", "projects"] {
+            std::fs::create_dir_all(home.join(dir)).unwrap();
+        }
+        let managed = firstmate::Place {
+            code: root.join("data/firstmate"),
+            home: root.join("data/home"),
+            custom: false,
+        };
+        let checked = home::check(&home.display().to_string(), &managed).unwrap();
+        let place = firstmate::Place {
+            code: checked.path.clone(),
+            home: checked.path.clone(),
+            custom: true,
+        };
+        let before = home::tree(&home);
+        let lock = home::read_lock(&place).unwrap().unwrap();
+        assert_eq!(lock.said, "lock: free");
+        assert_eq!(
+            home::tree(&home),
+            before,
+            "firstmate's status wrote nothing"
+        );
+
+        let mut terminal = terminal_session(&home);
+        let lock = home::read_lock(&place).unwrap().unwrap();
+        assert_eq!(
+            lock.said,
+            format!("lock: held by live harness pid {}", terminal.id())
+        );
+        assert_eq!(lock.other(None).unwrap().pid, terminal.id());
+        terminal.kill().unwrap();
+        terminal.wait().unwrap();
+        let lock = home::read_lock(&place).unwrap().unwrap();
+        assert!(lock.said.starts_with("lock: stale"), "{}", lock.said);
+    }
+
+    #[test]
     #[ignore = "uses the real Claude account and clones firstmate from GitHub"]
     fn real_firstmate_adds_a_local_folder_as_a_project() {
         let data = scratch("unused").join("data");
@@ -3791,7 +4162,7 @@ mod tests {
         let mut firstmate = Firstmate::open(&data, firstmate::UPSTREAM);
         let claude = Claude::new("claude")
             .env("ANTHROPIC_MODEL", "sonnet")
-            .in_firstmate(firstmate.clone_dir(), firstmate.home_dir());
+            .in_firstmate(firstmate.place());
         firstmate.install();
         let mut rt = runtime_with(App::new(Box::new(claude), firstmate, &data));
         wait_for(&mut rt, Duration::from_secs(120), |s| {
@@ -3841,7 +4212,7 @@ mod tests {
         let mut firstmate = Firstmate::open(&data, firstmate::UPSTREAM);
         let claude = Claude::new("claude")
             .env("ANTHROPIC_MODEL", "haiku")
-            .in_firstmate(firstmate.clone_dir(), firstmate.home_dir());
+            .in_firstmate(firstmate.place());
         firstmate.install();
         let mut rt = runtime_with(App::new(Box::new(claude), firstmate, &data));
         wait_for(&mut rt, Duration::from_secs(120), |s| settled(s) && idle(s));
@@ -5401,6 +5772,339 @@ mod tests {
         assert_eq!(
             send_and_wait(&mut rt, &format!("write: {} Hello", notes.display())),
             format!("You said: Write was allowed to run {}", notes.display())
+        );
+    }
+
+    /// The words of the element keyed `key`, as drawn now.
+    fn view_text(rt: &mut Runtime<App>, key: &str) -> String {
+        rt.frame(1.0 / 60.0);
+        texts_under(rt, key).concat()
+    }
+
+    /// The app on the fake `claude` as firstmate on `lab`'s managed home, switched to the
+    /// captain's own firstmate at `home`.
+    fn on_home(lab: &Lab, home: &Path) -> Runtime<App> {
+        let mut rt = runtime_with(fake_in_firstmate(lab, true));
+        let typed = home.display().to_string();
+        rt.update(move |s, _| s.home_form.path.text = typed);
+        rt.update(|s, _| s.showing = Showing::Firstmate);
+        tap(&mut rt, "firstmate-home-check");
+        tap(&mut rt, "firstmate-home-use");
+        rt
+    }
+
+    #[test]
+    fn a_custom_home_runs_the_chief_of_staff_there_writes_nothing_and_is_kept() {
+        let lab = Lab::new();
+        let home = std::fs::canonicalize(lab.captain_home()).unwrap();
+        std::fs::write(home.join("data/projects.md"), projects::SAMPLE_REGISTRY).unwrap();
+        let before = home::tree(&home);
+        let mut rt = on_home(&lab, &home);
+        assert_eq!(rt.state.firstmate.custom(), Some(home.as_path()));
+        assert_eq!(rt.state.chief.workplace(), Some(home.as_path()));
+        wait(&mut rt, |s| s.projects.as_ref().is_some_and(|p| p.is_ok()));
+        assert_eq!(
+            rt.state.projects.as_ref().unwrap().as_ref().unwrap().len(),
+            3
+        );
+        assert!(
+            rt.state
+                .ws
+                .chat
+                .last()
+                .unwrap()
+                .text
+                .contains("now runs on your firstmate home")
+        );
+
+        // Firstmate's scripts, AGENTS.md and records come from the one folder.
+        rt.update(|s, _| s.showing = Showing::Chat);
+        assert_eq!(
+            send_and_wait(&mut rt, "whereami"),
+            format!("You said: cwd={0} FM_HOME={0}", home.display())
+        );
+        let header = format!(
+            "Running firstmate from {} \u{b7} your firstmate home",
+            home.display()
+        );
+        assert!(rt.find("workplace").is_some());
+        assert_eq!(view_text(&mut rt, "workplace"), header);
+        wait(
+            &mut rt,
+            |s| matches!(&s.lock, Some(Ok(l)) if l.said == "lock: free"),
+        );
+        assert_eq!(home::tree(&home), before, "nothing in the home was written");
+
+        // The choice is kept with the app's other settings, and the next start uses it.
+        let saved: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(lab.data.join(home::SETTINGS_FILE)).unwrap())
+                .unwrap();
+        assert_eq!(saved["home"], home.display().to_string());
+        let claude = Claude::new(FAKE_CLAUDE)
+            .env("FAKE_CLAUDE_HOME", scratch("signed-in").to_string_lossy())
+            .in_firstmate(lab.firstmate().place());
+        let again = App::new(Box::new(claude), lab.firstmate(), &lab.data);
+        assert_eq!(again.firstmate.custom(), Some(home.as_path()));
+        assert_eq!(again.chief.workplace(), Some(home.as_path()));
+        assert_eq!(again.home_problem, None);
+    }
+
+    #[test]
+    fn use_the_managed_home_switches_back_and_is_kept() {
+        let lab = Lab::new();
+        let home = std::fs::canonicalize(lab.captain_home()).unwrap();
+        let mut rt = on_home(&lab, &home);
+        tap(&mut rt, "firstmate-home-managed");
+        assert_eq!(rt.state.firstmate.custom(), None);
+        assert_eq!(rt.state.chief.workplace(), Some(lab.clone_dir().as_path()));
+        assert!(
+            rt.state
+                .ws
+                .chat
+                .last()
+                .unwrap()
+                .text
+                .contains("the managed firstmate home")
+        );
+        rt.update(|s, _| s.showing = Showing::Chat);
+        assert_eq!(
+            send_and_wait(&mut rt, "whereami"),
+            format!(
+                "You said: cwd={} FM_HOME={}",
+                std::fs::canonicalize(lab.clone_dir()).unwrap().display(),
+                lab.home().display()
+            )
+        );
+        let saved: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(lab.data.join(home::SETTINGS_FILE)).unwrap())
+                .unwrap();
+        assert!(saved["home"].is_null(), "{saved}");
+        wait(&mut rt, |s| s.firstmate.work().is_none());
+    }
+
+    #[test]
+    fn a_folder_that_is_not_a_home_is_refused_and_nothing_switches() {
+        let lab = Lab::new();
+        let plain = lab.data.with_file_name("notes");
+        std::fs::create_dir_all(&plain).unwrap();
+        let mut rt = runtime_with(fake_in_firstmate(&lab, true));
+        rt.update(|s, _| s.showing = Showing::Firstmate);
+        let typed = plain.display().to_string();
+        rt.update(move |s, _| s.home_form.path.text = typed);
+        tap(&mut rt, "firstmate-home-check");
+        assert!(rt.find("firstmate-home-refused").is_some());
+        assert!(rt.find("firstmate-home-use").is_none());
+        assert_eq!(rt.state.firstmate.custom(), None);
+        assert!(!lab.data.join(home::SETTINGS_FILE).exists());
+    }
+
+    #[test]
+    fn a_chosen_folder_is_checked_at_once() {
+        let lab = Lab::new();
+        let home = lab.captain_home();
+        let mut rt = runtime_with(fake_in_firstmate(&lab, true));
+        rt.update(|s, _| s.showing = Showing::Firstmate);
+        static CHOSEN: OnceLock<PathBuf> = OnceLock::new();
+        let _ = CHOSEN.set(home.clone());
+        rt.state.picker = |prompt| {
+            assert_eq!(prompt, "Choose your firstmate home");
+            Ok(CHOSEN.get().cloned())
+        };
+        tap(&mut rt, "firstmate-home-pick");
+        wait(&mut rt, |s| !s.picking());
+        assert_eq!(rt.state.home_form.path.text, home.display().to_string());
+        assert!(matches!(rt.state.home_form.checked, Some(Ok(_))));
+        assert!(rt.find("firstmate-home-use").is_some());
+    }
+
+    #[test]
+    fn a_saved_home_that_is_gone_runs_on_the_managed_home_and_says_why() {
+        let lab = Lab::new();
+        std::fs::create_dir_all(&lab.data).unwrap();
+        std::fs::write(
+            lab.data.join(home::SETTINGS_FILE),
+            r#"{"version":1,"home":"/nonexistent/firstmate"}"#,
+        )
+        .unwrap();
+        let app = fake_in_firstmate(&lab, true);
+        assert_eq!(app.firstmate.custom(), None);
+        assert_eq!(app.chief.workplace(), Some(lab.clone_dir().as_path()));
+        let why = app.home_problem.as_deref().unwrap();
+        assert!(
+            why.contains("There is no folder at /nonexistent/firstmate"),
+            "{why}"
+        );
+        // The setting is kept, so the home comes back once it is there again.
+        assert_eq!(
+            app.home_choice.settings().0.as_deref(),
+            Some(Path::new("/nonexistent/firstmate"))
+        );
+    }
+
+    #[test]
+    fn a_custom_checkout_is_never_installed_fetched_or_updated() {
+        let lab = Lab::new();
+        let home = std::fs::canonicalize(lab.captain_home()).unwrap();
+        let head = |dir: &Path| {
+            std::process::Command::new("git")
+                .arg("-C")
+                .arg(dir)
+                .args(["rev-parse", "HEAD", "refs/remotes/origin/main"])
+                .output()
+                .unwrap()
+                .stdout
+        };
+        // Upstream moves on after the captain's checkout was cloned.
+        lab.release("bin/fm-new.sh", "echo new\n");
+        let before = (head(&home), home::tree(&home));
+        std::fs::create_dir_all(&lab.data).unwrap();
+        std::fs::write(
+            lab.data.join(home::SETTINGS_FILE),
+            format!(r#"{{"version":1,"home":"{}"}}"#, home.display()),
+        )
+        .unwrap();
+        // Opening the app as init() does: the managed clone is missing, and nothing installs it.
+        let mut app = App::new(Box::new(Stub::default()), lab.firstmate(), &lab.data);
+        app.firstmate.start();
+        assert_eq!(app.firstmate.custom(), Some(home.as_path()));
+        assert_eq!(app.firstmate.work(), None);
+        app.firstmate.check();
+        app.firstmate.update();
+        app.firstmate.install();
+        assert_eq!(app.firstmate.work(), None);
+        std::thread::sleep(Duration::from_millis(200));
+        assert!(!app.firstmate.poll());
+        assert!(
+            !lab.clone_dir().exists(),
+            "the managed clone was not installed"
+        );
+        assert_eq!((head(&home), home::tree(&home)), before);
+        assert!(!home.join("bin/fm-new.sh").exists());
+        // The page offers no install, check or update for it.
+        let mut rt = runtime_with(app);
+        rt.update(|s, _| s.showing = Showing::Firstmate);
+        rt.frame(1.0 / 60.0);
+        for key in ["firstmate-install", "firstmate-check", "firstmate-update"] {
+            assert!(rt.find(key).is_none(), "{key}");
+        }
+    }
+
+    #[test]
+    fn another_session_holding_the_lock_is_shown_and_never_taken() {
+        let lab = Lab::new();
+        let home = std::fs::canonicalize(lab.captain_home()).unwrap();
+        let mut terminal = terminal_session(&home);
+        let lock = std::fs::read_to_string(home.join("state/.lock")).unwrap();
+        let mut rt = on_home(&lab, &home);
+        wait(&mut rt, |s| s.lock_holder().is_some());
+        assert_eq!(rt.state.lock_holder().unwrap().pid, terminal.id());
+        rt.update(|s, _| s.showing = Showing::Chat);
+        rt.frame(1.0 / 60.0);
+        assert!(rt.find("lock-held").is_some());
+        assert_eq!(
+            view_text(&mut rt, "lock-held-holder"),
+            format!(
+                "Holder: pid {0}, claude. Firstmate says: lock: held by live harness pid {0}",
+                terminal.id()
+            )
+        );
+
+        // The chat still runs, read-only by firstmate's rules, and nothing touches the holder.
+        send_and_wait(&mut rt, "hello");
+        wait(&mut rt, |s| s.read_only_session);
+        assert!(
+            matches!(terminal.try_wait(), Ok(None)),
+            "the holder still runs"
+        );
+        assert_eq!(
+            std::fs::read_to_string(home.join("state/.lock")).unwrap(),
+            lock
+        );
+
+        // The app changes nothing in the fleet while it is held.
+        rt.state
+            .confirm_mate(secondmates::Op::Interrupt("docs".into()));
+        rt.state.confirmed_mate();
+        assert!(
+            rt.state.mates.outcomes["docs"]
+                .words
+                .contains("holds this home's lock")
+        );
+        assert!(
+            !home.join("data/calls.log").exists(),
+            "no firstmate script ran"
+        );
+
+        // The other session ends: a restart takes the lock.
+        terminal.kill().unwrap();
+        terminal.wait().unwrap();
+        wait(&mut rt, |s| s.lock_holder().is_none() && s.lock.is_some());
+        rt.frame(1.0 / 60.0);
+        assert!(rt.find("lock-free").is_some());
+        tap(&mut rt, "lock-restart");
+        assert!(!rt.state.read_only_session);
+        assert_eq!(rt.state.chief.session_pid(), None);
+        assert!(rt.find("lock-free").is_none());
+    }
+
+    #[test]
+    fn switching_while_a_turn_runs_asks_first() {
+        let lab = Lab::new();
+        let home = std::fs::canonicalize(lab.captain_home()).unwrap();
+        let mut rt = runtime_with(fake_in_firstmate(&lab, true));
+        rt.state.draft.text = "slow: Drafting the release notes".into();
+        tap(&mut rt, "send");
+        wait(&mut rt, |s| s.working);
+        rt.update(|s, _| s.showing = Showing::Firstmate);
+        let typed = home.display().to_string();
+        rt.update(move |s, _| s.home_form.path.text = typed);
+        tap(&mut rt, "firstmate-home-check");
+        tap(&mut rt, "firstmate-home-use");
+        assert_eq!(rt.state.firstmate.custom(), None, "nothing switched yet");
+        assert!(view_text(&mut rt, "firstmate-home-in-flight").contains("middle of a turn"));
+        tap(&mut rt, "firstmate-home-cancel");
+        assert!(rt.state.home_form.confirming.is_none());
+        assert!(rt.state.working);
+
+        tap(&mut rt, "firstmate-home-use");
+        tap(&mut rt, "firstmate-home-switch");
+        assert_eq!(rt.state.firstmate.custom(), Some(home.as_path()));
+        assert!(!rt.state.working, "the turn ended with its session");
+        assert_eq!(rt.state.chief.session_pid(), None);
+    }
+
+    #[test]
+    fn the_hook_protects_the_projects_of_the_home_in_use() {
+        let lab = Lab::new();
+        let home = std::fs::canonicalize(lab.captain_home()).unwrap();
+        let mut rt = on_home(&lab, &home);
+        // Sent without the Send button: a draft this long widens the composer past the window.
+        let say = |rt: &mut Runtime<App>, words: String| {
+            let chat = rt.state.ws.chat.len();
+            rt.update(move |s, _| {
+                s.showing = Showing::Chat;
+                s.draft.text = words;
+                s.send();
+            });
+            chat
+        };
+        let file = home.join("projects/site/README.md");
+        say(&mut rt, format!("write: {} Hello", file.display()));
+        wait(&mut rt, |s| s.ws.needs_input().next().is_some());
+        let item = rt.state.ws.needs_input().next().unwrap().clone();
+        assert_eq!(
+            item.title,
+            format!("Let the chief of staff edit {}?", file.display())
+        );
+        tap_scrolled(&mut rt, &format!("answer-{}-1", item.id));
+        wait(&mut rt, replied);
+        // The managed home's projects are not the fleet's any more.
+        let managed = lab.home().join("projects/site/README.md");
+        let chat = say(&mut rt, format!("write: {} Hello", managed.display()));
+        wait(&mut rt, |s| replied(s) && s.ws.chat.len() > chat + 1);
+        assert_eq!(
+            rt.state.ws.chat.last().unwrap().text,
+            format!("You said: Write was allowed to run {}", managed.display())
         );
     }
 

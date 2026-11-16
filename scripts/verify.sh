@@ -29,6 +29,8 @@ for scene in chat replied empty peek signed-out signing-in signed-in expired cli
   approval-settings approval-by-rule approval-activity approval-corrupt \
   firstmate-missing firstmate-installing firstmate-up-to-date firstmate-update-available \
   firstmate-modified firstmate-blocked firstmate-session firstmate-panels firstmate-answering firstmate-crew \
+  firstmate-home-checked firstmate-home-refused firstmate-home-custom firstmate-home-page firstmate-home-settings \
+  firstmate-home-locked firstmate-home-confirm \
   projects-fresh projects-empty projects-adding projects-listed \
   projects-repos projects-repos-filtered projects-repos-chosen projects-repos-missing projects-repos-signed-out \
   formatted formatted-all formatted-streaming tool-image tool-image-broken tool-video tool-generic tool-picture \
@@ -222,6 +224,44 @@ check firstmate-session.json yes '/data/firstmate'
 check firstmate-session.json yes 'FM_HOME='
 check firstmate-session.json yes '/data/home'
 check firstmate-session.json no  '"key": "firstmate-page"'
+check firstmate-session.json yes '· the managed home'
+# A custom firstmate home: checked, refused, in use in the chat, on its page and in Settings,
+# locked by another session, and the question before a switch that would stop a turn.
+check firstmate-home-checked.json yes '"key": "firstmate-home-path"'
+check firstmate-home-checked.json yes '"key": "firstmate-home-pick"'
+check firstmate-home-checked.json yes 'A firstmate checkout: bin/fm-session-start.sh and AGENTS.md are there.'
+check firstmate-home-checked.json yes 'A home firstmate has run in: state/, data/ and config/ are there.'
+check firstmate-home-checked.json yes 'Its session lock is not held (lock: free).'
+check firstmate-home-checked.json yes '"key": "firstmate-home-use"'
+check firstmate-home-checked.json yes 'In use: the managed home'
+check firstmate-home-checked.json no  '"key": "firstmate-home-managed"'
+check firstmate-home-refused.json yes '"key": "firstmate-home-refused"'
+check firstmate-home-refused.json yes 'is not a firstmate checkout: it has no bin/fm-session-start.sh and AGENTS.md'
+check firstmate-home-refused.json no  '"key": "firstmate-home-use"'
+check firstmate-home-custom.json yes '/captain-firstmate · your firstmate home'
+check firstmate-home-custom.json yes 'Your chief of staff now runs on your firstmate home at'
+check firstmate-home-custom.json yes 'FM_HOME='
+check firstmate-home-custom.json no  '/data/home'
+check firstmate-home-custom.json yes '"text": "The marketing site"'
+check firstmate-home-custom.json yes '"key": "hold-lab-window-size"'
+check firstmate-home-custom.json no  '"key": "lock-held"'
+check firstmate-home-page.json yes '"text": "Running on your firstmate home"'
+check firstmate-home-page.json yes 'never installs, updates, resets or deletes anything there'
+check firstmate-home-page.json yes '"key": "firstmate-home-managed"'
+check firstmate-home-page.json yes '"text": "This is the home in use."'
+check firstmate-home-page.json no  '"key": "firstmate-check"'
+check firstmate-home-page.json no  '"key": "firstmate-update"'
+check firstmate-home-page.json no  '"key": "firstmate-install"'
+check firstmate-home-settings.json yes '"key": "firstmate-summary"'
+check firstmate-home-settings.json yes 'your home at /'
+check firstmate-home-locked.json yes '"key": "lock-held"'
+check firstmate-home-locked.json yes 'so your chief of staff runs read-only.'
+check firstmate-home-locked.json yes 'Firstmate says: lock: held by live harness pid'
+check firstmate-home-locked.json yes 'Velvet Hammer will not take the lock, stop that session or force anything.'
+check firstmate-home-confirm.json yes '"key": "firstmate-home-confirm"'
+check firstmate-home-confirm.json yes 'Your chief of staff is in the middle of a turn.'
+check firstmate-home-confirm.json yes '"key": "firstmate-home-switch"'
+check firstmate-home-confirm.json yes '"key": "firstmate-home-cancel"'
 # The panel fed from firstmate's records: two captain holds and a merge approval.
 check firstmate-panels.json yes '"key": "hold-lab-window-size"'
 check firstmate-panels.json yes '1280x800 (shows more chat).'

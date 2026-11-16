@@ -11,7 +11,9 @@ and your Claude subscription (see [Claude Code and your subscription](#claude-co
 The app installs and updates its own clone of
 [firstmate](https://github.com/kunchenguid/firstmate), and the chief of staff runs inside it as
 firstmate, with its own operational home (see
-[The managed firstmate clone](docs/firstmate.md)).
+[The managed firstmate clone](docs/firstmate.md)). To see and steer a fleet you already run, such
+as `~/firstmate`, choose it as a custom firstmate home on the **Firstmate** page in Settings (see
+[A custom firstmate home](docs/firstmate.md#a-custom-firstmate-home)).
 **Needs your input** shows the tasks firstmate holds for you and the merges waiting for your
 approval, read from firstmate's own records, together with the tool uses waiting for your
 approval. Which tool uses wait for you is a setting: by default, as recommended, the chief of
@@ -130,7 +132,8 @@ Configuration is out of the main window, behind the platform's Settings menu ite
   them.
 
 **Settings** shows each section with its setting in a few words: **Messages**, **Tool approval**, **Visual
-replies**, **Firstmate rules** and **Firstmate** (the managed clone) each open their page, which
+replies**, **Firstmate rules** and **Firstmate** (the firstmate home in use: the managed clone or
+a [custom home](docs/firstmate.md#a-custom-firstmate-home)) each open their page, which
 works as before and has **All settings** to come back. **Conversation history** is set on the
 Settings page itself: **Keep the conversation** (recommended, the default) or **Do not keep the
 conversation**, and **Clear history**, which asks before it deletes anything (see
@@ -164,8 +167,13 @@ input** and **For you to do**.
   the file they are kept in, and the `app_remind` and `app_reminders` tools' answers (see
   [docs/reminders.md](docs/reminders.md)).
 - `src/firstmate.rs`: `Firstmate`, the managed firstmate clone. It runs `git` to install the
-  clone, compare it with upstream and update it, and never discards a local change. Its `lab`
-  module builds scratch git repositories for tests and scenes.
+  clone, compare it with upstream and update it, and never discards a local change, and it does
+  none of that while a custom home is in use. `Place` is where the chief of staff runs firstmate:
+  the checkout and the home. Its `lab` module builds scratch git repositories for tests and scenes.
+- `src/home.rs`: the choice of a custom firstmate home: the saved setting, the check of a folder,
+  and the home's session lock, read with firstmate's `bin/fm-lock.sh status` (see
+  [A custom firstmate home](docs/firstmate.md#a-custom-firstmate-home)). Its part of the
+  Firstmate page is in `src/view/home.rs`.
 - `src/approval.rs`: the tool-approval settings (a mode and custom rules), the decision the hook
   makes for each tool use, and the activity log.
 - `src/guard.rs`: firstmate's rules the PreToolUse hook enforces, each matching one tool-call
@@ -246,7 +254,8 @@ talks to Anthropic:
   message is written to its standard input as you send it, even mid-turn, and the reply streams
   into the chat as Claude Code produces it. Claude Code echoes each message back as it takes it
   in, which tells the app when the chief of staff is done. The process
-  runs in the managed firstmate clone with `FM_HOME` set to the app's own firstmate home, so it
+  runs in the managed firstmate clone with `FM_HOME` set to the app's own firstmate home, or in a
+  [custom home](docs/firstmate.md#a-custom-firstmate-home) with `FM_HOME` set to it, so it
   starts as firstmate (see [The managed firstmate clone](docs/firstmate.md)).
 - **Message links.** Each message is sent with a line giving its link, and with any message it
   links to quoted (see [Message links](docs/links.md)).
@@ -414,6 +423,13 @@ It writes these files to `OUT_DIR`:
 | `firstmate-panels.png`, `firstmate-panels.json` | **Needs your input** filled from firstmate's records: two held tasks and a merge approval |
 | `firstmate-crew.png`, `firstmate-crew.json` | Peeking at a crewmate's terminal from the agents list |
 | `firstmate-answering.png`, `firstmate-answering.json` | After choosing **Answer** on a held task |
+| `firstmate-home-checked.png`, `firstmate-home-checked.json` | A firstmate the captain already runs, typed on the Firstmate page and checked |
+| `firstmate-home-refused.png`, `firstmate-home-refused.json` | A folder that is not a firstmate checkout, refused |
+| `firstmate-home-custom.png`, `firstmate-home-custom.json` | The chat on a custom home: the line under the heading, its projects and holds, and `whereami` |
+| `firstmate-home-page.png`, `firstmate-home-page.json` | The Firstmate page while a custom home is in use, with **Use the managed home** |
+| `firstmate-home-settings.png`, `firstmate-home-settings.json` | Settings, the **Firstmate** card naming the custom home |
+| `firstmate-home-locked.png`, `firstmate-home-locked.json` | Another session holds the custom home's lock: its holder and firstmate's words |
+| `firstmate-home-confirm.png`, `firstmate-home-confirm.json` | Switching while the chief of staff is in a turn asks first |
 | `projects-fresh.png`, `projects-fresh.json` | A fresh install: no home yet, no projects, and adding waits for the chat |
 | `projects-empty.png`, `projects-empty.json` | An installed home with no projects: the prompt to add the first one |
 | `projects-adding.png`, `projects-adding.json` | After **Add a project**: the request in the chat, the reply and the add controls |
@@ -515,7 +531,10 @@ repositories through a stand-in for `gh`, except `projects-repos-missing`, which
 does not exist. The `mates`, `mate` and `add-mate` scenes run the fake
 `claude` as firstmate in a scratch home under `/tmp/velvet-hammer`, with stand-ins of
 firstmate's second-mate scripts that write what the real ones did (see
-[Second mates](docs/firstmate.md#second-mates)). The
+[Second mates](docs/firstmate.md#second-mates)). The `firstmate-home` scenes do the same with a
+second scratch clone beside it standing in for the captain's own firstmate, and
+`firstmate-home-locked` holds that home's lock with a process named `claude` that exits with the
+app. The
 walkthrough runs on the stub's `chat` scene. The `.json` files are Rune element trees. The script then checks them for the keys and text each
 state must or must not have (for example `needs-input`, `input-1`, `for-you-empty`, `peek`) and
 exits non-zero if any check fails.
