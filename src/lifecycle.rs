@@ -7,6 +7,10 @@
 //! AppKit asks the app delegate `applicationShouldTerminate:` before every quit. Rune answers it
 //! to start its own quit; [`install`] puts the app's question in front of Rune's answer (see
 //! `lifecycle/mac.rs`). Elsewhere closing the window quits, as before, without asking.
+//!
+//! `scripts/install-app.sh` swaps in a new build through Rune's installer, which quits the app the
+//! same way. A turn holds that swap (Rune's busy marker), and while the script runs a quit does not
+//! ask about workers: they keep running, and the new build supervises them at once.
 
 use std::sync::Mutex;
 
@@ -58,6 +62,8 @@ pub const CONSEQUENCE: &str = "Quitting stops your chief of staff and firstmate'
 struct Guard {
     /// Work is in flight, so a quit asks first.
     busy: bool,
+    /// The chief of staff is in a turn, which a relaunch would cut off.
+    turn: bool,
     /// The captain said yes to quitting: the next quit goes ahead.
     confirmed: bool,
     /// Asks the captain, once a quit was held for it.
@@ -66,6 +72,7 @@ struct Guard {
 
 static GUARD: Mutex<Guard> = Mutex::new(Guard {
     busy: false,
+    turn: false,
     confirmed: false,
     ask: None,
 });
@@ -76,7 +83,12 @@ fn guard() -> std::sync::MutexGuard<'static, Guard> {
 
 /// Says whether a quit should ask first, from the app's state as it stands.
 pub fn publish(in_flight: &InFlight) {
-    guard().busy = !in_flight.is_empty();
+    let mut guard = guard();
+    guard.busy = !in_flight.is_empty();
+    if guard.turn != in_flight.turn && crate::desktop() {
+        rune_mac::busy(in_flight.turn);
+    }
+    guard.turn = in_flight.turn;
 }
 
 /// What runs when a quit is held to ask the captain: open the window and show the question.
@@ -91,8 +103,9 @@ pub fn confirm() {
 
 impl Guard {
     /// Whether a quit the system asks for now goes ahead. When it may not, the captain is asked.
-    fn may_quit(&self) -> bool {
-        if self.confirmed || !self.busy {
+    /// `relaunching` says whether the quit is a swap to a new build.
+    fn may_quit(&self, relaunching: impl FnOnce() -> bool) -> bool {
+        if self.confirmed || !self.busy || (!self.turn && relaunching()) {
             return true;
         }
         if let Some(ask) = &self.ask {
@@ -105,7 +118,41 @@ impl Guard {
 /// [`Guard::may_quit`] for the app's guard.
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 fn may_quit() -> bool {
-    guard().may_quit()
+    guard().may_quit(relaunching)
+}
+
+/// Whether `scripts/install-app.sh` is swapping in a new build: while it runs, it keeps its pid in
+/// `relaunch` in the data directory.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn relaunching() -> bool {
+    std::fs::read_to_string(crate::firstmate::data_dir().join("relaunch"))
+        .ok()
+        .and_then(|pid| pid.trim().parse::<i32>().ok())
+        // SAFETY: signal 0 only asks whether the process exists.
+        .is_some_and(|pid| pid > 0 && unsafe { libc::kill(pid, 0) } == 0)
+}
+
+/// The window's frame is saved under this name, so a relaunch opens where the window was.
+const FRAME: &str = "Velvet Hammer";
+
+/// The size the window opens at: where it was last time on the desktop, and a fixed size headless,
+/// so scenes and tests never depend on a saved frame.
+pub fn size(headless: bool) -> (f32, f32) {
+    let saved = if headless {
+        None
+    } else {
+        rune_mac::saved_size(FRAME)
+    };
+    saved.unwrap_or((1100.0, 720.0))
+}
+
+/// Has AppKit keep the window's frame for the next launch. Call it from every poll on the
+/// desktop: the window does not exist at setup, and it does nothing once the frame is kept.
+pub fn keep_frame() {
+    static KEPT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    if !KEPT.load(std::sync::atomic::Ordering::Relaxed) && rune_mac::remember_frame(FRAME) {
+        KEPT.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
 }
 
 /// Shows the app if it was hidden (⌘H) and makes it the active app, so a window it opens is seen.
@@ -191,6 +238,7 @@ mod tests {
         let asked = Arc::new(AtomicUsize::new(0));
         let mut guard = Guard {
             busy: false,
+            turn: false,
             confirmed: false,
             ask: Some(Box::new({
                 let asked = asked.clone();
@@ -199,12 +247,32 @@ mod tests {
                 }
             })),
         };
-        assert!(guard.may_quit());
+        assert!(guard.may_quit(|| false));
         guard.busy = true;
-        assert!(!guard.may_quit());
+        assert!(!guard.may_quit(|| false));
         assert_eq!(asked.load(Ordering::SeqCst), 1);
         guard.confirmed = true;
-        assert!(guard.may_quit());
+        assert!(guard.may_quit(|| false));
         assert_eq!(asked.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn a_relaunch_quits_past_workers_in_flight_but_not_past_a_turn() {
+        let mut guard = Guard {
+            busy: true,
+            turn: false,
+            confirmed: false,
+            ask: None,
+        };
+        assert!(
+            guard.may_quit(|| true),
+            "workers keep running across a relaunch"
+        );
+        assert!(!guard.may_quit(|| false), "a plain quit still asks");
+        guard.turn = true;
+        assert!(
+            !guard.may_quit(|| true),
+            "a relaunch would cut the turn off"
+        );
     }
 }

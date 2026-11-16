@@ -77,9 +77,9 @@ chip and goes to its message; a link it writes inside code stays as written.
 Not done yet, because the repository builds a plain binary with `cargo build` and has no app
 bundle or installer. What each platform needs:
 
-- **macOS.** An app bundle (`Velvet Hammer.app`) whose `Info.plist` declares the scheme, and
+- **macOS.** An app bundle (`Velvet Hammer Dev.app`) whose `Info.plist` declares the scheme, and
   Launch Services registering the bundle (it does when the app is first opened from
-  `/Applications`, or with `lsregister`). Rune then delivers each link to `App::on_open_url`,
+  `~/Applications`, or with `lsregister`). Rune then delivers each link to `App::on_open_url`,
   which the app already handles, including the link that launched it:
 
   ```xml
