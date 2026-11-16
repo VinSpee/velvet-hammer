@@ -3550,8 +3550,7 @@ mod tests {
         }
         // Charted next stays closed, so its empty line is not drawn.
         assert!(rt.find("fleet-charted-empty").is_none());
-        let tree = words(&rt, "waiting");
-        assert!(tree.contains("Waiting on you (0)"));
+        assert_eq!(words(&rt, "waiting"), "Waiting on you (0)");
     }
 
     #[test]

@@ -153,26 +153,37 @@ fn waiting(s: &App, t: Theme, dark: bool) -> El {
         )))
     }));
     let count = rows.len();
-    let mut body = col().gap(space::S2);
-    if rows.is_empty() {
-        body = body.child(
-            text("Nothing is waiting on you.")
-                .key("waiting-empty")
-                .font(type_::BODY)
-                .color(t.text_secondary),
-        );
+    // Reminders still to come wait on the Reminders page, which this opens.
+    let all_reminders = (!s.reminders.list().is_empty()).then(|| {
+        small_button("waiting-reminders", "All reminders", t, |s| {
+            s.showing = Showing::Reminders
+        })
+    });
+    if count == 0 {
+        // Nothing waits: the whole strip is one line, the count saying so.
+        let mut line = row()
+            .gap(space::S2)
+            .center_y()
+            .child(heading("Waiting on you (0)", t).key("waiting-empty"));
+        if let Some(button) = all_reminders {
+            line = line.child(el().grow(1.0)).child(button);
+        }
+        return col()
+            .key("waiting")
+            .role("region")
+            .label("Waiting on you, 0")
+            .padding(space::S3)
+            .radius(radius::LG)
+            .fill(t.card)
+            .border(1.0, t.card_border)
+            .child(line);
     }
+    let mut body = col().gap(space::S2);
     for r in rows {
         body = body.child(r);
     }
-    if !s.reminders.list().is_empty() {
-        // Reminders still to come wait on the Reminders page, which this opens.
-        body = body.child(row().child(small_button(
-            "waiting-reminders",
-            "All reminders",
-            t,
-            |s| s.showing = Showing::Reminders,
-        )));
+    if let Some(button) = all_reminders {
+        body = body.child(row().child(button));
     }
     // Beside the fleet it stops growing, so the fleet stays in view; alone it fills the column.
     // Either way only its list scrolls.
@@ -188,10 +199,7 @@ fn waiting(s: &App, t: Theme, dark: bool) -> El {
         .gap(space::S2)
         .radius(radius::LG)
         .fill(t.card)
-        .border(
-            if count > 0 { 2.0 } else { 1.0 },
-            waiting_border(count, t, dark),
-        )
+        .border(2.0, tok::accent(3, dark))
         .child(heading(&format!("Waiting on you ({count})"), t));
     if alone {
         strip.grow(1.0).min_h(0.0).child(list.grow(1.0).child(body))
@@ -204,13 +212,6 @@ fn waiting(s: &App, t: Theme, dark: bool) -> El {
 /// stays in view.
 const WAITING_MAX_H: f32 = 380.0;
 
-fn waiting_border(count: usize, t: Theme, dark: bool) -> rune::Color {
-    if count > 0 {
-        tok::accent(3, dark)
-    } else {
-        t.card_border
-    }
-}
 
 /// A question from the chief of staff's hook, such as whether a tool may run.
 fn approval(item: &Item, t: Theme) -> El {
