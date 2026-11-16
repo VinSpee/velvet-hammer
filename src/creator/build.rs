@@ -891,7 +891,13 @@ mod tests {
         let data = scratch("job-running");
         assert!(!job_running(&data));
         let mut child = Command::new("sh")
-            .args(["-c", "sleep 30; true", "velvet-hammer", "--creator", "watch"])
+            .args([
+                "-c",
+                "sleep 30; true",
+                "velvet-hammer",
+                "--creator",
+                "watch",
+            ])
             .arg(&data)
             .arg("abc")
             .spawn()
