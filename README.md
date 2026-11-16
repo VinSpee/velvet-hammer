@@ -299,7 +299,9 @@ talks to Anthropic:
   the chat.
 
 The app looks for `claude` on its `PATH`. When you start it from a terminal with `cargo run`, that
-is your shell's `PATH`.
+is your shell's `PATH`. When Finder, the Dock or `open` starts it, macOS gives it only a bare
+`PATH`, so the app asks your login shell for its `PATH` and adds the folders Claude Code's
+installers use (`~/.local/bin`, `~/.claude/local`, `/opt/homebrew/bin` and `/usr/local/bin`).
 
 **How this fits Anthropic's terms.** Anthropic's Claude Code legal and compliance page
 (https://code.claude.com/docs/en/legal-and-compliance) says that third-party developers may not
