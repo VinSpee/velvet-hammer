@@ -1787,6 +1787,7 @@ fn poll(s: &mut App, now: f64, tx: &mut Tx) -> bool {
     // Rune has hooked the system's quit by the first poll, so the question goes in front of it.
     if desktop() {
         lifecycle::install();
+        lifecycle::keep_frame();
     }
     let focused = tx.focused().map(str::to_string);
     if focused != s.focused {
@@ -2688,7 +2689,12 @@ fn main() {
         setup: Some(setup),
         poll: Some(poll),
         on_key: Some(on_key),
-        ..AppSpec::new("Velvet Hammer", (1100.0, 720.0), first_state(), view::view)
+        ..AppSpec::new(
+            "Velvet Hammer",
+            lifecycle::size(headless),
+            first_state(),
+            view::view,
+        )
     })
     // A message link the system opened with the app; macOS needs the app bundle to declare the
     // scheme first (see docs/links.md).

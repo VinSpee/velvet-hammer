@@ -36,8 +36,9 @@ decision that waits on you posts a macOS notification and counts on the Dock ico
 or failed worker counts too; a question from the hook waits eight hours by default, and one
 nobody answered stays in Waiting on you as an expired card with **Ask again**. On macOS, closing
 the window keeps the app running behind a menu-bar item, and Quit asks first while work is in
-flight (see [What gets your attention](docs/attention.md)). `scripts/install-app.sh` builds and
-installs `Velvet Hammer.app` (see [Install the app](#install-the-app)). Under Waiting on you,
+flight (see [What gets your attention](docs/attention.md)). `scripts/install-app.sh` builds and installs or
+updates `~/Applications/Velvet Hammer Dev.app`, so a Dock icon pinned to it always opens the
+newest build (see [Install the app](#install-the-app)). Under Waiting on you,
 **Underway** shows the tasks firstmate has in flight, and selecting one shows that crewmate's
 terminal; **Recently landed** and **Charted next** follow. **Ahoy** and **Bearings** ask the
 chief of staff for `/ahoy` and `/bearings`, and the app sends `/bearings` by itself once, on its
@@ -223,7 +224,11 @@ panel.
   (`src/menubar/mac.rs`, AppKit's `NSStatusItem`).
 - `src/shell_path.rs`: the login shell's `PATH` for an app opened from Finder, so `claude` and
   firstmate's tools are found.
-- `scripts/install-app.sh`: builds `Velvet Hammer.app` and installs it into `/Applications`.
+- `scripts/install-app.sh`: builds `Velvet Hammer Dev.app` and installs or updates it in
+  `~/Applications` through Rune's installer, which swaps the running build and rolls back a
+  build that does not start.
+- `assets/icon.svg`: the app icon; `assets/AppIcon.icns` is made from it (see
+  [Install the app](#install-the-app)).
 - `src/bearings.rs`: what waits on the captain and how the fleet stands, read from firstmate's
   records by running its `bin/fm-bearings-snapshot.sh --json` on a background thread when they
   may have changed, and the last snapshot kept for the next launch.
@@ -419,20 +424,44 @@ together.
 
 ## Install the app
 
-On a Mac, `scripts/install-app.sh` builds the release binary and installs it as
-`/Applications/Velvet Hammer.app`. Run it again to update: quit Velvet Hammer first, or quit and
-reopen it afterwards to run the new build. It takes another folder as its argument, such as
-`scripts/install-app.sh ~/Applications`. It needs the same toolchain as **Build and run**.
+On a Mac, one command builds the release binary and installs it as
+`~/Applications/Velvet Hammer Dev.app`, or updates the app already there:
 
 ```sh
 scripts/install-app.sh
-open "/Applications/Velvet Hammer.app"
 ```
 
-The bundle has the identifier `io.github.vinspee.velvet-hammer` and uses `assets/AppIcon.icns`
-as its icon when that file exists; there is none yet, so macOS shows its generic icon. It is signed ad hoc for
-this Mac only, which is enough for notifications; local notifications need no entitlement. It is
-not signed with a developer ID or notarized, and it does not update itself.
+It needs the same toolchain as **Build and run**. The app always lives at that one path, and every
+run of the script replaces it in place, so **pin it to the Dock once**: drag
+`~/Applications/Velvet Hammer Dev.app` from Finder onto the Dock (or, while it runs, Control-click
+its Dock icon and choose **Options › Keep in Dock**). The pinned icon then opens the newest build.
+
+An update swaps the running app through Rune's installer (`scripts/mac-app` in the Rune checkout
+Cargo already has, at the revision `Cargo.lock` pins). It waits while the chief of staff is in a
+turn, asks the running app to quit, exchanges the two bundles atomically and opens the new build
+in the same window frame. When the new build is not ready within 15 seconds, it puts the previous
+bundle back and reopens it, and the script fails. The quit for the swap does not ask about
+workers in flight, because they keep running and the new build supervises them at once; Quit from
+the menu still asks. The chief of staff starts a fresh session after the swap.
+
+The bundle has the identifier `io.github.vinspee.velvet-hammer` and the icon in
+`assets/AppIcon.icns`, which is made from `assets/icon.svg`:
+
+```sh
+mkdir -p /tmp/AppIcon.iconset
+for n in 16 32 128 256 512; do
+  rsvg-convert -w $n -h $n assets/icon.svg -o /tmp/AppIcon.iconset/icon_${n}x${n}.png
+  rsvg-convert -w $((n*2)) -h $((n*2)) assets/icon.svg -o /tmp/AppIcon.iconset/icon_${n}x${n}@2x.png
+done
+iconutil -c icns /tmp/AppIcon.iconset -o assets/AppIcon.icns
+```
+
+**Signing.** The script signs with `$MAC_APP_SIGN` when it is set, else with your **Apple
+Development** certificate for the email in `git config user.email`, else ad hoc. Keep one identity:
+macOS ties the Dock icon and the notification permission to it, and an ad hoc signature changes
+with every build, so notifications may ask for permission again after each update. The first
+signing with a certificate may ask for your login keychain; choose **Always Allow**. The app is not
+notarized, and it does not update itself.
 
 **First launch and Gatekeeper.** A bundle built on your Mac carries no quarantine flag, so
 Gatekeeper does not check it, and it opens with a double-click like any other app. (The script
@@ -451,8 +480,9 @@ installs into (`~/.local/bin`, `~/.claude/local`, `/opt/homebrew/bin`, `/usr/loc
 exist. Run from a terminal that already finds `claude`, it keeps that terminal's `PATH`.
 
 The app keeps its data in `~/.velvet-hammer` whichever way it starts; set `VELVET_HAMMER_DATA` to
-use another folder (`open "/Applications/Velvet Hammer.app" --env VELVET_HAMMER_DATA=/path`). To
-remove the app, quit it and move `Velvet Hammer.app` to the Trash; its data stays.
+use another folder (`open "$HOME/Applications/Velvet Hammer Dev.app" --env
+VELVET_HAMMER_DATA=/path`). To remove the app, quit it and move `Velvet Hammer Dev.app` to the
+Trash; its data stays.
 
 ## Verify headlessly
 

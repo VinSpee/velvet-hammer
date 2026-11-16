@@ -2815,6 +2815,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "rune-mac"
+version = "0.0.1"
+source = "git+https://github.com/anomalyco/rune?rev=f3be67ace9631ea95565b5263f7aa7c9dd73cdb4#f3be67ace9631ea95565b5263f7aa7c9dd73cdb4"
+dependencies = [
+ "objc2 0.5.3",
+ "rune-notify",
+]
+
+[[package]]
 name = "rune-motion"
 version = "0.1.0"
 source = "git+https://github.com/anomalyco/rune?rev=f3be67ace9631ea95565b5263f7aa7c9dd73cdb4#f3be67ace9631ea95565b5263f7aa7c9dd73cdb4"
@@ -3669,6 +3678,7 @@ dependencies = [
  "portable-pty",
  "rune",
  "rune-kit",
+ "rune-mac",
  "rune-notify",
  "serde_json",
  "sha2",
