@@ -6799,7 +6799,7 @@ mod tests {
             texts_under(&rt, "reminder-settings-summary"),
             ["later today by 6:00 PM \u{b7} mornings 9:00 AM"]
         );
-        tap(&mut rt, "reminder-settings");
+        tap_scrolled(&mut rt, "reminder-settings");
         assert_eq!(rt.state.showing, Showing::ReminderSettings);
         tap(&mut rt, "reminder-setting-morning-up");
         tap(&mut rt, "reminder-settings-all-settings");
