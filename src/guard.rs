@@ -2,7 +2,7 @@
 //! `docs/firstmate.md`), and some of firstmate's hard rules name actions a PreToolUse hook can
 //! see: a merge, a forced push, a teardown that discards work, a write into a project. Each
 //! [`Rule`] here matches one such tool-call shape and either denies it, with a reason the model
-//! can act on, or asks the captain in Needs your input with the exact detail. None ever allows
+//! can act on, or asks the captain in Waiting on you with the exact detail. None ever allows
 //! anything: a tool use no rule matches goes on to the tool-approval settings
 //! ([`crate::approval`]).
 //!
@@ -181,18 +181,18 @@ impl Rule {
                 "Denies it, telling the chief of staff why and what to do instead."
             }
             Rule::DiscardAsks => {
-                "Asks you in Needs your input about a forced teardown, naming the task; denies a \
+                "Asks you in Waiting on you about a forced teardown, naming the task; denies a \
                  forced worktree removal, pointing at bin/fm-teardown.sh."
             }
             Rule::MergeAsks => {
-                "Asks you in Needs your input, naming the pull request. Neither the tool-approval \
+                "Asks you in Waiting on you, naming the pull request. Neither the tool-approval \
                  mode nor an allow rule can answer for you."
             }
             Rule::ProjectsReadOnly => {
-                "Asks you in Needs your input, naming the file or repository, so you can approve \
+                "Asks you in Waiting on you, naming the file or repository, so you can approve \
                  a change you asked for."
             }
-            Rule::PublishAsks => "Asks you in Needs your input, naming the remote or the command.",
+            Rule::PublishAsks => "Asks you in Waiting on you, naming the remote or the command.",
         }
     }
 }

@@ -73,7 +73,7 @@ screen replaces the chat, and a message already typed stays in the field. Pressi
 sends once: the field is emptied before the message goes out, so the second Enter finds nothing
 to send. A very long message, or one with links, takes the same path as any other. The add-project
 quick replies and the merge approval are messages too and follow the setting; answers to the
-panels' questions and view submits answer something already in progress and go out at once.
+questions in Waiting on you and view submits answer something already in progress and go out at once.
 
 ## Screenshots
 

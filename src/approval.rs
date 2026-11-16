@@ -80,7 +80,7 @@ impl Mode {
     pub fn explanation(self) -> &'static str {
         match self {
             Mode::Ask => {
-                "Every tool use waits for you in Needs your input, with all of its input shown."
+                "Every tool use asks you first, in Waiting on you, with all of its input shown."
             }
             Mode::ReadOnly => {
                 "Tools that only read (Read, Glob, Grep and the like) run at once; editing files, \
@@ -662,7 +662,7 @@ impl Form {
         let verdict = settings.decide(tool, &input);
         let what = match verdict.effect {
             Effect::Allow => "Runs without asking",
-            Effect::Ask => "Waits for you in Needs your input",
+            Effect::Ask => "Asks you in Waiting on you",
             Effect::Deny => "Denied",
         };
         format!("{what}, {}.", verdict.why())

@@ -41,7 +41,7 @@ everything.
 
 ## How long a question waits
 
-When the hook asks you about a tool use, its card in **Needs your input** waits for your answer
+When the hook asks you about a tool use, its card in **Waiting on you** waits for your answer
 for the time set on the **Attention** page: 10 minutes, 1 hour, 8 hours (recommended, the default)
 or 24 hours. The chief of staff waits with it. A change applies to the next question, also in a
 session that is already running, because the hook reads the setting at every question.

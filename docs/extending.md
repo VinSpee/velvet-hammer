@@ -13,7 +13,7 @@ Each chat session starts a small HTTP server on `127.0.0.1` (`src/bridge.rs`) an
 that one `claude -p` process with two flags. Nothing is written to the user's Claude settings.
 
 - **A tool.** `--mcp-config` names the app's MCP server, `velvet-hammer`, over streamable HTTP.
-  It has five tools. `app_note` adds a note to the **For you to do** panel; marking the note
+  It has five tools. `app_note` adds a note to **Waiting on you** in the fleet panel; marking the note
   done tells the chief of staff which note it was. `app_ui` shows a json-render view in the chat
   (see [Views in the chat](json-render.md)). `app_secondmate` opens the guided flow for adding a
   second mate, with the scope the captain described (see
@@ -29,7 +29,7 @@ that one `claude -p` process with two flags. Nothing is written to the user's Cl
   the README's [Tool approval](../README.md#tool-approval) section): a mode, **Run without
   asking** by default, and custom allow, ask and deny rules on top of it. An allowed or denied
   tool use gets its answer at once, with a reason that names the mode or the rule. A tool use
-  the settings leave to you appears in **Needs your input** as "Allow *tool*?" with all
+  the settings leave to you appears in **Waiting on you** as "Allow *tool*?" with all
   of its input in a scrollable block you can select from: the whole command, or for a file edit or
   write the path and the full content. Nothing is shortened. Such an input larger than 64 KB is
   denied with "too large to review here", because approving a partial view would approve what

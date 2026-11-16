@@ -1,5 +1,5 @@
-//! Velvet Hammer: one conversation with a chief of staff, the subagents it manages, and two
-//! panels for what waits on the captain. `cargo run` opens the window;
+//! Velvet Hammer: one conversation with a chief of staff, the subagents it manages, and a panel
+//! for what waits on the captain and how firstmate's fleet stands. `cargo run` opens the window;
 //! `cargo run -- --snap chat.png` renders it headless (see the README for every scene).
 
 mod agent;
@@ -13,6 +13,7 @@ mod claude;
 mod crew;
 mod find;
 mod firstmate;
+mod fleet;
 mod guard;
 mod history;
 mod home;
@@ -25,6 +26,7 @@ mod messages;
 mod model;
 mod pi;
 mod projects;
+mod refresh;
 mod reminders;
 mod repos;
 mod secondmates;
@@ -126,8 +128,13 @@ pub struct App {
     pub snooze_problem: Option<String>,
     /// Keeps `captain` current from firstmate's records, when the chief of staff is firstmate.
     watcher: Option<bearings::Watcher>,
-    /// What firstmate's records say waits on the captain.
+    /// What firstmate's records say waits on the captain, and how the fleet stands.
     pub captain: Bearings,
+    /// How the fleet panel stands: when the snapshot was read, and which sections are open.
+    pub fleet: fleet::Fleet,
+    /// The day `/bearings` last ran by itself, until the first time the chat can run in this
+    /// launch. Only the app the captain opens has it.
+    daily: Option<fleet::Daily>,
     /// Why firstmate's records could not be read the last time, in firstmate's words.
     pub captain_problem: Option<String>,
     /// The crewmate whose terminal is being read, while `showing` is [`Showing::Crew`].
@@ -408,6 +415,8 @@ impl App {
             snooze_problem: None,
             watcher: None,
             captain: Bearings::default(),
+            fleet: fleet::Fleet::default(),
+            daily: None,
             captain_problem: None,
             peek: None,
             project_watcher: None,
@@ -559,13 +568,10 @@ impl App {
             changed = true;
         }
         changed |= self.repos.poll();
-        if let Some(snapshot) = self.watcher.as_mut().and_then(|w| w.poll()) {
-            match snapshot {
-                Ok(captain) => {
-                    self.captain = captain;
-                    self.captain_problem = None;
-                }
-                Err(problem) => self.captain_problem = Some(problem),
+        let updates = self.watcher.as_mut().map(|w| w.poll()).unwrap_or_default();
+        if !updates.is_empty() {
+            for update in updates {
+                self.take_fleet(update);
             }
             // An answered hold leaves firstmate's records; stop answering one that is gone.
             if let Some(key) = &self.answering
@@ -633,7 +639,13 @@ impl App {
     pub fn take(&mut self, event: Event) {
         match event {
             Event::Status(status) => self.status = status,
-            Event::Working(working) => self.working = working,
+            Event::Working(working) => {
+                // A finished turn may have changed firstmate's records.
+                if self.working && !working {
+                    self.invalidate_fleet();
+                }
+                self.working = working;
+            }
             Event::Reply { text, done } => {
                 match self.replying {
                     Some(i) => self.ws.chat[i].text = text,
@@ -971,6 +983,9 @@ impl App {
             self.reminders
                 .said_in(&self.ws.chat[self.ws.chat.len() - 1].id);
         }
+        if matches!(action, Action::Answer { .. } | Action::Done { .. }) {
+            self.invalidate_fleet();
+        }
         self.chief.act(&self.ws, &action);
         self.drain();
     }
@@ -978,7 +993,7 @@ impl App {
     /// Takes in what the agent layer reported, then sends the next queued message if it can go
     /// out; true when anything changed. The window calls this each time it wakes.
     pub fn step(&mut self) -> bool {
-        let changed = self.drain() | self.deliver();
+        let changed = self.drain() | self.first_of_the_day() | self.deliver();
         self.attend();
         changed
     }
@@ -1093,7 +1108,10 @@ impl App {
         // An answer goes to the chief of staff in the captain's own words, naming the hold.
         // Firstmate records it and decides whether it closes a question or frees held work.
         let text = match self.answering.take() {
-            Some(key) => format!("My answer to the captain hold {key}: {text}"),
+            Some(key) => {
+                self.invalidate_fleet();
+                format!("My answer to the captain hold {key}: {text}")
+            }
             None => text,
         };
         let attachments = std::mem::take(&mut self.attached);
@@ -1454,7 +1472,9 @@ impl App {
             .workplace()
             .is_some()
             .then(|| self.firstmate.place());
-        self.watcher = place.as_ref().map(bearings::Watcher::start);
+        self.watcher = place
+            .as_ref()
+            .map(|p| bearings::Watcher::start(p, &self.data.join(bearings::CACHE)));
         self.project_watcher = place.as_ref().map(|p| projects::Watcher::start(&p.home));
         self.lock_watch = place.as_ref().map(home::LockWatch::start);
         self.mates = secondmates::Mates::new(place.as_ref().map(|p| p.home.as_path()), &self.data);
@@ -1526,6 +1546,7 @@ impl App {
                 format!("I approve merging {url} (task {task})."),
                 Vec::new(),
             );
+            self.invalidate_fleet();
         }
     }
 
@@ -1613,6 +1634,7 @@ fn init() -> App {
     let mut app = App::new(Box::new(claude), firstmate, &firstmate::data_dir());
     // After the saved home is applied, so a custom home is never installed or updated.
     app.firstmate.start();
+    app.daily = Some(fleet::Daily::open(&firstmate::data_dir()));
     app
 }
 
@@ -2109,6 +2131,27 @@ fn main() {
                 let choice = home::Choice(Some(std::fs::canonicalize(&home).expect("home")));
                 s.use_home(choice);
             }),
+            // The fleet panel: every section filled; Underway and Recently landed closed with
+            // Charted next opened; an empty fleet; and a snapshot kept from an earlier launch
+            // while this launch's run fails.
+            ("fleet", |s| *s = fleet_scene("fleet", bearings::FLEET)),
+            ("fleet-charted", |s| {
+                *s = fleet_scene("fleet-charted", bearings::FLEET);
+                for section in fleet::Section::ALL {
+                    s.fleet.toggle(section);
+                }
+            }),
+            ("fleet-empty", |s| {
+                *s = fleet_scene("fleet-empty", bearings::EMPTY)
+            }),
+            ("fleet-failed", |s| {
+                let lab = Lab::at(Path::new("/tmp/velvet-hammer/fleet-failed"));
+                let at = jiff::Timestamp::now() - jiff::SignedDuration::from_hours(3);
+                keep_snapshot(&lab, bearings::FLEET, at);
+                lab.bearings(r#"{"schema":"fm-bearings.v9"}"#);
+                *s = fake_in_firstmate(&lab, true);
+                s.settle(|s| s.captain_problem.is_some());
+            }),
             // Projects from firstmate's records: none yet in a fresh install, none in an
             // installed home, adding the first one with the chief of staff, and three listed.
             ("projects-fresh", |s| {
@@ -2497,7 +2540,7 @@ fn main() {
                 s.settle(|s| s.ws.needs_input().next().is_some());
             }),
             // Reminders on a fixed clock, Friday 2:30 PM: the Reminders page, two that came due
-            // (one overdue) with the banner and For you to do, the snooze menu, and the settings.
+            // (one overdue) with the banner and Waiting on you, the snooze menu, and the settings.
             ("reminders-list", |s| *s = reminders_set().0),
             ("reminder-fired", |s| *s = reminders_due().0),
             ("reminder-snooze", |s| {
@@ -2897,6 +2940,27 @@ fn answered(mut app: App, lab: &Lab, step: Step) -> App {
         answer(&mut app);
         app.add_mate_next();
     }
+    app
+}
+
+/// The snapshot `json`, read at `at`, as an earlier launch kept it in `lab`'s data directory.
+fn keep_snapshot(lab: &Lab, json: &str, at: jiff::Timestamp) {
+    std::fs::create_dir_all(&lab.data).expect("data directory");
+    bearings::write_cache(
+        &lab.data.join(bearings::CACHE),
+        &lab.home(),
+        json.as_bytes(),
+        at,
+    );
+}
+
+/// The app as firstmate on a lab home whose snapshot is `json`, once the panel shows it. The lab
+/// is at a short path for screenshots.
+fn fleet_scene(name: &str, json: &str) -> App {
+    let lab = Lab::at(&Path::new("/tmp/velvet-hammer").join(name));
+    lab.bearings(json);
+    let mut app = fake_in_firstmate(&lab, true);
+    app.settle(|s| s.fleet.at.is_some() && !s.fleet.refreshing);
     app
 }
 
@@ -3757,10 +3821,16 @@ mod tests {
     #[test]
     fn marking_a_task_done_removes_it_and_shows_the_empty_state() {
         let mut rt = runtime();
-        assert!(rt.find("for-you-empty").is_none());
         tap(&mut rt, "done-3");
         assert!(rt.state.ws.item(3).is_none());
-        assert!(rt.find("for-you-empty").is_some());
+        assert!(rt.find("task-3").is_none());
+        assert!(
+            rt.find("waiting-empty").is_none(),
+            "two questions still wait"
+        );
+        tap(&mut rt, "answer-1-0");
+        tap(&mut rt, "answer-2-0");
+        assert!(rt.find("waiting-empty").is_some());
     }
 
     #[test]
@@ -3806,13 +3876,13 @@ mod tests {
         let lab = Lab::new();
         let mut rt = runtime_with(fake_in_firstmate(&lab, true));
         wait(&mut rt, |s| s.captain_problem.is_none());
-        assert!(rt.find("needs-input-empty").is_some());
+        assert!(rt.find("waiting-empty").is_some());
         lab.bearings(bearings::SNAPSHOT);
         wait(&mut rt, |s| !s.captain.is_empty());
         assert!(rt.find("hold-lab-window-size").is_some());
         assert!(rt.find("hold-lab-gh-login").is_some());
         assert!(rt.find("merge-lab-panels").is_some());
-        assert!(rt.find("needs-input-empty").is_none());
+        assert!(rt.find("waiting-empty").is_none());
         // Firstmate closed one hold: it leaves the panel when the records change.
         lab.bearings(r#"{"schema":"fm-bearings.v1","decisions_open":[{"key":"lab-gh-login","question":"Sign in"}]}"#);
         wait(&mut rt, |s| s.captain.holds.len() == 1);
@@ -3876,6 +3946,138 @@ mod tests {
         assert!(rt.find("hold-lab-window-size").is_some());
     }
 
+    /// The app as firstmate on a lab home whose snapshot is `json`, once the panel shows it.
+    fn fleet_runtime(json: &str) -> (Runtime<App>, Lab) {
+        let lab = Lab::new();
+        lab.bearings(json);
+        let mut rt = runtime_with(fake_in_firstmate(&lab, true));
+        wait(&mut rt, |s| s.fleet.at.is_some() && !s.fleet.refreshing);
+        (rt, lab)
+    }
+
+    /// The words inside the element keyed `key`, one text per line.
+    fn words(rt: &Runtime<App>, key: &str) -> String {
+        assert!(rt.find(key).is_some(), "no element keyed {key}");
+        texts_under(rt, key).join("\n")
+    }
+
+    #[test]
+    fn the_fleet_panel_shows_each_section_of_the_snapshot() {
+        let (mut rt, _lab) = fleet_runtime(bearings::FLEET);
+        // What waits on the captain: the hold and the merge approval, counted.
+        assert!(rt.find("hold-lab-app-bundle").is_some());
+        assert!(rt.find("merge-lab-stop-button-docs").is_some());
+        assert!(rt.find("open-merge-lab-stop-button-docs").is_some());
+        assert!(words(&rt, "waiting").contains("Waiting on you (2)"));
+        // Underway, with the blocked worker's state in words.
+        assert!(rt.find("crew-lab-fleet-panel").is_some());
+        let tree = words(&rt, "fleet-sections");
+        assert!(tree.contains("Underway (2)"), "{tree}");
+        assert!(
+            tree.contains("blocked \u{b7} macOS will not post notifications"),
+            "{tree}"
+        );
+        // Recently landed, with the pull request to open and the report's path.
+        assert!(rt.find("landed-lab-stop-button-open").is_some());
+        assert!(rt.find("landed-lab-daily-review-path").is_some());
+        // Charted next starts closed, with its count, and opens on a press. The two above it
+        // close, so it is in view.
+        assert!(tree.contains("Charted next (2)"));
+        assert!(rt.find("gate-lab-multiline").is_none());
+        tap(&mut rt, "fleet-underway-toggle");
+        tap(&mut rt, "fleet-landed-toggle");
+        assert!(rt.find("crew-lab-notify").is_none());
+        tap(&mut rt, "fleet-charted-toggle");
+        assert!(rt.find("gate-lab-multiline").is_some());
+        let tree = words(&rt, "gate-lab-multiline-why");
+        assert!(tree.contains("waits for lab-fleet-panel"), "{tree}");
+        // A worker's row shows its terminal.
+        tap(&mut rt, "fleet-underway-toggle");
+        tap(&mut rt, "crew-lab-notify");
+        assert_eq!(rt.state.showing, Showing::Crew("lab-notify".into()));
+        let tree = words(&rt, "fleet-updated");
+        assert!(tree.contains("Updated Today"), "{tree}");
+    }
+
+    #[test]
+    fn an_empty_fleet_says_so_in_every_section() {
+        let (rt, _lab) = fleet_runtime(bearings::EMPTY);
+        for key in [
+            "waiting-empty",
+            "fleet-underway-empty",
+            "fleet-landed-empty",
+        ] {
+            assert!(rt.find(key).is_some(), "{key}");
+        }
+        // Charted next stays closed, so its empty line is not drawn.
+        assert!(rt.find("fleet-charted-empty").is_none());
+        assert_eq!(words(&rt, "waiting"), "Waiting on you (0)");
+    }
+
+    #[test]
+    fn a_kept_snapshot_shows_at_launch_and_stands_when_the_next_run_fails() {
+        let lab = Lab::new();
+        let at = jiff::Timestamp::now() - jiff::SignedDuration::from_hours(3);
+        keep_snapshot(&lab, bearings::FLEET, at);
+        lab.bearings(r#"{"schema":"fm-bearings.v9"}"#);
+        let mut rt = runtime_with(fake_in_firstmate(&lab, true));
+        wait(&mut rt, |s| s.captain_problem.is_some());
+        assert!(rt.state.fleet.kept);
+        assert_eq!(rt.state.fleet.at, Some(at));
+        assert!(rt.find("captain-problem").is_some());
+        assert!(rt.find("hold-lab-app-bundle").is_some());
+        assert!(rt.find("crew-lab-notify").is_some());
+        let tree = words(&rt, "fleet-updated");
+        assert!(tree.contains("before this launch"), "{tree}");
+        // Firstmate's records are readable again: a refresh replaces the kept snapshot.
+        lab.bearings(bearings::EMPTY);
+        tap(&mut rt, "fleet-refresh");
+        wait(&mut rt, |s| !s.fleet.kept && s.captain_problem.is_none());
+        assert!(rt.find("hold-lab-app-bundle").is_none());
+        assert!(rt.find("waiting-empty").is_some());
+    }
+
+    #[test]
+    fn ahoy_and_bearings_ask_the_chief_of_staff_in_the_chat() {
+        let (mut rt, _lab) = fleet_runtime(bearings::EMPTY);
+        tap(&mut rt, "fleet-ahoy");
+        wait(&mut rt, replied);
+        tap(&mut rt, "fleet-bearings");
+        wait(&mut rt, |s| replied(s) && s.ws.chat.len() == 4);
+        let said: Vec<&str> = rt.state.ws.chat.iter().map(|m| m.text.as_str()).collect();
+        assert_eq!(
+            said,
+            [
+                "/ahoy",
+                "You said: /ahoy",
+                "/bearings",
+                "You said: /bearings"
+            ]
+        );
+    }
+
+    #[test]
+    fn bearings_runs_once_on_the_first_launch_of_a_day() {
+        let lab = Lab::new();
+        let launch = |lab: &Lab| {
+            let mut app = fake_in_firstmate(lab, true);
+            app.daily = Some(fleet::Daily::open(&lab.data));
+            let mut rt = runtime_with(app);
+            wait(&mut rt, |s| s.daily.is_none());
+            rt
+        };
+        let mut first = launch(&lab);
+        wait(&mut first, replied);
+        assert_eq!(first.state.ws.chat[0].text, "/bearings");
+        drop(first);
+        // Opened again the same day: nothing is sent until the captain asks.
+        let second = launch(&lab);
+        assert_eq!(second.state.ws.chat.len(), second.state.ws.earlier);
+        // A scene or a test, which has no day to keep, never sends it.
+        let (plain, _lab) = fleet_runtime(bearings::EMPTY);
+        assert!(plain.state.ws.chat.is_empty());
+    }
+
     #[test]
     #[ignore = "clones firstmate from GitHub and needs its tasks-axi and jq on PATH"]
     fn real_firstmate_reports_a_captain_hold() {
@@ -3902,12 +4104,13 @@ mod tests {
             "{}",
             String::from_utf8_lossy(&held.stderr)
         );
-        let mut watcher = bearings::Watcher::start(&firstmate.place());
+        let mut watcher = bearings::Watcher::start(&firstmate.place(), &data.join(bearings::CACHE));
         let captain = loop {
             assert!(Instant::now() < deadline, "no snapshot arrived");
-            match watcher.poll() {
-                Some(snapshot) => break snapshot.unwrap(),
-                None => std::thread::sleep(Duration::from_millis(50)),
+            match watcher.poll().pop() {
+                Some(bearings::Update::Read(read)) => break read.bearings,
+                Some(bearings::Update::Failed(problem)) => panic!("{problem}"),
+                _ => std::thread::sleep(Duration::from_millis(50)),
             }
         };
         assert_eq!(captain.holds.len(), 1);
@@ -6777,7 +6980,7 @@ mod tests {
             texts_under(&rt, "reminder-banner-when"),
             ["Set Today, 2:30 PM \u{b7} due Today, 2:32 PM"]
         );
-        assert!(rt.find("reminder-1").is_some(), "in For you to do");
+        assert!(rt.find("reminder-1").is_some(), "in Waiting on you");
         // From the Reminders page, the link goes back to the message and highlights it.
         tap(&mut rt, "reminders");
         tap(&mut rt, "list-1-message");
@@ -6873,7 +7076,7 @@ mod tests {
         let (app, _) = reminders_set();
         let mut rt = runtime_with(app);
         tap(&mut rt, "reminders-close");
-        tap(&mut rt, "for-you-reminders");
+        tap(&mut rt, "waiting-reminders");
         assert_eq!(rt.state.showing, Showing::Reminders);
         assert!(rt.find("reminders-coming").is_some());
         assert!(rt.find("reminders-later").is_some());
@@ -7305,7 +7508,7 @@ mod tests {
     #[test]
     fn the_main_window_keeps_its_panels_and_settings_hold_every_setting() {
         let mut rt = runtime();
-        for key in ["agents", "chat", "needs-input", "for-you"] {
+        for key in ["agents", "chat", "fleet", "waiting"] {
             assert!(rt.find(key).is_some(), "{key}");
         }
         for key in [

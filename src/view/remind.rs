@@ -1,5 +1,5 @@
 //! The captain's reminders (see [`crate::reminders`]): the banner over the middle column while
-//! one is due, its card at the top of For you to do, the Reminders page and its settings. A
+//! one is due, its card in Waiting on you, the Reminders page and its settings. A
 //! reminder's text is the model's words, so it is only ever drawn as plain text.
 
 use jiff::Zoned;
@@ -177,7 +177,7 @@ fn snooze_menu(s: &App, place: &'static str, id: u64, t: Theme, dark: bool) -> E
     menu
 }
 
-/// The reminders that came due, for the top of For you to do.
+/// The reminders that came due, for Waiting on you.
 pub fn panel_rows(s: &App, t: Theme, dark: bool) -> Vec<El> {
     let now = s.reminders.now();
     s.reminders
@@ -335,7 +335,7 @@ pub fn reminders_page(s: &App, t: Theme, dark: bool) -> El {
              text, when it was set, when it is due, whether it has come due and the message \
              it was set in, in {} in Velvet Hammer's data directory, readable by your user \
              only. A reminder that comes \
-             due shows here, in a banner and in For you to do, and in your system's \
+             due shows here, in a banner and in Waiting on you, and in your system's \
              notifications where Velvet Hammer may post them.",
             crate::reminders::FILE
         ),
