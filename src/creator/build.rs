@@ -323,7 +323,13 @@ fn try_change(dir: &Dir, data: &Path, commit: String, worktree: PathBuf) {
         return dir.mark(&mut trial, State::Failed, Some(why));
     }
     dir.mark(&mut trial, State::Trying, None);
-    watch(dir, data, &trial.commit);
+    let exe = installed().join("Contents/MacOS").join(EXE);
+    watch(
+        dir,
+        &trial.commit,
+        || running(&exe) || crate::lifecycle::relaunching_in(data),
+        || swap(dir, data, &dir.known_good()),
+    );
 }
 
 fn undo(dir: &Dir, data: &Path) {
@@ -340,8 +346,12 @@ fn undo(dir: &Dir, data: &Path) {
 /// Waits while the trial of `commit` runs. When no copy of the app runs any more and the trial
 /// is still this one, the app stopped without quitting through the menu (which ends the trial's
 /// watch, see [`quit_cleanly`]), so the known-good build goes back.
-fn watch(dir: &Dir, data: &Path, commit: &str) {
-    let exe = installed().join("Contents/MacOS").join(EXE);
+fn watch(
+    dir: &Dir,
+    commit: &str,
+    alive: impl Fn() -> bool,
+    restore: impl Fn() -> Result<(), String>,
+) {
     loop {
         std::thread::sleep(WATCH);
         let still = |t: &Trial| t.state == State::Trying && t.commit == commit;
@@ -350,7 +360,7 @@ fn watch(dir: &Dir, data: &Path, commit: &str) {
         };
         // A swap leaves no app running for a moment: `scripts/install-app.sh` replacing the
         // trial build, say. That is not a crash.
-        if running(&exe) || crate::lifecycle::relaunching_in(data) {
+        if alive() {
             continue;
         }
         if dir.0.join("quit").exists() {
@@ -359,7 +369,7 @@ fn watch(dir: &Dir, data: &Path, commit: &str) {
         }
         let why = "The trial build stopped unexpectedly, so the last kept build is back.";
         dir.mark(&mut trial, State::Restored, Some(why.into()));
-        if let Err(why) = swap(dir, data, &dir.known_good()) {
+        if let Err(why) = restore() {
             dir.mark(&mut trial, State::Failed, Some(why));
         }
         return;
@@ -383,13 +393,21 @@ pub fn quit_cleanly(data: &Path) {
     }
 }
 
+/// Whether a copy of the app at `exe` runs other than this job, whose own command line names the
+/// same executable.
 fn running(exe: &Path) -> bool {
     Command::new("pgrep")
         .arg("-f")
         .arg(format!("^{}( |$)", exe.display()))
-        .stdout(Stdio::null())
-        .status()
-        .is_ok_and(|s| s.success())
+        .output()
+        .is_ok_and(|o| others(&String::from_utf8_lossy(&o.stdout), std::process::id()))
+}
+
+fn others(pgrep: &str, own: u32) -> bool {
+    pgrep
+        .split_whitespace()
+        .filter_map(|pid| pid.parse::<u32>().ok())
+        .any(|pid| pid != own)
 }
 
 /// Runs `command` and returns what it printed. What it says on standard error goes to the job
@@ -438,10 +456,7 @@ fn prepare(dir: &Dir, worktree: &Path, commit: &str) -> Result<Vec<String>, Stri
             .arg(worktree)
             .args(["+refs/heads/*:refs/remotes/project/*", "HEAD"]),
     )?;
-    let fetched = step(
-        "read the change",
-        git(&checkout).args(["rev-parse", "FETCH_HEAD"]),
-    )?;
+    let fetched = step("read the change", git(worktree).args(["rev-parse", "HEAD"]))?;
     let commit = step(
         "find the commit",
         git(&checkout).args(["rev-parse", "--verify", &format!("{commit}^{{commit}}")]),
@@ -729,6 +744,69 @@ mod tests {
         let dir = Dir::new(&data);
         let changed = prepare(&dir, &worktree, &commit).unwrap();
         assert!(gate(&changed).unwrap_err().contains("src/guard.rs"));
+    }
+
+    #[test]
+    fn an_earlier_sorting_branch_does_not_stand_in_for_the_worktree() {
+        let data = scratch("sorted");
+        let (worktree, commit) = project(
+            &data,
+            "true",
+            "mkdir -p src/view && echo c > src/view/card.rs",
+        );
+        sh(&data.join("project"), "git branch aaa-other main");
+        let changed = prepare(&Dir::new(&data), &worktree, &commit).unwrap();
+        assert_eq!(changed, ["src/view/card.rs"]);
+    }
+
+    #[test]
+    fn the_job_does_not_count_itself_as_the_app() {
+        assert!(!others("", 7));
+        assert!(!others("7\n", 7));
+        assert!(others("7\n9\n", 7));
+    }
+
+    fn trying(dir: &Dir, commit: &str) -> Trial {
+        let mut trial = Trial {
+            state: State::Building,
+            commit: commit.into(),
+            worktree: "/w".into(),
+            detail: None,
+            at: 0,
+        };
+        dir.mark(&mut trial, State::Trying, None);
+        trial
+    }
+
+    #[test]
+    fn a_crashed_trial_restores_the_known_good_build() {
+        let data = scratch("crash");
+        let dir = Dir::new(&data);
+        trying(&dir, "abc");
+        let restored = std::cell::Cell::new(false);
+        watch(
+            &dir,
+            "abc",
+            || false,
+            || {
+                restored.set(true);
+                Ok(())
+            },
+        );
+        assert!(restored.get());
+        assert_eq!(dir.trial().unwrap().state, State::Restored);
+    }
+
+    #[test]
+    fn the_job_exits_without_restoring_after_keep_or_undo() {
+        for end in [State::Kept, State::Undone] {
+            let data = scratch("ended");
+            let dir = Dir::new(&data);
+            let mut trial = trying(&dir, "abc");
+            dir.mark(&mut trial, end, None);
+            watch(&dir, "abc", || false, || panic!("restored an ended trial"));
+            assert_eq!(dir.trial().unwrap().state, end);
+        }
     }
 
     #[test]

@@ -239,6 +239,9 @@ impl App {
 
     /// Builds and swaps in `change`, at the captain's press of Try it.
     pub fn try_change(&mut self, change: &Change) {
+        if self.working {
+            return;
+        }
         self.creator.start(&Job::Try {
             commit: change.commit.clone(),
             worktree: change.worktree.clone(),
@@ -247,6 +250,9 @@ impl App {
 
     /// Swaps the last kept build back, at the captain's press of Undo.
     pub fn undo_change(&mut self) {
+        if self.working {
+            return;
+        }
         self.creator.start(&Job::Undo);
     }
 
