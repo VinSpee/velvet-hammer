@@ -173,7 +173,7 @@ signal at once, so that Claude Code stops firstmate's watcher instead of leaving
 Firstmate keeps what waits on the captain in its own records and publishes them as one
 structured document, `bin/fm-bearings-snapshot.sh --json` (schema `fm-bearings.v1`). Its own rule
 is that a view renders that document and does not parse the record files. Velvet Hammer follows
-it: `src/bearings.rs` runs the script from the clone with `FM_HOME` set to the app's home and
+it: `src/bearings.rs` runs the script from the checkout in use with `FM_HOME` set to the home in use and
 `FM_CREW_STATE_NO_FORGE=1`, so it makes no network request and writes nothing. It runs once when
 the app opens and again whenever a file in the home's `state/` or `data/` directory changes,
 which the app checks every two seconds. If a run fails, for example while the clone is being
@@ -340,7 +340,8 @@ charter (a scope in plain words), a project list, its own backlog and its own se
 until the main firstmate routes work to it, and it reports back on its parent channel. Firstmate's
 `secondmate-provisioning` skill and the scripts it names define all of this. Velvet Hammer shows
 exactly what firstmate's records say and changes nothing by hand: every change runs one of
-firstmate's guarded scripts, from the managed clone, with `FM_HOME` set to the app's home.
+firstmate's guarded scripts, from the checkout in use, with `FM_HOME` set to the home in use (the
+managed one, or a [custom home](#a-custom-firstmate-home)).
 
 ![Five second mates in the agents column, one in each state](screens/second-mates/mates-listed.png)
 
@@ -416,7 +417,7 @@ On yes, the app runs:
 
 1. `FM_SECONDMATE_CHARTER=<your words> bin/fm-home-seed.sh <name> ~/.velvet-hammer/secondmates/<name> <projects>`.
    Firstmate scaffolds the charter brief in `data/<name>/brief.md`, makes the home a local git
-   clone of the managed clone, clones each project from the main home into it, initializes
+   clone of the checkout in use, clones each project from the main home into it, initializes
    no-mistakes where the project ships with it, and adds the registry line. Seeding is
    transactional: a refusal undoes everything, and the page shows firstmate's words.
 2. `bin/fm-spawn.sh <name> --secondmate`, with `--harness` when you chose a runtime. If the
