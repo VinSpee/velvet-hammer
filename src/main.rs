@@ -1567,6 +1567,14 @@ pub const ADD_PROJECT: &str = "I want to add a project. Follow your project-mana
     leave everything as it is. When the project is added, tell me the result in plain words and \
     ask whether I want to add another.";
 
+/// How the app's first state is built. Rune builds it before it applies a `--scene`, and every
+/// scene replaces it, so a scene run starts from the stub, which keeps its data in a scratch
+/// directory, and never opens the real data directory, its firstmate clone or a custom home.
+fn first_state() -> fn() -> App {
+    let scene = std::env::args().any(|a| a == "--scene" || a.starts_with("--scene="));
+    if scene { stub } else { init }
+}
+
 fn init() -> App {
     let firstmate = Firstmate::open(&firstmate::data_dir(), firstmate::UPSTREAM);
     // The pi runtime goes first on the chief of staff's PATH, where firstmate's spawn finds it
@@ -2556,7 +2564,7 @@ fn main() {
         setup: Some(setup),
         poll: Some(poll),
         on_key: Some(on_key),
-        ..AppSpec::new("Velvet Hammer", (1100.0, 720.0), init, view::view)
+        ..AppSpec::new("Velvet Hammer", (1100.0, 720.0), first_state(), view::view)
     })
     // A message link the system opened with the app; macOS needs the app bundle to declare the
     // scheme first (see docs/links.md).

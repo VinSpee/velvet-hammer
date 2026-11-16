@@ -391,6 +391,11 @@ app, runs the tests, renders every main state to PNG, dumps the element trees, a
 scripts/verify.sh [OUT_DIR]     # default OUT_DIR: target/verify
 ```
 
+A `--scene` run never opens your real data directory (`~/.velvet-hammer`, or
+`VELVET_HAMMER_DATA`): Rune builds the app's first state before it applies the scene, and for a
+scene that first state is the stub, with a scratch data directory. The script points
+`VELVET_HAMMER_DATA` at a directory under `OUT_DIR` and fails if any scene creates it.
+
 It writes these files to `OUT_DIR`:
 
 | File | State |

@@ -22,6 +22,13 @@ headless() {
 cargo build --manifest-path "$root/Cargo.toml"
 cargo test --manifest-path "$root/Cargo.toml"
 
+# The app's data directory for every run below. A scene must never open it: Rune builds the app's
+# first state before it applies a scene, so a scene run that did would create this directory,
+# and the check at the end fails.
+real_data=$out/real-data-directory
+rm -rf "$real_data"
+export VELVET_HAMMER_DATA=$real_data
+
 # PNGs of each scene (`$app --list-scenes`), and the element tree of each. The sign-in scenes
 # run the app on scripts/fake-claude, so they need no Claude account.
 # The firstmate scenes run git on a scratch upstream under target/, so they need no network.
@@ -710,6 +717,12 @@ check walk-end.json no  '"key": "input-1"'
 check walk-end.json yes '"key": "input-2"'
 check walk-end.json yes '"key": "for-you-empty"'
 check walk-end.json yes '"text": "Peeking at verify"'
+
+# No scene opened the app's real data directory.
+if [[ -e $real_data ]]; then
+  echo "FAIL a scene opened the app's data directory: $(find "$real_data" | head -5 | tr '\n' ' ')"
+  failures=$((failures + 1))
+fi
 
 if (( failures > 0 )); then
   echo "$failures check(s) failed; output in $out"
