@@ -158,8 +158,7 @@ works as before and has **All settings** to come back. **Conversation history** 
 Settings page itself: **Keep the conversation** (recommended, the default) or **Do not keep the
 conversation**, and **Clear history**, which asks before it deletes anything (see
 [The conversation: find and history](docs/conversation.md#history)). The settings are kept in
-`history.json` beside the other settings files. **Creator mode** is set there too, off by
-default, and kept in `creator.json` (see [Creator mode](docs/creator-mode.md)).
+`history.json` beside the other settings files.
 
 **Creator mode** (a Settings section, off by default, and only useful when the app is built from
 source) lets you change the app from inside it. Ask the chief of staff for a change to the app's
@@ -168,7 +167,8 @@ change shows in Waiting on you. **Try it** swaps in the new build in a few secon
 window with the same conversation, session and place; **Keep** asks the chief of staff to deliver
 the branch through the normal pull request path, and **Undo** swaps the last kept build back.
 **Discard** drops the change. Try it and Undo are refused while the chief of staff is working, and
-Try it is also refused while another change is being tried: Keep or Undo that one first.
+Try it is also refused while another change is being tried: Keep or Undo that one first. The
+setting is kept in `creator.json`; see [Creator mode](docs/creator-mode.md).
 
 The main window keeps what you use all the time: the agents and projects, the chat and the fleet
 panel.

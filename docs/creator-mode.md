@@ -40,13 +40,14 @@ This version is for macOS, changes views and styling only, and needs the app bui
      `creator/target`, which stays warm, so a view change rebuilds in seconds after the first
      build;
    - makes a bundle from the installed app with the new binary, signed by the same identity;
-   - copies the installed app to `creator/known-good/` as the last kept build, unless a trial is
-     already running;
+   - copies the installed app to `creator/known-good/` as the last kept build;
    - swaps the new bundle in with Rune's installer, which waits while the chief of staff is in a
      turn, quits the app, exchanges the bundles atomically, opens the new one, and puts the old
      one back if the new one is not ready within 15 seconds.
    The new build resumes your chief of staff's session and puts your page, draft and queued
    messages back (see [The conversation](conversation.md#the-chief-of-staffs-session)).
+   Try it is refused while your chief of staff is working, and while another change is being
+   tried: keep or undo that one first, so the installed build is always a kept one.
 4. **Trying it.** A banner over the chat says which change you are trying, with **Keep** and
    **Undo**; the card has them too.
 5. **Keep.** The app asks your chief of staff to deliver the branch the normal way: the pipeline,
