@@ -3279,11 +3279,15 @@ mod tests {
     }
 
     fn runtime_with(app: App) -> Runtime<App> {
+        runtime_sized(app, (1100.0, 720.0))
+    }
+
+    fn runtime_sized(app: App, size: (f32, f32)) -> Runtime<App> {
         let env = Env {
             system_dark: true,
             scale: 2.0,
         };
-        let mut rt = Runtime::new(app, view::view, (1100.0, 720.0), env);
+        let mut rt = Runtime::new(app, view::view, size, env);
         rt.poll = Some(poll);
         rt.on_key = Some(on_key);
         rt.frame(0.0);
@@ -6051,7 +6055,8 @@ mod tests {
     fn switching_while_a_turn_runs_asks_first() {
         let lab = Lab::new();
         let home = std::fs::canonicalize(lab.captain_home()).unwrap();
-        let mut rt = runtime_with(fake_in_firstmate(&lab, true));
+        // Tall enough that the confirmation's buttons are inside the window.
+        let mut rt = runtime_sized(fake_in_firstmate(&lab, true), (1100.0, 1000.0));
         rt.state.draft.text = "slow: Drafting the release notes".into();
         tap(&mut rt, "send");
         wait(&mut rt, |s| s.working);
