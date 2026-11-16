@@ -1531,6 +1531,7 @@ impl App {
             models: self.runtime.models(),
             reminders: self.reminders.clone(),
             attention: self.attention_settings.shared(),
+            creator: self.creator.mode.shared(),
         });
     }
 
@@ -1668,6 +1669,7 @@ fn init() -> App {
     let mut app = App::new(Box::new(claude), firstmate, &firstmate::data_dir());
     app.carry = Some(carry::Carry::open(&firstmate::data_dir()));
     app.creator.go_live();
+    creator::build::resume_watch(&firstmate::data_dir());
     app.restore_place();
     // After the saved home is applied, so a custom home is never installed or updated.
     app.firstmate.start();
@@ -4103,6 +4105,18 @@ mod tests {
         assert!(rt.state.ws.chat.iter().any(|m| m.text
             == "Discard the Velvet Hammer change 8f3c2a1 from task vh-cards: drop its branch; \
                 nothing of it is kept."));
+    }
+
+    #[test]
+    fn discard_of_the_change_on_trial_does_nothing_while_the_chief_of_staff_is_working() {
+        let mut app = creator_scene(Some((creator::build::State::Trying, None)));
+        app.working = true;
+        let change = app.creator.changes[0].clone();
+        let said = app.ws.chat.len();
+        app.discard_change(&change);
+        assert_eq!(app.ws.chat.len(), said);
+        assert!(app.queue.is_empty());
+        assert!(app.creator.trying().is_some());
     }
 
     #[test]

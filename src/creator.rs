@@ -22,6 +22,25 @@ use crate::bearings::Crew;
 use crate::store::{self, Saved, Store};
 use build::{Job, State, Trial};
 
+/// What the chief of staff is told, once a session while creator mode is on, about a change to
+/// the app: the worker's brief has to keep it to views and end with the line that puts it on
+/// the captain's card, and only the captain swaps the app.
+pub const BRIEF: &str = "Creator mode is on in Velvet Hammer, the app the captain talks to you \
+    in. When the captain asks for a change to Velvet Hammer itself (how it looks, its layout, \
+    wording or styling), send a worker to the velvet-hammer project as for any task there, \
+    dispatched so that it stops before delivery, and put these steps in its brief: \
+    1. Make the change only in src/view.rs and src/view/. The app tries nothing else; if the \
+    change needs other files, say so and stop. \
+    2. Build with `cargo build --locked`, and render the scenes the change affects with \
+    `target/debug/velvet-hammer --scene NAME --snap OUT.png` and look at them. \
+    3. Commit on the task branch. Do not push, open a pull request or run the delivery pipeline. \
+    4. Append the status line `needs-decision [at=<epoch>]: ready to try <the full 40-character \
+    commit>: <one line on what changed>` and stop. \
+    Velvet Hammer then shows the change to the captain with Try it, which builds it and swaps \
+    the app; never swap, rebuild or restart the app yourself. When the captain says to keep the \
+    change, have the worker deliver its branch the normal way, through the pipeline and a pull \
+    request; when they say to discard it, have the worker drop the branch.";
+
 /// How often, in seconds, the trial record and the workers' status lines are read again.
 const LOOK_EVERY: f64 = 1.0;
 
@@ -279,6 +298,9 @@ impl App {
             .trying()
             .is_some_and(|t| t.commit == change.commit)
         {
+            if self.working {
+                return;
+            }
             self.undo_change();
         }
         self.say(

@@ -223,6 +223,8 @@ fn installed() -> PathBuf {
 pub enum Job {
     /// Builds and swaps in `commit` from the worktree at `worktree`, then watches it.
     Try { commit: String, worktree: PathBuf },
+    /// Watches the trial of `commit` again, for an app opened into a trial that is still on.
+    Watch { commit: String },
     /// Swaps the known-good build back.
     Undo,
 }
@@ -238,6 +240,9 @@ pub fn start(data: &Path, job: &Job) -> io::Result<()> {
     match job {
         Job::Try { commit, worktree } => {
             command.arg("try").arg(data).arg(commit).arg(worktree);
+        }
+        Job::Watch { commit } => {
+            command.arg("watch").arg(data).arg(commit);
         }
         Job::Undo => {
             command.arg("undo").arg(data);
@@ -277,6 +282,12 @@ fn job_from(args: &[String]) -> Option<(PathBuf, Job)> {
                 worktree: PathBuf::from(worktree),
             },
         )),
+        [job, data, commit] if job == "watch" => Some((
+            PathBuf::from(data),
+            Job::Watch {
+                commit: commit.clone(),
+            },
+        )),
         [job, data] if job == "undo" => Some((PathBuf::from(data), Job::Undo)),
         _ => None,
     }
@@ -287,8 +298,47 @@ pub fn run(data: &Path, job: Job) {
     let dir = Dir::new(data);
     match job {
         Job::Try { commit, worktree } => try_change(&dir, data, commit, worktree),
+        Job::Watch { commit } => guard(&dir, data, &commit),
         Job::Undo => undo(&dir, data),
     }
+}
+
+/// An app opened into a trial that is still on has no watchdog if the captain quit it cleanly
+/// before: the old one stopped then. Starts one, unless the trial's job still runs.
+pub fn resume_watch(data: &Path) {
+    let dir = Dir::new(data);
+    if let Some(commit) = rewatch(&dir, job_running(data)) {
+        let _ = start(data, &Job::Watch { commit });
+    }
+}
+
+/// Whether a try or watch job for `data` runs, other than this process.
+fn job_running(data: &Path) -> bool {
+    Command::new("pgrep")
+        .arg("-f")
+        .arg("--")
+        .arg(format!(
+            "--creator (try|watch) {}( |$)",
+            escaped(&data.display().to_string())
+        ))
+        .output()
+        .is_ok_and(|o| others(&String::from_utf8_lossy(&o.stdout), std::process::id()))
+}
+
+/// The commit whose trial needs a new watchdog. The clean quit that ended the last one is over.
+fn rewatch(dir: &Dir, watching: bool) -> Option<String> {
+    let trial = dir.trial().filter(|t| t.state == State::Trying)?;
+    let _ = fs::remove_file(dir.0.join("quit"));
+    (!watching).then_some(trial.commit)
+}
+
+fn escaped(text: &str) -> String {
+    text.chars()
+        .flat_map(|c| {
+            let meta = ".[]()*+?{}|^$\\".contains(c);
+            meta.then_some('\\').into_iter().chain([c])
+        })
+        .collect()
 }
 
 fn try_change(dir: &Dir, data: &Path, commit: String, worktree: PathBuf) {
@@ -323,10 +373,14 @@ fn try_change(dir: &Dir, data: &Path, commit: String, worktree: PathBuf) {
         return dir.mark(&mut trial, State::Failed, Some(why));
     }
     dir.mark(&mut trial, State::Trying, None);
+    guard(dir, data, &trial.commit);
+}
+
+fn guard(dir: &Dir, data: &Path, commit: &str) {
     let exe = installed().join("Contents/MacOS").join(EXE);
     watch(
         dir,
-        &trial.commit,
+        commit,
         || running(&exe) || crate::lifecycle::relaunching_in(data),
         || swap(dir, data, &dir.known_good()),
     );
@@ -795,6 +849,82 @@ mod tests {
         );
         assert!(restored.get());
         assert_eq!(dir.trial().unwrap().state, State::Restored);
+    }
+
+    #[test]
+    fn a_trial_reopened_after_a_clean_quit_is_watched_again() {
+        let data = scratch("reopen");
+        let dir = Dir::new(&data);
+        trying(&dir, "abc");
+        quit_cleanly(&data);
+        watch(&dir, "abc", || false, || panic!("restored a clean quit"));
+        assert_eq!(dir.trial().unwrap().state, State::Trying);
+
+        assert_eq!(rewatch(&dir, true), None);
+        assert_eq!(rewatch(&dir, false), Some("abc".into()));
+        let restored = std::cell::Cell::new(false);
+        watch(
+            &dir,
+            "abc",
+            || false,
+            || {
+                restored.set(true);
+                Ok(())
+            },
+        );
+        assert!(restored.get());
+        assert_eq!(dir.trial().unwrap().state, State::Restored);
+    }
+
+    #[test]
+    fn reopening_clears_the_quit_marker_even_when_a_watch_still_runs() {
+        let data = scratch("reopen-running");
+        let dir = Dir::new(&data);
+        trying(&dir, "abc");
+        quit_cleanly(&data);
+        assert_eq!(rewatch(&dir, true), None);
+        assert!(!dir.0.join("quit").exists());
+    }
+
+    #[test]
+    fn a_running_watch_job_is_found_and_a_missing_one_is_not() {
+        let data = scratch("job-running");
+        assert!(!job_running(&data));
+        let mut child = Command::new("sh")
+            .args([
+                "-c",
+                "sleep 30; true",
+                "velvet-hammer",
+                "--creator",
+                "watch",
+            ])
+            .arg(&data)
+            .arg("abc")
+            .spawn()
+            .unwrap();
+        let found = (0..50).any(|_| {
+            std::thread::sleep(Duration::from_millis(100));
+            job_running(&data)
+        });
+        child.kill().unwrap();
+        child.wait().unwrap();
+        assert!(found);
+    }
+
+    #[test]
+    fn the_watch_job_comes_from_its_command_line() {
+        let args: Vec<String> = ["velvet-hammer", "--creator", "watch", "/d", "abc"]
+            .map(String::from)
+            .to_vec();
+        assert_eq!(
+            job_from(&args),
+            Some((
+                PathBuf::from("/d"),
+                Job::Watch {
+                    commit: "abc".into()
+                }
+            ))
+        );
     }
 
     #[test]

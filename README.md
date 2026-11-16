@@ -127,6 +127,12 @@ The window has three columns, and every setting is in **Settings** (see
   it" sends that preset, and each worker under Underway shows what it runs on. See
   [Workers on other providers](docs/worker-providers.md).
 
+- **Creator mode** (macOS, off by default): ask your chief of staff for a change to the app's
+  views, and a card for it appears in Waiting on you once a worker has it ready. **Try it**
+  builds it from source and swaps the app in seconds, keeping the conversation and your place;
+  **Keep** delivers it as a pull request, and **Undo** brings the last kept build back. See
+  [Creator mode](docs/creator-mode.md).
+
 ## Settings and menus
 
 Configuration is out of the main window, behind the platform's Settings menu item:
@@ -160,8 +166,9 @@ views or styling; a worker makes it on a local branch, builds it and stops befor
 change shows in Waiting on you. **Try it** swaps in the new build in a few seconds, in the same
 window with the same conversation, session and place; **Keep** asks the chief of staff to deliver
 the branch through the normal pull request path, and **Undo** swaps the last kept build back.
-**Discard** drops the change. Try it and Undo are refused while the chief of staff is working, and
-Try it is also refused while another change is being tried: Keep or Undo that one first.
+**Discard** drops the change. Try it and Undo, and Discard of a change being tried, are refused while the chief of staff is working, and
+Try it is also refused while another change is being tried: Keep or Undo that one first. The
+setting is kept in `creator.json`; see [Creator mode](docs/creator-mode.md).
 
 The main window keeps what you use all the time: the agents and projects, the chat and the fleet
 panel.

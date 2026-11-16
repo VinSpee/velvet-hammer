@@ -123,6 +123,8 @@ pub struct Policies {
     pub reminders: Reminders,
     /// How long a question waits for the captain.
     pub attention: Shared<attention::Settings>,
+    /// Whether creator mode is on, for the brief a change to the app needs.
+    pub creator: Shared<crate::creator::Mode>,
 }
 
 impl Policies {
@@ -137,6 +139,7 @@ impl Policies {
             models: Arc::new(RwLock::new(Vec::new())),
             reminders: Reminders::in_memory(reminders::system_clock()),
             attention: Arc::new(RwLock::new(attention::Settings::default())),
+            creator: Arc::new(RwLock::new(crate::creator::Mode::default())),
         }
     }
 }
@@ -150,6 +153,9 @@ struct Serving {
     turn: Mutex<Turn>,
     /// The session has been told about message links (see [`crate::links::INSTRUCTION`]).
     told_links: AtomicBool,
+    /// The session has been told how to brief a change to the app (see
+    /// [`crate::creator::BRIEF`]).
+    told_creator: AtomicBool,
 }
 
 fn read<T: Clone>(shared: &Shared<T>) -> T {
@@ -182,6 +188,7 @@ impl Bridge {
             home,
             turn: Mutex::new(Turn::default()),
             told_links: AtomicBool::new(false),
+            told_creator: AtomicBool::new(false),
         });
         let (expected, done, on_call) = (
             format!("Bearer {token}"),
@@ -498,7 +505,7 @@ fn lock(turn: &Mutex<Turn>) -> std::sync::MutexGuard<'_, Turn> {
 /// views when the visual-replies mode asks for one. The session's first message also says how
 /// message links work, once. While the chief of staff runs as firstmate, each message also
 /// carries the worker nicknames and what the app made of a request for a worker (see
-/// [`crate::crew`]).
+/// [`crate::crew`]), and, once creator mode is on, says once how to brief a change to the app.
 fn user_prompt_submit(input: &Value, serving: &Serving) -> Value {
     lock(&serving.turn).prompt();
     let links =
@@ -510,10 +517,15 @@ fn user_prompt_submit(input: &Value, serving: &Serving) -> Value {
             &read(&serving.policies.models),
         )
     });
+    let creator = (serving.home.is_some()
+        && read(&serving.policies.creator).0
+        && !serving.told_creator.swap(true, Ordering::SeqCst))
+    .then_some(crate::creator::BRIEF);
     let context: Vec<&str> = links
         .into_iter()
         .chain(read(&serving.policies.visual).instruction())
         .chain(crew.as_deref())
+        .chain(creator)
         .collect();
     if context.is_empty() {
         return json!({});
@@ -656,6 +668,7 @@ mod tests {
             models: Arc::new(RwLock::new(Vec::new())),
             reminders: Reminders::in_memory(reminders::system_clock()),
             attention: Arc::new(RwLock::new(attention::Settings::default())),
+            creator: Arc::new(RwLock::new(crate::creator::Mode::default())),
         };
         let bridge = Bridge::start(policies.clone(), home, move |call| {
             tx.lock().unwrap().send(call).unwrap()
@@ -1272,6 +1285,28 @@ mod tests {
             .as_str()
             .unwrap_or_default();
         assert!(!context.contains("hacker"), "{context}");
+    }
+
+    #[test]
+    fn with_creator_mode_on_a_firstmate_session_learns_once_how_to_brief_a_change_to_the_app() {
+        let (bridge, _, policies) = bridge_on(Settings::default(), Some(Home::new("/home")));
+        *policies.visual.write().unwrap() = visual::Mode::Off;
+        let auth = bearer(&bridge);
+        let context = || {
+            let prompt = json!({"hook_event_name": "UserPromptSubmit", "prompt": "status?"});
+            let out = post(&bridge, "/hooks/user-prompt-submit", Some(&auth), prompt).1;
+            out["hookSpecificOutput"]["additionalContext"]
+                .as_str()
+                .unwrap_or_default()
+                .to_string()
+        };
+        assert!(!context().contains(crate::creator::BRIEF), "off by default");
+        *policies.creator.write().unwrap() = crate::creator::Mode(true);
+        assert!(context().contains(crate::creator::BRIEF));
+        assert!(
+            !context().contains(crate::creator::BRIEF),
+            "said once a session"
+        );
     }
 
     #[test]
