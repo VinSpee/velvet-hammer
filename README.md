@@ -127,6 +127,12 @@ The window has three columns, and every setting is in **Settings** (see
   it" sends that preset, and each worker under Underway shows what it runs on. See
   [Workers on other providers](docs/worker-providers.md).
 
+- **Creator mode** (macOS, off by default): ask your chief of staff for a change to the app's
+  views, and a card for it appears in Waiting on you once a worker has it ready. **Try it**
+  builds it from source and swaps the app in seconds, keeping the conversation and your place;
+  **Keep** delivers it as a pull request, and **Undo** brings the last kept build back. See
+  [Creator mode](docs/creator-mode.md).
+
 ## Settings and menus
 
 Configuration is out of the main window, behind the platform's Settings menu item:
@@ -152,7 +158,8 @@ works as before and has **All settings** to come back. **Conversation history** 
 Settings page itself: **Keep the conversation** (recommended, the default) or **Do not keep the
 conversation**, and **Clear history**, which asks before it deletes anything (see
 [The conversation: find and history](docs/conversation.md#history)). The settings are kept in
-`history.json` beside the other settings files.
+`history.json` beside the other settings files. **Creator mode** is set there too, off by
+default, and kept in `creator.json` (see [Creator mode](docs/creator-mode.md)).
 
 **Creator mode** (a Settings section, off by default, and only useful when the app is built from
 source) lets you change the app from inside it. Ask the chief of staff for a change to the app's

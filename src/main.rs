@@ -1531,6 +1531,7 @@ impl App {
             models: self.runtime.models(),
             reminders: self.reminders.clone(),
             attention: self.attention_settings.shared(),
+            creator: self.creator.mode.shared(),
         });
     }
 
