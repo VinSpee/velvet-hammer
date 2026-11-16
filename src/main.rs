@@ -9,6 +9,7 @@ mod attach;
 mod attention;
 mod bearings;
 mod bridge;
+mod carry;
 mod claude;
 mod crew;
 mod find;
@@ -93,6 +94,8 @@ pub struct App {
     /// Messages waiting until the chief of staff is done, oldest first. Kept in memory only:
     /// quitting the app drops them, and the kept conversation holds only messages that went out.
     pub queue: Vec<Queued>,
+    /// Where the captain's place is kept across a relaunch; none in scenes and tests.
+    pub carry: Option<carry::Carry>,
     /// The queued message being edited, by its place in `queue`, with its field.
     pub editing: Option<(usize, TextEdit)>,
     /// The captain's worker nicknames, in the firstmate home's `config/`.
@@ -360,6 +363,8 @@ impl App {
         runtime.list_models();
         let keeping = store::Store::<history::Keeping>::open(data);
         let mut history = history::History::new(data);
+        // Claude Code keeps the session on disk only while the conversation is kept.
+        chief.keep_sessions(keeping.settings().0.then_some(data));
         let reminder_settings = store::Store::<reminders::Settings>::open(data);
         let reminders = Reminders::open(data, reminder_settings.shared(), clock);
         let attention_settings = store::Store::<attention::Settings>::open(data);
@@ -397,6 +402,7 @@ impl App {
             quit_ask: None,
             working: false,
             queue: Vec::new(),
+            carry: None,
             editing: None,
             nicknames,
             crew_form: crew::Form::default(),
@@ -495,11 +501,28 @@ impl App {
         app
     }
 
+    /// Keeps the conversation or stops keeping it, and with it the chief of staff's session.
+    pub fn set_keeping(&mut self, keeping: history::Keeping) {
+        self.keeping.change(|k| *k = keeping);
+        self.keep_sessions();
+    }
+
+    /// Hands the agent layer where to keep its session, or forgets the kept one when the
+    /// conversation is not kept.
+    fn keep_sessions(&mut self) {
+        let data = self.history.path().parent();
+        self.chief
+            .keep_sessions(data.filter(|_| self.keeping.settings().0));
+    }
+
     /// Deletes the kept conversation and takes the earlier sessions off the chat. This
-    /// session's messages stay until the app quits.
+    /// session's messages stay until the app quits. The chief of staff's kept session is
+    /// forgotten too, so the next launch starts it fresh.
     pub fn clear_history(&mut self) {
         self.confirm_clear = false;
         self.history.clear();
+        self.chief.keep_sessions(None);
+        self.keep_sessions();
         let earlier = std::mem::take(&mut self.ws.earlier);
         // The cleared messages' attachments go with them; this session's stay on their messages.
         for gone in self.ws.chat.drain(..earlier) {
@@ -1632,6 +1655,8 @@ fn init() -> App {
         .env("PATH", path.to_string_lossy())
         .in_firstmate(firstmate.place());
     let mut app = App::new(Box::new(claude), firstmate, &firstmate::data_dir());
+    app.carry = Some(carry::Carry::open(&firstmate::data_dir()));
+    app.restore_place();
     // After the saved home is applied, so a custom home is never installed or updated.
     app.firstmate.start();
     app.daily = Some(fleet::Daily::open(&firstmate::data_dir()));
@@ -1784,6 +1809,7 @@ fn poll(s: &mut App, now: f64, tx: &mut Tx) -> bool {
         s.spotlight = None;
         changed = true;
     }
+    s.carry_place(now, tx);
     // Rune has hooked the system's quit by the first poll, so the question goes in front of it.
     if desktop() {
         lifecycle::install();
@@ -3875,6 +3901,131 @@ mod tests {
         for part in ["state", "data", "config", "projects"] {
             assert!(home.join(part).is_dir(), "{part} is missing from the home");
         }
+    }
+
+    /// An app on the fake `claude` keeping its sessions in `fake`, running as firstmate in `lab`'s
+    /// managed clone, which is installed first when `install` is set. Two in turn on the same
+    /// `lab` and `fake` are a launch and a relaunch.
+    fn kept_on_firstmate(lab: &Lab, fake: &std::path::Path, install: bool) -> App {
+        let mut firstmate = lab.firstmate();
+        let claude = Claude::new(FAKE_CLAUDE)
+            .env("FAKE_CLAUDE_HOME", fake.to_string_lossy())
+            .in_firstmate(firstmate.place());
+        if install {
+            firstmate.install();
+        }
+        let mut app = App::new(Box::new(claude), firstmate, &lab.data);
+        app.settle(|s| settled(s) && idle(s));
+        app
+    }
+
+    /// Each session the fake `claude` started: what it resumed, whether it was kept, and whether
+    /// it had firstmate's session start as a hook.
+    fn sessions(fake: &std::path::Path) -> Vec<String> {
+        let log = std::fs::read_to_string(fake.join("sessions.log")).unwrap_or_default();
+        log.lines().map(str::to_string).collect()
+    }
+
+    fn say_and_wait(rt: &mut Runtime<App>, text: &str) {
+        rt.state.draft.text = text.into();
+        tap(rt, "send");
+        wait(rt, replied);
+    }
+
+    #[test]
+    fn a_relaunch_resumes_the_chief_of_staffs_session_and_takes_firstmates_helm() {
+        let lab = Lab::new();
+        let fake = scratch("signed-in");
+        let mut rt = runtime_with(kept_on_firstmate(&lab, &fake, true));
+        say_and_wait(&mut rt, "the codeword is plum");
+        assert_eq!(sessions(&fake), ["resume= keep=1 helm="]);
+        drop(rt);
+
+        // The relaunch picks the session up before the captain says anything.
+        let mut rt = runtime_with(kept_on_firstmate(&lab, &fake, false));
+        wait(&mut rt, |_| sessions(&fake).len() == 2);
+        let resumed = &sessions(&fake)[1];
+        assert!(
+            resumed.starts_with("resume=fake-") && resumed.ends_with(" keep=1 helm=1"),
+            "{resumed}"
+        );
+        say_and_wait(&mut rt, "recall?");
+        assert_eq!(
+            rt.state.ws.chat.last().unwrap().text,
+            "You said: recall: the codeword is plum"
+        );
+        assert_eq!(
+            sessions(&fake).len(),
+            2,
+            "the resumed session took the message"
+        );
+    }
+
+    #[test]
+    fn a_session_claude_code_cannot_find_is_replaced_and_the_message_still_goes() {
+        let lab = Lab::new();
+        let fake = scratch("signed-in");
+        let code = lab.firstmate().place().code;
+        std::fs::create_dir_all(&lab.data).unwrap();
+        std::fs::write(
+            lab.data.join("session.json"),
+            serde_json::json!({"version": 1, "id": "gone", "dir": code}).to_string(),
+        )
+        .unwrap();
+        let mut rt = runtime_with(kept_on_firstmate(&lab, &fake, true));
+        rt.state.draft.text = "hello".into();
+        tap(&mut rt, "send");
+        wait(&mut rt, |s| {
+            s.ws.chat
+                .last()
+                .is_some_and(|m| m.text == "You said: hello")
+        });
+        let chat: Vec<&str> = rt.state.ws.chat.iter().map(|m| m.text.as_str()).collect();
+        assert!(
+            chat.contains(
+                &"Your chief of staff could not pick up its earlier session (No conversation \
+                  found with session ID: gone), so it starts a new one."
+            ),
+            "{chat:?}"
+        );
+        assert_eq!(chat.last(), Some(&"You said: hello"));
+        assert_eq!(sessions(&fake)[0], "resume=gone keep=1 helm=1");
+        assert!(sessions(&fake)[1].starts_with("resume= keep=1"));
+    }
+
+    #[test]
+    fn a_conversation_not_kept_keeps_no_session_either() {
+        let lab = Lab::new();
+        let fake = scratch("signed-in");
+        let mut rt = runtime_with(kept_on_firstmate(&lab, &fake, true));
+        say_and_wait(&mut rt, "first");
+        rt.state.set_keeping(history::Keeping(false));
+        let kept = std::fs::read_to_string(lab.data.join("session.json")).unwrap();
+        assert!(kept.contains("\"id\": null"), "{kept}");
+        drop(rt);
+        let mut rt = runtime_with(kept_on_firstmate(&lab, &fake, false));
+        say_and_wait(&mut rt, "second");
+        assert_eq!(sessions(&fake)[1], "resume= keep= helm=");
+    }
+
+    #[test]
+    fn the_captains_place_comes_back_after_a_relaunch() {
+        let dir = scratch("place");
+        let with_carry = || {
+            let mut app = stub();
+            app.carry = Some(carry::Carry::open(&dir));
+            app.restore_place();
+            app
+        };
+        let mut rt = runtime_with(with_carry());
+        rt.state.showing = Showing::Rules;
+        rt.state.draft.text = "half a thought".into();
+        rt.frame(0.1);
+        rt.frame(carry::SETTLE);
+        drop(rt);
+        let back = with_carry();
+        assert_eq!(back.showing, Showing::Rules);
+        assert_eq!(back.draft.text, "half a thought");
     }
 
     #[test]

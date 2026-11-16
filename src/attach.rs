@@ -11,6 +11,8 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use serde_json::{Value, json};
+
 use crate::store::create_private_dir;
 use crate::tools;
 
@@ -66,6 +68,26 @@ pub struct Attachment {
 }
 
 impl Attachment {
+    /// The attachment as kept in the app's files: where its copy is, its name, size and kind.
+    pub fn to_json(&self) -> Value {
+        json!({
+            "path": self.path.to_string_lossy(),
+            "name": self.name,
+            "bytes": self.bytes,
+            "kind": self.kind.key(),
+        })
+    }
+
+    /// An attachment as kept; `None` for one this version cannot read.
+    pub fn from_json(value: &Value) -> Option<Attachment> {
+        Some(Attachment {
+            path: PathBuf::from(value["path"].as_str()?),
+            name: value["name"].as_str()?.to_string(),
+            bytes: value["bytes"].as_u64()?,
+            kind: Kind::from_key(value["kind"].as_str()?)?,
+        })
+    }
+
     /// The media type of an image or video, by its extension.
     pub fn media_type(&self) -> Option<&'static str> {
         tools::extension_type(&self.path)

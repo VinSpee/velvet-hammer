@@ -1735,8 +1735,8 @@ fn earlier_divider(t: Theme) -> El {
         .child(el().h(1.0).grow(1.0).fill(t.card_border))
         .child(
             text(
-                "Earlier sessions above. Your chief of staff does not remember them unless you \
-                 link to one.",
+                "Earlier sessions above. Your chief of staff remembers the last one; link to \
+                 older ones.",
             )
             .font(type_::LABEL)
             .color(t.text_secondary),

@@ -48,8 +48,31 @@ it, a reply when it ends, a tool use when its result arrives.
   choice is kept in `history.json`; if that file cannot be read, nothing is kept until you
   choose again.
 - **After a restart.** The kept messages show above a divider: "Earlier sessions above. Your
-  chief of staff does not remember them unless you link to one." The chief of staff starts each
-  session fresh (`--no-session-persistence`), and nothing kept is sent to it on its own.
+  chief of staff remembers the last one; link to older ones."
+  Nothing kept in `history.jsonl` is sent to the chief of staff on its own.
+
+## The chief of staff's session
+
+While the conversation is kept, Claude Code keeps the chief of staff's session on disk too (under
+`~/.claude/projects`, as Claude Code keeps any session), and the app keeps the session's id in
+`session.json` in its data directory. The next launch resumes that session as soon as Claude Code
+is signed in, so the chief of staff remembers the conversation after a restart or after a new
+build replaced the old one (see [Install the app](../README.md#install-the-app)).
+
+- **Firstmate's lock.** Run as firstmate, a resumed session runs firstmate's own session start
+  (`bin/fm-sessionstart-run.sh`) as a hook, as a new session does, so it takes the home's lock
+  and starts the watcher at once. Firstmate alone only asks the model to do that on a resume.
+- **A session Claude Code cannot find.** The chat says the chief of staff could not pick up its
+  earlier session, the app forgets it, and a new session takes the message that was sent.
+- **Turning it off.** **Do not keep the conversation** also stops this: the app forgets the
+  kept session, and every session runs with `--no-session-persistence`, so the chief of staff
+  starts each one fresh. **Clear history** forgets the kept session as well; the session that is
+  running carries on until the app quits.
+- **Your place.** The page showing (the chat or a settings page), the draft and the files
+  attached to it, and the messages queued for the chief of staff are kept in `place.json` a
+  second after they change, and come back when the app opens. Queued messages then go out as
+  usual. Pages about something that may be gone by then, such as a worker's terminal or a
+  picture, open as the chat, and the chat opens at its newest message.
 
 ## Screenshots
 

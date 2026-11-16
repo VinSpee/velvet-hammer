@@ -7,6 +7,11 @@
 //! and hooks, passed as flags to that session only. The hooks apply firstmate's rules
 //! ([`crate::guard`]), the captain's tool-approval settings ([`crate::approval`]) and the
 //! visual-replies mode ([`crate::visual`]).
+//!
+//! While the captain keeps the conversation, Claude Code keeps the session on disk too, and the
+//! app keeps its id in `session.json`, so the next launch resumes it: the chief of staff
+//! remembers the conversation across a relaunch. Resumed in a firstmate home, the session takes
+//! the home's lock at once with firstmate's own session start, as a new one does.
 
 use std::collections::HashMap;
 use std::io::{self, BufRead, BufReader, Read, Write};
@@ -29,6 +34,7 @@ use crate::bridge::{Bridge, Call, Expiry, Policies};
 use crate::firstmate::Place;
 use crate::guard::Home;
 use crate::model::{Action, Id, Item, ItemKind, Plan, Status, Workspace};
+use crate::store::{self, Saved, Store};
 use crate::tools::{self, ToolUse};
 use crate::ui;
 
@@ -79,6 +85,41 @@ pub struct Claude {
     turn: bool,
     /// What [`Event::Working`] last said.
     working: bool,
+    /// Where the session's id is kept for the next launch, while the captain keeps the
+    /// conversation. Without it every session runs with `--no-session-persistence`.
+    kept: Option<Store<Kept>>,
+    /// The session running was resumed, and Claude Code has not yet said it found it: what was
+    /// sent to it meanwhile, to send to a new session if it did not.
+    resuming: Option<Vec<Value>>,
+}
+
+/// The chat session Claude Code keeps on disk: its id and the working directory it ran in, which
+/// a resume needs again.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Kept {
+    pub id: Option<String>,
+    pub dir: Option<PathBuf>,
+}
+
+impl Saved for Kept {
+    const FILE: &'static str = "session.json";
+    const FALLBACK: &'static str = "the chief of staff starts a new session";
+
+    fn fallback() -> Self {
+        Kept::default()
+    }
+
+    fn to_json(&self) -> Value {
+        json!({"version": store::VERSION, "id": self.id, "dir": self.dir})
+    }
+
+    fn from_json(value: &Value) -> Result<Self, String> {
+        store::check_version(value)?;
+        Ok(Kept {
+            id: value["id"].as_str().map(str::to_string),
+            dir: value["dir"].as_str().map(PathBuf::from),
+        })
+    }
 }
 
 /// A tool use waiting on the captain.
@@ -119,6 +160,8 @@ impl Claude {
             unread: 0,
             turn: false,
             working: false,
+            kept: None,
+            resuming: None,
         }
     }
 
@@ -150,6 +193,7 @@ impl Claude {
     /// so.
     fn end_session(&mut self) {
         self.session = None;
+        self.resuming = None;
         for (item, _) in self.approvals.drain() {
             self.out.push(Event::Expired {
                 item,
@@ -184,8 +228,87 @@ impl Claude {
             if !matches!(status, Status::Ready(_)) {
                 self.end_session();
             }
+            let ready = matches!(status, Status::Ready(_));
             self.status = status.clone();
             self.out.push(Event::Status(status));
+            if ready && self.session.is_none() && self.kept_session().is_some() {
+                // A relaunch picks the kept session up at once, so firstmate's lock and watcher
+                // carry on before the captain says anything.
+                if let Err(problem) = self.start_session() {
+                    self.out.push(Event::Problem(problem));
+                }
+            }
+        }
+    }
+
+    /// The kept session's id, when it ran in the working directory sessions run in now.
+    fn kept_session(&self) -> Option<String> {
+        let kept = self.kept.as_ref()?.settings();
+        let dir = self.workplace.as_ref().map(|w| w.code.clone());
+        kept.id.clone().filter(|_| kept.dir == dir)
+    }
+
+    /// Starts the chat session, resuming the kept one when there is one.
+    fn start_session(&mut self) -> Result<(), String> {
+        let id = self.id();
+        let resume = self.kept_session();
+        let disk = match (&self.kept, &resume) {
+            (None, _) => OnDisk::Nothing,
+            (Some(_), None) => OnDisk::New,
+            (Some(_), Some(id)) => OnDisk::Resume(id),
+        };
+        let session = Session::start(
+            id,
+            &self.program,
+            &self.env,
+            self.workplace.as_ref(),
+            &self.policies,
+            &self.outbox,
+            disk,
+        )
+        .map_err(|e| format!("Could not start Claude Code: {e}"))?;
+        self.session = Some(session);
+        self.resuming = resume.map(|_| Vec::new());
+        Ok(())
+    }
+
+    /// Claude Code started or resumed the session `id`: it is kept for the next launch.
+    fn found_session(&mut self, id: Option<&str>) {
+        self.resuming = None;
+        let dir = self.workplace.as_ref().map(|w| w.code.clone());
+        if let (Some(kept), Some(id)) = (self.kept.as_mut(), id) {
+            let now = Kept {
+                id: Some(id.to_string()),
+                dir,
+            };
+            if *kept.settings() != now {
+                kept.change(|k| *k = now);
+            }
+        }
+    }
+
+    /// Claude Code could not resume the kept session: it is forgotten, the chat says so, and a
+    /// new session gets what was sent to the old one.
+    fn lost_session(&mut self, record: &Value) {
+        let sent = self.resuming.take().unwrap_or_default();
+        let why = record["errors"][0]
+            .as_str()
+            .or(record["result"].as_str())
+            .unwrap_or("Claude Code gave no reason");
+        if let Some(kept) = self.kept.as_mut() {
+            kept.change(|k| *k = Kept::default());
+        }
+        self.end_session();
+        self.out.push(Event::Notice(format!(
+            "Your chief of staff could not pick up its earlier session ({why}), so it starts a \
+             new one."
+        )));
+        for content in sent {
+            if let Err(problem) = self.say(content) {
+                self.end_session();
+                self.out.push(Event::Problem(problem));
+                return;
+            }
         }
     }
 
@@ -324,6 +447,11 @@ impl Claude {
     /// One stream-json record from the chat session. A subagent's own records (those with a
     /// `parent_tool_use_id`) are its work, not the chief of staff's tool uses, and are left out.
     fn record(&mut self, record: &Value) {
+        if record["type"] == "system" && record["subtype"] == "init" {
+            self.found_session(record["session_id"].as_str());
+        } else if record["type"] == "result" && self.resuming.is_some() {
+            return self.lost_session(record);
+        }
         let subagent = !record["parent_tool_use_id"].is_null();
         match record["type"].as_str() {
             // One of the captain's messages, echoed as Claude Code takes it in.
@@ -446,18 +574,10 @@ impl Claude {
 
     fn say(&mut self, content: Value) -> Result<(), String> {
         if self.session.is_none() {
-            let id = self.id();
-            self.session = Some(
-                Session::start(
-                    id,
-                    &self.program,
-                    &self.env,
-                    self.workplace.as_ref(),
-                    &self.policies,
-                    &self.outbox,
-                )
-                .map_err(|e| format!("Could not start Claude Code: {e}"))?,
-            );
+            self.start_session()?;
+        }
+        if let Some(sent) = self.resuming.as_mut() {
+            sent.push(content.clone());
         }
         let stdin = &mut self.session.as_mut().expect("started above").stdin;
         let stdin = stdin.as_mut().expect("open until the session is dropped");
@@ -532,6 +652,17 @@ impl ChiefOfStaff for Claude {
 
     fn approve_with(&mut self, policies: Policies) {
         self.policies = policies;
+    }
+
+    fn keep_sessions(&mut self, data: Option<&Path>) {
+        match data {
+            Some(dir) => self.kept = Some(Store::open(dir)),
+            None => {
+                if let Some(mut kept) = self.kept.take() {
+                    kept.change(|k| *k = Kept::default());
+                }
+            }
+        }
     }
 
     fn act(&mut self, ws: &Workspace, action: &Action) {
@@ -882,6 +1013,7 @@ impl Session {
         workplace: Option<&Place>,
         policies: &Policies,
         outbox: &Outbox,
+        disk: OnDisk,
     ) -> io::Result<Session> {
         let calls = outbox.clone();
         let home = workplace.map(|w| Home::new(&w.home));
@@ -893,22 +1025,36 @@ impl Session {
             place.prepare()?;
             command.current_dir(&place.code).env("FM_HOME", &place.home);
         }
+        command.args([
+            "-p",
+            "--input-format",
+            "stream-json",
+            "--output-format",
+            "stream-json",
+            "--verbose",
+            "--include-partial-messages",
+            "--replay-user-messages",
+        ]);
+        let mut settings = bridge.settings();
+        match disk {
+            OnDisk::Nothing => {
+                command.arg("--no-session-persistence");
+            }
+            OnDisk::New => {}
+            OnDisk::Resume(id) => {
+                command.args(["--resume", id]);
+                if workplace.is_some() {
+                    settings = take_helm_on_resume(&settings);
+                }
+            }
+        }
         let mut child = subscription_only(
             command
                 .args([
-                    "-p",
-                    "--input-format",
-                    "stream-json",
-                    "--output-format",
-                    "stream-json",
-                    "--verbose",
-                    "--include-partial-messages",
-                    "--replay-user-messages",
-                    "--no-session-persistence",
                     "--mcp-config",
                     &bridge.mcp_config(),
                     "--settings",
-                    &bridge.settings(),
+                    &settings,
                 ])
                 .envs(env.iter().map(|(k, v)| (k, v))),
         )
@@ -943,6 +1089,30 @@ impl Session {
             _bridge: bridge,
         })
     }
+}
+
+/// What Claude Code keeps of a session on disk.
+#[derive(Clone, Copy)]
+enum OnDisk<'a> {
+    /// Nothing (`--no-session-persistence`).
+    Nothing,
+    /// The session, started new.
+    New,
+    /// The session, resuming the one with this id.
+    Resume(&'a str),
+}
+
+/// Adds a SessionStart hook for a resumed session to `settings`: firstmate's own session start,
+/// as for a new session. Firstmate on its own only asks the model to run it on a resume, so the
+/// home's lock would wait for the model's first turn, and the model does not always take it.
+fn take_helm_on_resume(settings: &str) -> String {
+    let mut settings: Value = serde_json::from_str(settings).expect("the bridge writes JSON");
+    settings["hooks"]["SessionStart"] = json!([{"matcher": "resume", "hooks": [{
+        "type": "command",
+        "command": "\"$CLAUDE_PROJECT_DIR\"/bin/fm-sessionstart-run.sh --source startup",
+        "timeout": 180,
+    }]}]);
+    settings.to_string()
 }
 
 /// How long a session may take to exit after its input closes before the app kills it.
