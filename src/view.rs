@@ -16,8 +16,8 @@ use crate::model::{Action, Agent, Author, Item, ItemKind, Message, Plan, Status}
 use crate::projects::Project;
 
 mod attach;
-mod home;
 mod attention;
+mod home;
 mod mates;
 mod messages;
 mod policy;
