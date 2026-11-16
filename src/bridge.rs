@@ -3,13 +3,13 @@
 //! as command-line flags so the captain's own Claude settings are never written:
 //!
 //! - an MCP server (`--mcp-config`) with five tools: `app_note`, which puts a note in the
-//!   captain's For you to do panel, `app_ui`, which shows a json-render view in the chat
+//!   captain's Waiting on you list, `app_ui`, which shows a json-render view in the chat
 //!   (see [`crate::ui`]), `app_secondmate`, which opens the guided flow for adding a second
 //!   mate (see [`crate::secondmates`]), and `app_remind` and `app_reminders`, which set and list
 //!   the captain's reminders (see [`crate::reminders`]);
 //! - a PreToolUse hook (`--settings`), which applies firstmate's rules (see [`crate::guard`])
 //!   and the captain's tool-approval settings (see [`crate::approval`]) to each tool use: it
-//!   allows it, denies it, or asks the captain to allow or deny it in the Needs your input panel.
+//!   allows it, denies it, or asks the captain to allow or deny it in Waiting on you.
 //!   Every decision is reported for the activity log;
 //! - a UserPromptSubmit hook and a Stop hook (also `--settings`), which steer the chief of staff
 //!   towards views for the replies that read better as one (see [`crate::visual`]).
@@ -328,7 +328,7 @@ fn mcp(request: &Value, serving: &Serving, on_call: &dyn Fn(Call)) -> Option<Val
         "ping" => Ok(json!({})),
         "tools/list" => Ok(json!({"tools": [{
             "name": NOTE_TOOL,
-            "description": "Add a note to the captain's \"For you to do\" panel in Velvet Hammer. \
+            "description": "Add a note to the captain's \"Waiting on you\" list in Velvet Hammer. \
                             Use it for a step only the captain can take.",
             "inputSchema": {
                 "type": "object",
@@ -372,7 +372,7 @@ fn mcp(request: &Value, serving: &Serving, on_call: &dyn Fn(Call)) -> Option<Val
                 json!({"isError": true, "content": [{"type": "text", "text": "The note is empty."}]})
             } else {
                 on_call(Call::Note(text.to_string()));
-                json!({"content": [{"type": "text", "text": "Added to the captain's For you to do panel."}]})
+                json!({"content": [{"type": "text", "text": "Added to the captain's Waiting on you list."}]})
             })
         }
         "tools/call" if params["name"] == SECONDMATE_TOOL => {
@@ -507,7 +507,7 @@ fn stop(input: &Value, serving: &Serving, on_call: &dyn Fn(Call)) -> Value {
 
 /// Decides one PreToolUse hook. A firstmate rule decides first, when the chief of staff runs as
 /// firstmate, and the captain's tool-approval settings decide the rest; they can still deny what
-/// a rule would ask about. A tool use left to the captain waits in Needs your input with all of
+/// a rule would ask about. A tool use left to the captain waits in Waiting on you with all of
 /// its input shown or, when it is too large to show, is denied rather than approved from a
 /// partial view.
 fn pre_tool_use(

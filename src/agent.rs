@@ -259,7 +259,7 @@ fn seed_agents() -> Vec<Agent> {
             transcript: vec![
                 Message::new(
                     Author::ChiefOfStaff,
-                    "Lay out the chat, the agents list and both panels.",
+                    "Lay out the chat, the agents list and the fleet panel.",
                 ),
                 Message::new(
                     Author::Subagent,

@@ -29,6 +29,7 @@ for scene in chat replied empty peek signed-out signing-in signed-in expired cli
   approval-settings approval-by-rule approval-activity approval-corrupt \
   firstmate-missing firstmate-installing firstmate-up-to-date firstmate-update-available \
   firstmate-modified firstmate-blocked firstmate-session firstmate-panels firstmate-answering firstmate-crew \
+  fleet fleet-charted fleet-empty fleet-failed \
   projects-fresh projects-empty projects-adding projects-listed \
   projects-repos projects-repos-filtered projects-repos-chosen projects-repos-missing projects-repos-signed-out \
   formatted formatted-all formatted-streaming tool-image tool-image-broken tool-video tool-generic tool-picture \
@@ -89,13 +90,16 @@ check() { # check FILE yes|no PATTERN
   fi
 }
 
-# Chat with both panels populated.
-check chat.json yes '"key": "needs-input"'
+# Chat with Waiting on you populated. The stub is not firstmate, so the panel has no fleet.
+check chat.json yes '"key": "fleet"'
+check chat.json yes '"key": "waiting"'
+check chat.json yes '"text": "Waiting on you (3)"'
 check chat.json yes '"key": "input-1"'
 check chat.json yes '"key": "answer-1-0"'
 check chat.json yes '"key": "input-2"'
-check chat.json yes '"key": "for-you"'
 check chat.json yes '"key": "task-3"'
+check chat.json no  '"key": "fleet-sections"'
+check chat.json no  '"key": "fleet-refresh"'
 check chat.json yes '"key": "done-3"'
 check chat.json yes '"key": "agent-1"'
 check chat.json yes '"key": "chat-input"'
@@ -103,9 +107,9 @@ check chat.json no  '"key": "peek"'
 # A sent message and the stub's reply.
 check replied.json yes '"text": "Ship it when CI is green."'
 check replied.json yes 'Got it:'
-# Both panels empty.
-check empty.json yes '"key": "needs-input-empty"'
-check empty.json yes '"key": "for-you-empty"'
+# Nothing waiting.
+check empty.json yes '"key": "waiting-empty"'
+check empty.json yes '"text": "Waiting on you (0)"'
 check empty.json no  '"key": "input-1"'
 check empty.json no  '"key": "task-3"'
 # Peek replaces the chat with the subagent's transcript.
@@ -153,12 +157,12 @@ check approval.json yes '"text": "Allow Bash?"'
 check approval.json yes '"text": "command: git push"'
 check approval.json yes '"key": "answer-1-0"'
 check approval.json yes '"key": "answer-1-1"'
-check approval.json no  '"key": "needs-input-empty"'
+check approval.json no  '"key": "waiting-empty"'
 check approval-long.json yes '"key": "input-1-detail"'
 check approval-long.json yes '; rm -rf ~'
 check approval-long.json yes '"key": "answer-1-0"'
 check approved.json yes 'Bash was allowed to run git push'
-check approved.json yes '"key": "needs-input-empty"'
+check approved.json yes '"key": "waiting-empty"'
 # Tool approval: the settings page with the recommended mode, three rules and an example; an ask
 # rule bringing up the full-input question while running without asking; the activity log of
 # the fake's real tool uses; and a settings file the app could not read.
@@ -174,7 +178,7 @@ check approval-settings.json yes '"key": "rule-2-up"'
 check approval-settings.json no  '"key": "rule-0-up"'
 check approval-settings.json yes '"key": "rule-save"'
 check approval-settings.json yes '"key": "approvals-reset"'
-check approval-settings.json yes '"text": "Waits for you in Needs your input, by rule 1 (Ask Bash matching git push)."'
+check approval-settings.json yes '"text": "Asks you in Waiting on you, by rule 1 (Ask Bash matching git push)."'
 check approval-settings.json yes 'never pushes, publishes or merges anything itself'
 check approval-settings.json no  '"key": "approvals-problem"'
 check approval-by-rule.json yes '"text": "Allow Bash?"'
@@ -222,7 +226,7 @@ check firstmate-session.json yes '/data/firstmate'
 check firstmate-session.json yes 'FM_HOME='
 check firstmate-session.json yes '/data/home'
 check firstmate-session.json no  '"key": "firstmate-page"'
-# The panel fed from firstmate's records: two captain holds and a merge approval.
+# Waiting on you, fed from firstmate's records: two captain holds and a merge approval.
 check firstmate-panels.json yes '"key": "hold-lab-window-size"'
 check firstmate-panels.json yes '1280x800 (shows more chat).'
 check firstmate-panels.json yes '"key": "answer-lab-window-size"'
@@ -230,12 +234,14 @@ check firstmate-panels.json yes '"key": "hold-lab-gh-login"'
 check firstmate-panels.json yes '"key": "merge-lab-panels"'
 check firstmate-panels.json yes '"key": "approve-lab-panels"'
 check firstmate-panels.json no  '"key": "merge-lab-window-size"'
-check firstmate-panels.json no  '"key": "needs-input-empty"'
+check firstmate-panels.json no  '"key": "waiting-empty"'
+check firstmate-panels.json yes '"key": "open-merge-lab-panels"'
+check firstmate-panels.json yes '"text": "Waiting on you (3)"'
 check firstmate-panels.json no  '"key": "answering"'
 check firstmate-answering.json yes '"key": "answering"'
 check firstmate-answering.json yes '"key": "answer-cancel"'
 check firstmate-answering.json yes '"text": "Answering below"'
-# The agents list from firstmate's tasks in flight, and a peek at one crewmate's terminal.
+# Underway from firstmate's tasks in flight, and a peek at one crewmate's terminal.
 check firstmate-panels.json yes '"key": "crew-lab-verify"'
 check firstmate-panels.json yes '"text": "working · rendering chat, empty and peek scenes"'
 check firstmate-panels.json yes '"key": "crew-lab-layout"'
@@ -246,6 +252,35 @@ check firstmate-crew.json yes '"key": "crew-pane"'
 check firstmate-crew.json yes 'rendering peek.png'
 check firstmate-crew.json yes '"key": "peek-close"'
 check firstmate-crew.json no  '"key": "chat-input"'
+# The fleet panel: every section of a snapshot, Charted next opened, an empty fleet, and a
+# snapshot kept from an earlier launch while this launch's run fails.
+check fleet.json yes '"key": "fleet-refresh"'
+check fleet.json yes '"key": "fleet-ahoy"'
+check fleet.json yes '"key": "fleet-bearings"'
+check fleet.json yes 'Updated Today'
+check fleet.json yes '"text": "Waiting on you (2)"'
+check fleet.json yes '"key": "hold-lab-app-bundle"'
+check fleet.json yes '"key": "approve-lab-stop-button-docs"'
+check fleet.json yes '"text": "Underway (2)"'
+check fleet.json yes '"key": "crew-lab-notify"'
+check fleet.json yes '"text": "blocked · macOS will not post notifications from cargo run; needs an app bundle"'
+check fleet.json yes '"text": "Recently landed (2)"'
+check fleet.json yes '"key": "landed-lab-stop-button-open"'
+check fleet.json yes '"text": "data/lab-daily-review/report.md"'
+check fleet.json yes '"text": "Charted next (2)"'
+check fleet.json yes '"expanded": false'
+check fleet.json no  '"key": "gate-lab-multiline"'
+check fleet-charted.json yes '"key": "gate-lab-multiline"'
+check fleet-charted.json yes 'lab-multiline · waits for lab-fleet-panel'
+check fleet-empty.json yes '"key": "waiting-empty"'
+check fleet-empty.json yes '"key": "fleet-underway-empty"'
+check fleet-empty.json yes '"key": "fleet-landed-empty"'
+check fleet-empty.json yes '"text": "Underway (0)"'
+check fleet-failed.json yes '"key": "captain-problem"'
+check fleet-failed.json yes 'fm-bearings.v9'
+check fleet-failed.json yes 'before this launch'
+check fleet-failed.json yes '"key": "hold-lab-app-bundle"'
+check fleet-failed.json yes '"key": "crew-lab-notify"'
 # Projects from firstmate's records: a fresh install with no home, an installed home with none,
 # adding the first one with the chief of staff, and a registry of three.
 check projects-fresh.json yes '"key": "projects-none"'
@@ -550,7 +585,7 @@ check link-missing.json yes ': message not found. No message in this chat has th
 check open-link-opened.json yes '"text": "Reply 5: nothing new."'
 check open-link-faded.json yes '"text": "Reply 5: nothing new."'
 # Reminders on a fixed clock: the page with each form set, two come due (one overdue) in the
-# banner and For you to do, the snooze menu, and the settings with what each keyword means now.
+# banner and Waiting on you, the snooze menu, and the settings with what each keyword means now.
 check chat.json yes '"key": "reminders"'
 check chat.json yes '"text": "none set"'
 check chat.json no  '"key": "reminder-banner"'
@@ -668,7 +703,8 @@ check walk-sent.json yes '"text": "Ship it when CI is green."'
 check walk-sent.json yes 'Got it:'
 check walk-end.json no  '"key": "input-1"'
 check walk-end.json yes '"key": "input-2"'
-check walk-end.json yes '"key": "for-you-empty"'
+check walk-end.json no  '"key": "task-3"'
+check walk-end.json yes '"text": "Waiting on you (1)"'
 check walk-end.json yes '"text": "Peeking at verify"'
 
 if (( failures > 0 )); then
