@@ -2617,6 +2617,10 @@ fn main() {
                     ),
                 )))
             }),
+            ("creator-busy", |s| {
+                *s = creator_scene(Some((creator::build::State::Trying, None)));
+                s.working = true;
+            }),
             ("creator-setting", |s| {
                 *s = stub();
                 s.creator.mode.change(|m| *m = creator::Mode(true));
@@ -4099,6 +4103,32 @@ mod tests {
         assert!(rt.state.ws.chat.iter().any(|m| m.text
             == "Discard the Velvet Hammer change 8f3c2a1 from task vh-cards: drop its branch; \
                 nothing of it is kept."));
+    }
+
+    #[test]
+    fn try_it_and_undo_start_nothing_while_the_chief_of_staff_is_working() {
+        let data = scratch("busy-data");
+        let mut app = App::new(Box::new(Stub::default()), installed_firstmate(), &data);
+        let change = creator_scene(None).creator.changes[0].clone();
+        app.working = true;
+        app.try_change(&change);
+        app.undo_change();
+        assert!(app.creator.problem.is_none());
+        assert!(
+            !creator::build::Dir::new(&data).log().exists(),
+            "a job was started"
+        );
+
+        let mut trying = creator_scene(Some((creator::build::State::Trying, None)));
+        trying.working = true;
+        let rt = runtime_with(trying);
+        assert!(rt.find("change-vh-cards-undo").is_none());
+        assert!(rt.find("trial-undo").is_none());
+        assert!(rt.find("trial-keep").is_some());
+        let mut ready = creator_scene(None);
+        ready.working = true;
+        let rt = runtime_with(ready);
+        assert!(rt.find("change-vh-cards-try").is_none());
     }
 
     #[test]
