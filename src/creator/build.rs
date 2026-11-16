@@ -307,17 +307,22 @@ pub fn run(data: &Path, job: Job) {
 /// before: the old one stopped then. Starts one, unless the trial's job still runs.
 pub fn resume_watch(data: &Path) {
     let dir = Dir::new(data);
-    let watching = Command::new("pgrep")
+    if let Some(commit) = rewatch(&dir, job_running(data)) {
+        let _ = start(data, &Job::Watch { commit });
+    }
+}
+
+/// Whether a try or watch job for `data` runs, other than this process.
+fn job_running(data: &Path) -> bool {
+    Command::new("pgrep")
         .arg("-f")
+        .arg("--")
         .arg(format!(
             "--creator (try|watch) {}( |$)",
             escaped(&data.display().to_string())
         ))
         .output()
-        .is_ok_and(|o| others(&String::from_utf8_lossy(&o.stdout), std::process::id()));
-    if let Some(commit) = rewatch(&dir, watching) {
-        let _ = start(data, &Job::Watch { commit });
-    }
+        .is_ok_and(|o| others(&String::from_utf8_lossy(&o.stdout), std::process::id()))
 }
 
 /// The commit whose trial needs a new watchdog. The clean quit that ended the last one is over.
@@ -879,6 +884,25 @@ mod tests {
         quit_cleanly(&data);
         assert_eq!(rewatch(&dir, true), None);
         assert!(!dir.0.join("quit").exists());
+    }
+
+    #[test]
+    fn a_running_watch_job_is_found_and_a_missing_one_is_not() {
+        let data = scratch("job-running");
+        assert!(!job_running(&data));
+        let mut child = Command::new("sh")
+            .args(["-c", "sleep 30; true", "velvet-hammer", "--creator", "watch"])
+            .arg(&data)
+            .arg("abc")
+            .spawn()
+            .unwrap();
+        let found = (0..50).any(|_| {
+            std::thread::sleep(Duration::from_millis(100));
+            job_running(&data)
+        });
+        child.kill().unwrap();
+        child.wait().unwrap();
+        assert!(found);
     }
 
     #[test]
