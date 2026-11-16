@@ -25,7 +25,7 @@ use serde_json::{Value, json};
 
 use crate::agent::{ChiefOfStaff, Event};
 use crate::attach::Attachment;
-use crate::bridge::{Bridge, Call, Policies};
+use crate::bridge::{Bridge, Call, Expiry, Policies};
 use crate::firstmate::Place;
 use crate::guard::Home;
 use crate::model::{Action, Id, Item, ItemKind, Plan, Status, Workspace};
@@ -146,11 +146,15 @@ impl Claude {
         self.next_item
     }
 
-    /// Stops the chat session. Its unanswered tool-use questions leave the panel and are denied.
+    /// Stops the chat session. Its unanswered tool-use questions are denied, and their cards say
+    /// so.
     fn end_session(&mut self) {
         self.session = None;
-        for (id, _) in self.approvals.drain() {
-            self.out.push(Event::Withdrawn(id));
+        for (item, _) in self.approvals.drain() {
+            self.out.push(Event::Expired {
+                item,
+                why: Expiry::HungUp.words(),
+            });
         }
         self.unread = 0;
         self.turn = false;
@@ -236,14 +240,17 @@ impl Claude {
 
     /// Something the session asked of the app through the bridge.
     fn call(&mut self, call: Call) {
-        if let Call::Expired(ticket) = call {
-            if let Some(id) = self
+        if let Call::Expired { ticket, why } = call {
+            if let Some(item) = self
                 .approvals
                 .iter()
                 .find_map(|(id, a)| (a.ticket == ticket).then_some(*id))
             {
-                self.approvals.remove(&id);
-                self.out.push(Event::Withdrawn(id));
+                self.approvals.remove(&item);
+                self.out.push(Event::Expired {
+                    item,
+                    why: why.words(),
+                });
             }
             return;
         }
@@ -269,7 +276,7 @@ impl Claude {
         }
         let id = self.item_id();
         let item = match call {
-            Call::Expired(_)
+            Call::Expired { .. }
             | Call::Logged(_)
             | Call::Nudged(_)
             | Call::AddMate(_)

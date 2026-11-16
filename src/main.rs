@@ -6,6 +6,7 @@ mod agent;
 mod ansi;
 mod approval;
 mod attach;
+mod attention;
 mod bearings;
 mod bridge;
 mod claude;
@@ -15,8 +16,10 @@ mod firstmate;
 mod guard;
 mod history;
 mod home;
+mod lifecycle;
 mod links;
 mod markdown;
+mod menubar;
 mod menus;
 mod messages;
 mod model;
@@ -25,6 +28,8 @@ mod projects;
 mod reminders;
 mod repos;
 mod secondmates;
+#[cfg(unix)]
+mod shell_path;
 mod store;
 mod tools;
 mod ui;
@@ -47,7 +52,7 @@ use attach::Attachment;
 use bearings::Bearings;
 use claude::Claude;
 use firstmate::{Checkout, Distro, Firstmate, Work, lab::Lab};
-use model::{Action, Author, Id, Message, Status, Workspace};
+use model::{Action, Author, Id, ItemKind, Message, Status, Workspace};
 use projects::Project;
 use reminders::{Reminder, Reminders, Unit, When};
 use secondmates::Step;
@@ -73,6 +78,14 @@ pub struct App {
     pub rules: store::Store<guard::Settings>,
     /// Whether a message sent while the chief of staff works goes out at once or waits.
     pub delivery: store::Store<messages::Delivery>,
+    /// What gets the captain's attention, and how long a tool-use question waits for them.
+    pub attention_settings: store::Store<attention::Settings>,
+    /// Which waiting things the captain was told about, and the Dock badge.
+    attention: attention::Attention,
+    /// The card a notification click revealed, highlighted until the time given.
+    pub spotlight: Option<(String, f64)>,
+    /// A quit waits for the captain to confirm it, because of what is in flight.
+    pub quit_ask: Option<lifecycle::InFlight>,
     /// The chief of staff is working, as the agent layer last said.
     pub working: bool,
     /// Messages waiting until the chief of staff is done, oldest first. Kept in memory only:
@@ -282,6 +295,8 @@ pub enum Showing {
     Firstmate,
     /// The tool-approval settings.
     Approvals,
+    /// What gets the captain's attention, and how long a question waits.
+    Attention,
     /// The activity log of tool uses.
     Activity,
     /// The visual-replies setting.
@@ -340,6 +355,7 @@ impl App {
         let mut history = history::History::new(data);
         let reminder_settings = store::Store::<reminders::Settings>::open(data);
         let reminders = Reminders::open(data, reminder_settings.shared(), clock);
+        let attention_settings = store::Store::<attention::Settings>::open(data);
         let window_wake: Arc<OnceLock<Waker>> = Arc::new(OnceLock::new());
         let media_wake: Waker = Arc::new({
             let slot = window_wake.clone();
@@ -368,6 +384,10 @@ impl App {
             visual_example: TextEdit::new(visual::EXAMPLE),
             rules,
             delivery: store::Store::open(data),
+            attention_settings,
+            attention: attention::Attention::default(),
+            spotlight: None,
+            quit_ask: None,
             working: false,
             queue: Vec::new(),
             editing: None,
@@ -635,7 +655,11 @@ impl App {
                 self.keep(self.ws.chat.len() - 1);
             }
             Event::Item(item) => self.ws.items.push(item),
-            Event::Withdrawn(id) => self.ws.items.retain(|i| i.id != id),
+            Event::Expired { item, why } => {
+                if let Some(item) = self.ws.items.iter_mut().find(|i| i.id == item) {
+                    item.kind = ItemKind::Expired { why };
+                }
+            }
             Event::Activity(entry) => self.activity.record(entry),
             Event::Notice(text) => {
                 self.ws.chat.push(Message::new(Author::App, text));
@@ -954,7 +978,9 @@ impl App {
     /// Takes in what the agent layer reported, then sends the next queued message if it can go
     /// out; true when anything changed. The window calls this each time it wakes.
     pub fn step(&mut self) -> bool {
-        self.drain() | self.deliver()
+        let changed = self.drain() | self.deliver();
+        self.attend();
+        changed
     }
 
     /// Sends the first queued message once the chief of staff is done and the chat can run; true
@@ -1450,6 +1476,7 @@ impl App {
             nicknames: self.nicknames.shared(),
             models: self.runtime.models(),
             reminders: self.reminders.clone(),
+            attention: self.attention_settings.shared(),
         });
     }
 
@@ -1709,6 +1736,14 @@ fn replied(s: &App) -> bool {
             .is_some_and(|m| m.author != Author::Captain)
 }
 
+/// The app runs in its own window on the desktop, not as a headless scene or a test: only then
+/// does it add its menu-bar item and hold a quit to ask the captain.
+static DESKTOP: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+pub fn desktop() -> bool {
+    DESKTOP.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 /// The longest the app waits before looking at the reminders again: a timer may not count the
 /// time the computer slept.
 const RECHECK: Duration = Duration::from_secs(30);
@@ -1722,6 +1757,14 @@ fn poll(s: &mut App, now: f64, tx: &mut Tx) -> bool {
     if s.flash.as_ref().is_some_and(|(_, until)| *until <= now) {
         s.flash = None;
         changed = true;
+    }
+    if s.spotlight.as_ref().is_some_and(|(_, until)| *until <= now) {
+        s.spotlight = None;
+        changed = true;
+    }
+    // Rune has hooked the system's quit by the first poll, so the question goes in front of it.
+    if desktop() {
+        lifecycle::install();
     }
     let focused = tx.focused().map(str::to_string);
     if focused != s.focused {
@@ -1817,6 +1860,12 @@ fn setup(s: &mut App, wake: Waker) {
 }
 
 fn main() {
+    let headless = rune::is_headless();
+    // Opened from Finder, the app starts without the captain's PATH (see shell_path.rs).
+    #[cfg(unix)]
+    if !headless {
+        shell_path::complete();
+    }
     let mut app = rune::App::new(AppSpec::<App> {
         scenes: &[
             ("chat", |s| *s = stub()),
@@ -1927,6 +1976,38 @@ fn main() {
                 });
                 s.settle(replied);
                 s.showing = Showing::Activity;
+            }),
+            // What gets the captain's attention: its settings, a question nobody answered in
+            // time, the card a notification click reveals, and the question before quitting.
+            ("attention-settings", |s| {
+                *s = stub();
+                s.showing = Showing::Attention;
+            }),
+            ("approval-expired", |s| {
+                *s = fake_in(Mode::Ask);
+                s.attention_settings
+                    .change(|x| x.wait = Duration::from_secs(1));
+                s.draft.text =
+                    "run: bin/fm-pr-merge.sh site-docs https://github.com/captain/site/pull/7"
+                        .into();
+                s.send();
+                s.settle(|s| s.ws.expired().next().is_some() && replied(s));
+            }),
+            ("attention-revealed", |s| {
+                let lab = Lab::at(&Path::new("/tmp/velvet-hammer").join("attention-revealed"));
+                lab.bearings(bearings::SNAPSHOT);
+                *s = fake_in_firstmate(&lab, true);
+                s.settle(|s| !s.captain.is_empty());
+                s.spotlight = Some(("merge-lab-panels".into(), f64::MAX));
+                s.scroll_to = Some("merge-lab-panels".into());
+            }),
+            ("quit-question", |s| {
+                let lab = Lab::at(&Path::new("/tmp/velvet-hammer").join("quit-question"));
+                lab.bearings(bearings::SNAPSHOT);
+                *s = fake_in_firstmate(&lab, true);
+                s.settle(|s| !s.captain.is_empty());
+                s.working = true;
+                s.ask_to_quit();
             }),
             ("approval-corrupt", |s| {
                 let dir = scratch("unused");
@@ -2573,12 +2654,52 @@ fn main() {
     // menu bar elsewhere, where the window draws its own (see menus.rs); headless runs keep the
     // native items so scripts can pick them.
     .standard_menus();
-    if cfg!(target_os = "macos") || rune::is_headless() {
+    if cfg!(target_os = "macos") || headless {
         for item in menus::native() {
             app = app.menu_item(item);
         }
     }
+    if !headless {
+        app = on_desktop(app);
+    }
     app.run();
+}
+
+/// What the app's own window adds: the Dock badge, notification clicks, and on macOS the
+/// menu-bar item that keeps the app running with its window closed, and the question before a
+/// quit that would stop work in flight (see attention.rs, menubar.rs and lifecycle.rs).
+fn on_desktop(app: rune::App<App>) -> rune::App<App> {
+    DESKTOP.store(true, std::sync::atomic::Ordering::Relaxed);
+    let handle = app.handle();
+    // A click on a notification opens the window at the card of what it is about.
+    rune_notify::on_click({
+        let handle = handle.clone();
+        move |click| {
+            handle.open();
+            if let Some(key) = attention::clicked(&click.id) {
+                let key = key.to_string();
+                handle.update(move |s, tx| s.reveal(&key, tx));
+            }
+        }
+    });
+    // Both run on the UI thread, from the menu-bar item's menu and from AppKit's quit request.
+    menubar::on_open({
+        let handle = handle.clone();
+        move || {
+            lifecycle::come_forward();
+            handle.open();
+        }
+    });
+    lifecycle::on_ask(move || {
+        lifecycle::come_forward();
+        handle.open();
+        handle.update(|s, _| s.ask_to_quit());
+    });
+    if cfg!(target_os = "macos") {
+        app.keep_running()
+    } else {
+        app
+    }
 }
 
 /// Friday, 2026-11-13, at `hour:minute` in US Eastern time, for the reminder scenes and tests.
@@ -4654,7 +4775,7 @@ mod tests {
     }
 
     #[test]
-    fn a_question_claude_code_stopped_waiting_on_leaves_the_panel() {
+    fn a_question_claude_code_stopped_waiting_on_stays_marked_expired() {
         let (mut rt, item) = ask_about("abandon: ls");
         assert_eq!(item.title, "Allow Bash?");
         wait(&mut rt, |s| s.ws.needs_input().next().is_none());
@@ -4663,8 +4784,135 @@ mod tests {
             rt.state.ws.chat.last().unwrap().text,
             "You said: the hook did not answer, so Bash was blocked"
         );
-        // Nothing is left to click, and no answer went anywhere.
+        // Nothing is left to answer, and the card says why.
         assert!(rt.find(&format!("answer-{}-0", item.id)).is_none());
+        let expired = rt.state.ws.expired().next().expect("the card stays");
+        assert_eq!(expired.id, item.id);
+        assert!(
+            matches!(&expired.kind, ItemKind::Expired { why } if why.starts_with("Claude Code stopped waiting")),
+            "{expired:?}"
+        );
+        assert!(rt.find(&format!("ask-again-{}", item.id)).is_some());
+    }
+
+    /// The fake asking about `git push`, with questions waiting one second, until it expired.
+    fn expired_question() -> (Runtime<App>, Id) {
+        let mut rt = runtime_with(fake_in(Mode::Ask));
+        wait(&mut rt, settled);
+        rt.state
+            .attention_settings
+            .change(|x| x.wait = Duration::from_secs(1));
+        rt.state.draft.text = "run: git push".into();
+        tap(&mut rt, "send");
+        wait(&mut rt, |s| s.ws.expired().next().is_some());
+        wait(&mut rt, replied);
+        let id = rt.state.ws.expired().next().unwrap().id;
+        (rt, id)
+    }
+
+    #[test]
+    fn a_question_nobody_answers_in_time_is_denied_and_can_be_asked_again() {
+        let (mut rt, id) = expired_question();
+        assert_eq!(
+            rt.state.ws.chat.last().unwrap().text,
+            "You said: Bash was denied: git push"
+        );
+        let Some(ItemKind::Expired { why }) = rt.state.ws.item(id).map(|i| &i.kind) else {
+            panic!("the card stays, expired");
+        };
+        assert_eq!(
+            why,
+            "Nobody answered within 1 second, so the tool use was denied."
+        );
+        tap(&mut rt, &format!("ask-again-{id}"));
+        wait(&mut rt, replied);
+        assert!(rt.state.ws.expired().next().is_none());
+        let asked = rt
+            .state
+            .ws
+            .chat
+            .iter()
+            .rev()
+            .find(|m| m.author == Author::Captain)
+            .unwrap();
+        assert!(
+            asked.text.starts_with(
+                "Your question \u{201c}Allow Bash?\u{201d} expired before I answered it"
+            ),
+            "{}",
+            asked.text
+        );
+        assert!(asked.text.ends_with("command: git push"), "{}", asked.text);
+    }
+
+    #[test]
+    fn dismissing_an_expired_question_sends_nothing() {
+        let (mut rt, id) = expired_question();
+        let said = rt.state.ws.chat.len();
+        tap(&mut rt, &format!("dismiss-{id}"));
+        assert!(rt.state.ws.item(id).is_none());
+        assert_eq!(rt.state.ws.chat.len(), said);
+    }
+
+    #[test]
+    fn the_badge_and_menu_bar_count_what_waits_on_the_captain() {
+        let lab = Lab::new();
+        lab.bearings(bearings::SNAPSHOT);
+        let mut rt = runtime_with(fake_in_firstmate(&lab, true));
+        wait(&mut rt, |s| !s.captain.is_empty());
+        rt.frame(1.0 / 60.0);
+        // Two holds and a merge; the snapshot's workers are working and parked.
+        assert_eq!(rt.state.attention.badge(), 3);
+        assert_eq!(
+            rt.state.menu_state().lines,
+            [
+                "Chief of staff: idle",
+                "3 things wait on you",
+                "2 workers in flight"
+            ]
+        );
+        rt.state
+            .attention_settings
+            .change(|x| x.set(attention::Kind::Decision, false));
+        rt.frame(1.0 / 60.0);
+        assert_eq!(rt.state.attention.badge(), 1);
+    }
+
+    #[test]
+    fn a_notification_click_reveals_its_card_for_a_few_seconds() {
+        let lab = Lab::new();
+        lab.bearings(bearings::SNAPSHOT);
+        let mut rt = runtime_with(fake_in_firstmate(&lab, true));
+        wait(&mut rt, |s| !s.captain.is_empty());
+        rt.update(|s, tx| s.reveal("merge-lab-panels", tx));
+        rt.frame(1.0 / 60.0);
+        assert!(rt.state.spotlit("merge-lab-panels"));
+        assert!(!rt.state.spotlit("hold-lab-window-size"));
+        rt.frame(5.0);
+        assert!(!rt.state.spotlit("merge-lab-panels"));
+        // A click on something already answered shows nothing.
+        rt.update(|s, tx| s.reveal("merge-gone", tx));
+        rt.frame(1.0 / 60.0);
+        assert!(rt.state.spotlight.is_none());
+    }
+
+    #[test]
+    fn quitting_with_work_in_flight_asks_and_says_what_would_stop() {
+        let lab = Lab::new();
+        lab.bearings(bearings::SNAPSHOT);
+        let mut rt = runtime_with(fake_in_firstmate(&lab, true));
+        wait(&mut rt, |s| !s.captain.is_empty());
+        assert_eq!(
+            rt.state.in_flight().workers,
+            ["Render every state headlessly", "lab-layout"]
+        );
+        rt.update(|s, _| s.ask_to_quit());
+        rt.frame(1.0 / 60.0);
+        assert!(rt.find("quit-question").is_some());
+        assert!(rt.find("quit-anyway").is_some());
+        tap(&mut rt, "quit-keep");
+        assert!(rt.state.quit_ask.is_none());
+        assert!(rt.find("quit-question").is_none());
     }
 
     #[test]
@@ -6551,7 +6799,7 @@ mod tests {
             texts_under(&rt, "reminder-settings-summary"),
             ["later today by 6:00 PM \u{b7} mornings 9:00 AM"]
         );
-        tap(&mut rt, "reminder-settings");
+        tap_scrolled(&mut rt, "reminder-settings");
         assert_eq!(rt.state.showing, Showing::ReminderSettings);
         tap(&mut rt, "reminder-setting-morning-up");
         tap(&mut rt, "reminder-settings-all-settings");

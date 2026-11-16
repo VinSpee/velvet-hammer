@@ -35,6 +35,13 @@ pub fn settings_page(s: &App, t: Theme, dark: bool) -> El {
             t,
         ))
         .child(section_card(
+            "attention",
+            "Attention",
+            s.attention_settings.settings().summary(),
+            Showing::Attention,
+            t,
+        ))
+        .child(section_card(
             "visuals",
             "Visual replies",
             s.visuals.settings().label().to_string(),
@@ -77,7 +84,8 @@ pub fn settings_page(s: &App, t: Theme, dark: bool) -> El {
                 .child(note(
                     "settings-help",
                     "When your messages reach your chief of staff while it works, how its tool \
-                     uses are decided, how its replies are shown, \
+                     uses are decided, what gets your attention and how long its questions \
+                     wait, how its replies are shown, \
                      the workers it can send on other providers, the firstmate rules its hook \
                      enforces, the firstmate home it runs on, and the times your reminders' \
                      words stand for. Each opens its page.",

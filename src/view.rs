@@ -16,6 +16,7 @@ use crate::model::{Action, Agent, Author, Item, ItemKind, Message, Plan, Status}
 use crate::projects::Project;
 
 mod attach;
+mod attention;
 mod home;
 mod mates;
 mod messages;
@@ -46,6 +47,7 @@ pub fn view(s: &App, cx: &mut Cx<App>) -> El {
         (Showing::AddMate, ..) => mates::add_page(s, t, cx.system_dark()),
         (Showing::Firstmate, ..) => firstmate_page(s, t, cx.system_dark()),
         (Showing::Approvals, ..) => approvals_page(s, t, cx.system_dark()),
+        (Showing::Attention, ..) => attention::attention_page(s, t, cx.system_dark()),
         (Showing::Activity, ..) => activity_page(s, t, cx.system_dark()),
         (Showing::Visuals, ..) => visuals_page(s, t, cx.system_dark()),
         (Showing::Rules, ..) => rules_page(s, t, cx.system_dark()),
@@ -60,15 +62,27 @@ pub fn view(s: &App, cx: &mut Cx<App>) -> El {
         (_, None, Status::Ready(plan)) => chat(s, plan, t, cx.system_dark()),
         (_, None, status) => sign_in(status, s.queue.len(), t, cx.system_dark()),
     };
-    // A reminder that came due stays over whatever the middle column shows.
-    let main = match remind::banner(s, t, cx.system_dark()) {
-        Some(banner) => col()
+    // A reminder that came due, and the question before quitting, stay over whatever the
+    // middle column shows.
+    let over: Vec<El> = attention::quit_question(s, t, cx.system_dark())
+        .into_iter()
+        .chain(remind::banner(s, t, cx.system_dark()))
+        .collect();
+    let main = if over.is_empty() {
+        main
+    } else {
+        col()
             .grow(1.0)
             .h_full()
             .min_h(0.0)
-            .child(col().px(space::S6).pt(space::S6).child(banner))
-            .child(main),
-        None => main,
+            .child(
+                col()
+                    .px(space::S6)
+                    .pt(space::S6)
+                    .gap(space::S3)
+                    .children(over),
+            )
+            .child(main)
     };
     let window = row()
         .w_full()
@@ -146,8 +160,9 @@ fn agents(s: &App, t: Theme, dark: bool) -> El {
     for crew in &s.captain.crew {
         let id = crew.id.clone();
         let selected = s.showing == Showing::Crew(id.clone());
-        list =
-            list.child(
+        list = list.child(
+            spotlit(
+                s,
                 col()
                     .key(format!("crew-{id}"))
                     .role("button")
@@ -156,24 +171,28 @@ fn agents(s: &App, t: Theme, dark: bool) -> El {
                     .padding(space::S2)
                     .gap(2.0)
                     .radius(radius::SM)
-                    .fill(if selected { t.control_off } else { t.card })
-                    .on_press(move |s: &mut App| s.showing = Showing::Crew(id.clone()))
-                    .child(
-                        text(crew.name.clone())
-                            .font(type_::TITLE)
-                            .color(t.text)
-                            .wrap(),
-                    )
-                    .child(
-                        text(format!("{} \u{b7} {}", crew.state, crew.doing))
-                            .font(type_::LABEL)
-                            .color(t.text_secondary)
-                            .wrap(),
-                    )
-                    .children(crew.runs.as_ref().map(|runs| {
-                        note(&format!("crew-{}-runs", crew.id), runs, t).wrap_anywhere()
-                    })),
-            );
+                    .fill(if selected { t.control_off } else { t.card }),
+                &format!("crew-{id}"),
+            )
+            .on_press(move |s: &mut App| s.showing = Showing::Crew(id.clone()))
+            .child(
+                text(crew.name.clone())
+                    .font(type_::TITLE)
+                    .color(t.text)
+                    .wrap(),
+            )
+            .child(
+                text(format!("{} \u{b7} {}", crew.state, crew.doing))
+                    .font(type_::LABEL)
+                    .color(t.text_secondary)
+                    .wrap(),
+            )
+            .children(
+                crew.runs
+                    .as_ref()
+                    .map(|runs| note(&format!("crew-{}-runs", crew.id), runs, t).wrap_anywhere()),
+            ),
+        );
     }
     if s.mates.records.is_some() {
         list = list.child(mates::mate_list(s, t, dark));
@@ -1822,9 +1841,43 @@ fn needs_input(s: &App, t: Theme, dark: bool) -> El {
                 },
             ));
         }
-        card(&format!("input-{}", item.id), item, t).child(answers)
+        let key = format!("input-{}", item.id);
+        spotlit(s, card(&key, item, t), &key).child(answers)
     });
     let mut rows: Vec<El> = rows.collect();
+    // Questions nobody answered in time stay, so the captain sees what was missed.
+    for item in s.ws.expired() {
+        let ItemKind::Expired { why } = &item.kind else {
+            unreachable!()
+        };
+        let id = item.id;
+        rows.push(
+            words_card(
+                &format!("expired-{id}"),
+                &format!("Expired: {}", item.title),
+                &format!("{why}\n\n{}", item.detail),
+                t,
+            )
+            .border(1.0, tok::accent(3, dark))
+            .child(
+                row()
+                    .gap(space::S2)
+                    .center_y()
+                    .child(button(
+                        &format!("ask-again-{id}"),
+                        "Ask again",
+                        t,
+                        move |s| s.ask_again(id),
+                    ))
+                    .child(small_button(
+                        &format!("dismiss-{id}"),
+                        "Dismiss",
+                        t,
+                        move |s| s.dismiss(id),
+                    )),
+            ),
+        );
+    }
     // From firstmate's records: tasks held for the captain, then merges waiting for approval.
     if let Some(problem) = &s.captain_problem {
         rows.push(warning("captain-problem", problem, dark));
@@ -1834,12 +1887,17 @@ fn needs_input(s: &App, t: Theme, dark: bool) -> El {
         // A second mate's hold is answered to that mate, which owns it.
         if let Some(owner) = hold.owner.clone() {
             let answering = s.mates.answering == Some((owner.clone(), key.clone()));
+            let card = format!("hold-{owner}-{key}");
             rows.push(
-                words_card(
-                    &format!("hold-{owner}-{key}"),
-                    &format!("{key} \u{b7} from second mate {owner}"),
-                    &hold.question,
-                    t,
+                spotlit(
+                    s,
+                    words_card(
+                        &card,
+                        &format!("{key} \u{b7} from second mate {owner}"),
+                        &hold.question,
+                        t,
+                    ),
+                    &card,
                 )
                 .child(row().child(button(
                     &format!("answer-{owner}-{key}"),
@@ -1855,8 +1913,9 @@ fn needs_input(s: &App, t: Theme, dark: bool) -> El {
             continue;
         }
         let answering = s.answering.as_deref() == Some(&hold.key);
+        let card = format!("hold-{key}");
         rows.push(
-            words_card(&format!("hold-{key}"), &hold.key, &hold.question, t).child(row().child(
+            spotlit(s, words_card(&card, &hold.key, &hold.question, t), &card).child(row().child(
                 button(
                     &format!("answer-{key}"),
                     if answering {
@@ -1875,12 +1934,17 @@ fn needs_input(s: &App, t: Theme, dark: bool) -> El {
     }
     for merge in &s.captain.merges {
         let (task, url) = (merge.task.clone(), merge.url.clone());
+        let card = format!("merge-{task}");
         rows.push(
-            words_card(
-                &format!("merge-{task}"),
-                &format!("Approve the merge for {task}?"),
-                &format!("{}\n{}", merge.url, merge.reason),
-                t,
+            spotlit(
+                s,
+                words_card(
+                    &card,
+                    &format!("Approve the merge for {task}?"),
+                    &format!("{}\n{}", merge.url, merge.reason),
+                    t,
+                ),
+                &card,
             )
             .child(row().child(button(
                 &format!("approve-{task}"),
@@ -1970,6 +2034,15 @@ fn panel(key: &str, title: &str, empty: &str, rows: Vec<El>, t: Theme) -> El {
 
 /// The tallest the detail of a card grows before it scrolls.
 const DETAIL_MAX_H: f32 = 240.0;
+
+/// Outlines the card keyed `key` while a notification click has it highlighted.
+fn spotlit(s: &App, card: El, key: &str) -> El {
+    if s.spotlit(key) {
+        card.border(2.0, tok::accent(0, true))
+    } else {
+        card
+    }
+}
 
 fn card(key: &str, item: &Item, t: Theme) -> El {
     words_card(key, &item.title, &item.detail, t)
