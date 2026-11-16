@@ -3,7 +3,8 @@
 [Firstmate](https://github.com/kunchenguid/firstmate) is the set of instructions, skills and
 scripts that the chief of staff runs on. It ships as a git repository, not as a library, so
 Velvet Hammer keeps its own git clone of it. This page explains where the clone lives, how it is
-installed and updated, how to change it, and how to reset it.
+installed and updated, how to change it, how to reset it, and how to run on
+[a firstmate home you already have](#a-custom-firstmate-home) instead.
 
 Velvet Hammer installs and updates the clone, runs the chief of staff inside it, fills the
 fleet panel (see [The fleet panel](fleet.md)), the projects list and the second mates from
@@ -23,8 +24,9 @@ Set `VELVET_HAMMER_DATA` to use a directory other than `~/.velvet-hammer`. The d
 spaces because firstmate's shell scripts run from inside it.
 
 The clone and the home belong to Velvet Hammer. The app does not read or change any other
-firstmate checkout or home on your machine, and it sets `FM_HOME` itself for every session, so a
-`FM_HOME` in your shell is not used.
+firstmate checkout or home on your machine unless you choose one as a
+[custom firstmate home](#a-custom-firstmate-home), and it sets `FM_HOME` itself for every session,
+so a `FM_HOME` in your shell is not used.
 
 ## Install
 
@@ -112,11 +114,12 @@ unfinished.
 ## The chief of staff runs as firstmate
 
 The chat is one long-lived `claude -p` process (see the README). Velvet Hammer starts it with the
-clone as its working directory and `FM_HOME` set to `~/.velvet-hammer/home`, which it creates
+clone as its working directory and `FM_HOME` set to `~/.velvet-hammer/home` (or, with a
+[custom firstmate home](#a-custom-firstmate-home), that checkout and home), which it creates
 with the four directories firstmate expects. Claude Code then loads the clone's `AGENTS.md`,
 skills and `.claude/settings.json` hooks the way it does in a terminal, so firstmate's own
-contract governs the session. The line under the chat heading says "Running firstmate from" and
-the clone's path.
+contract governs the session. The line under the chat heading says "Running firstmate from", the
+clone's path and "the managed home".
 
 The chat needs the clone. Until it is installed, the Firstmate page takes the chat's place.
 
@@ -171,7 +174,7 @@ signal at once, so that Claude Code stops firstmate's watcher instead of leaving
 Firstmate keeps what waits on the captain in its own records and publishes them as one
 structured document, `bin/fm-bearings-snapshot.sh --json` (schema `fm-bearings.v1`). Its own rule
 is that a view renders that document and does not parse the record files. Velvet Hammer follows
-it: `src/bearings.rs` runs the script from the clone with `FM_HOME` set to the app's home and
+it: `src/bearings.rs` runs the script from the checkout in use with `FM_HOME` set to the home in use and
 `FM_CREW_STATE_NO_FORGE=1`, so it makes no network request and writes nothing. It runs once when
 the app opens and again when firstmate's status logs or task records change, a turn finishes,
 you answer a card or you press **Refresh**, at most once every five seconds. If a run fails, for
@@ -338,7 +341,8 @@ charter (a scope in plain words), a project list, its own backlog and its own se
 until the main firstmate routes work to it, and it reports back on its parent channel. Firstmate's
 `secondmate-provisioning` skill and the scripts it names define all of this. Velvet Hammer shows
 exactly what firstmate's records say and changes nothing by hand: every change runs one of
-firstmate's guarded scripts, from the managed clone, with `FM_HOME` set to the app's home.
+firstmate's guarded scripts, from the checkout in use, with `FM_HOME` set to the home in use (the
+managed one, or a [custom home](#a-custom-firstmate-home)).
 
 ![Five second mates in the agents column, one in each state](screens/second-mates/mates-listed.png)
 
@@ -414,7 +418,7 @@ On yes, the app runs:
 
 1. `FM_SECONDMATE_CHARTER=<your words> bin/fm-home-seed.sh <name> ~/.velvet-hammer/secondmates/<name> <projects>`.
    Firstmate scaffolds the charter brief in `data/<name>/brief.md`, makes the home a local git
-   clone of the managed clone, clones each project from the main home into it, initializes
+   clone of the checkout in use, clones each project from the main home into it, initializes
    no-mistakes where the project ships with it, and adds the registry line. Seeding is
    transactional: a refusal undoes everything, and the page shows firstmate's words.
 2. `bin/fm-spawn.sh <name> --secondmate`, with `--harness` when you chose a runtime. If the
@@ -492,6 +496,120 @@ routes the work with `bin/fm-send.sh <name>` or `bin/fm-backlog-handoff.sh <name
 in the chat says **Routed to second mate <name>**, with **Open** for the mate's page, where the
 request appears in the conversation and its tasks under **Working on now**.
 
+## A custom firstmate home
+
+The managed home starts empty: it shows none of the fleet, backlog, projects or second mates of a
+firstmate you already run, such as `~/firstmate` in a terminal. To see and steer that fleet in
+the app, choose it as a custom firstmate home. The managed home stays the default, and you can go
+back to it at any time.
+
+### One folder, not two
+
+Firstmate's scripts find their code root from their own path under `bin/`, and their home from
+`FM_HOME`; with `FM_HOME` unset the code root is the home (`docs/configuration.md` in firstmate,
+"FM_HOME"). An existing `~/firstmate` is that case: one git checkout that is also its own home,
+with `state/`, `data/`, `config/` and `projects/` beside `AGENTS.md` and `bin/`, all of which the
+terminal session there uses. So the setting is one folder. Velvet Hammer runs the chief of staff
+with that folder as its working directory and `FM_HOME` set to it, so the session loads the same
+`AGENTS.md`, skills and hooks, runs the same scripts and reads the same records as a terminal
+session in that folder. A setting with a separate code root would run the managed clone's
+scripts, which may be another version, against your records, and would leave out your own
+changes to `AGENTS.md` and the skills.
+
+### Choosing it
+
+On the **Firstmate** page (Settings, then **Firstmate**), under **Firstmate home**, type the
+folder's path (`~` works) or choose **Choose folder…**, which opens the system's folder dialog
+(`osascript` on macOS, `zenity` elsewhere). A chosen folder is checked at once; a typed one when
+you press Return or **Check**. The check reads the folder and writes nothing, and says in plain
+words what it found or what is wrong:
+
+| Check | Refused when |
+| --- | --- |
+| It is a folder | Nothing is there, or it is a file. |
+| It is not the managed firstmate | It is the managed clone or home; use **Use the managed home**. |
+| Its path has no spaces | Firstmate's scripts run from inside the home. |
+| It is a firstmate checkout | `bin/fm-session-start.sh` or `AGENTS.md` is missing. |
+| Firstmate has run there as a home | `state/`, `data/` or `config/` is missing. Velvet Hammer does not create them in a home you chose; run firstmate there once in a terminal. |
+| You can read and write it | The system says you cannot read and write the folder or one of those directories (checked with `access(2)`, which writes nothing). |
+
+The check also reads who holds the home's session lock (see below). When the folder passes,
+**Use this home** switches to it. The choice is kept in `firstmate-home.json` in the app's data
+directory, with the other settings, and the app opens on it next time. If the folder cannot be
+used when the app opens, for example because it moved, the app runs on the managed home, says why
+under the chat heading and on the Firstmate page, and keeps the setting so the home comes back
+once it is there again.
+
+**Use the managed home** switches back. As when the app opens, it then installs the managed clone
+if it is missing, or looks for an update.
+
+### Which home is in use
+
+The line under the chat heading says `Running firstmate from <folder> · your firstmate home`, or
+`· the managed home`. The **Firstmate** card in Settings says `your home at <folder>`, and the
+Firstmate page says **Running on your firstmate home** and names it.
+
+### Switching
+
+Switching ends the chief of staff's session, the way quitting does, and your next message starts a
+new session on the other home. The chat notes the switch. Everything that reads firstmate's
+records (the panels, the agents list, the projects, the second mates and the lock) reads the new
+home from then on. When something is in flight, the page asks before it switches and says what:
+the chief of staff is in the middle of a turn, which stops; messages waiting to be sent, which go
+to the new session; or crewmates in flight, which keep running in their own terminals under the
+home they were started from, unsupervised by the chief of staff on the other home. **Switch
+anyway** or **Cancel**. While a second-mate action runs, the switch waits for it.
+
+### What the app does and does not do to a custom home
+
+- It never installs, fetches, updates, resets, cleans or deletes anything in it. The Firstmate page
+  offers no install, check or update for it: update it yourself with git, in a terminal.
+- It writes nothing into it to set it up. The managed home's directories are created by the app;
+  a custom home's are not. What is written there is written by firstmate itself, at session start
+  and afterwards, as in a terminal.
+- What you ask for still writes there, as it does in the managed home: firstmate's own scripts
+  when you add, start, stop, message or retire a second mate (a new mate's home goes in the app's
+  data directory, `secondmates/<name>`), the worker nicknames on the Workers page
+  (`config/crew-nicknames.json`), and **Connect** on the Workers page, which writes
+  `config/pi-account`.
+- The [hook](firstmate-rules.md) that enforces firstmate's rules follows the home in use: a write
+  into the custom home's `projects/` or a task worktree recorded in its `state/*.meta` asks you,
+  and the managed home's `projects/` is no longer protected.
+
+### The session lock
+
+Firstmate allows one session per home. Its session start takes the home's lock first, and a
+session that cannot take it reports firstmate's exact diagnostic and stays read-only: it does not
+spawn, steer, merge, drain the wake queue or repair anything (firstmate's `AGENTS.md`, "Session
+start"). Velvet Hammer keeps that rule and adds nothing to it:
+
+- It reads the lock only with firstmate's `bin/fm-lock.sh status`, which prints the holder and
+  changes nothing. It reads it again whenever `state/.lock` changes or the process in it ends.
+- When another live session holds the lock, such as your terminal firstmate, the chat heading and
+  the Firstmate page say so, show the holder's pid and command line and firstmate's own words, for
+  example `lock: held by live harness pid 4242`. The chat still works: firstmate's session start
+  runs the chief of staff read-only, so it can read the fleet and talk with you but does not
+  change it. Velvet Hammer itself makes no change to second mates while the lock is held by
+  another session, and says so.
+- It never takes the lock, never stops or signals the session that holds it, and never passes a
+  force flag.
+- When that session ends while the chief of staff's session is running read-only, the heading
+  says so and offers **Restart chief of staff**, which ends the session so that your next message
+  starts one that takes the lock.
+
+The lock that firstmate's session start takes belongs to the chief of staff's own `claude`
+process, and the app tells its own session from another by that process: a holder that is the
+`claude` it started, or a process under it, is its own.
+
+| State | Screenshot |
+| --- | --- |
+| A firstmate home typed and checked | [checked.png](screens/firstmate-home/checked.png) |
+| The chat on a custom home | [custom.png](screens/firstmate-home/custom.png) |
+| The Firstmate page while a custom home is in use | [page.png](screens/firstmate-home/page.png) |
+| The **Firstmate** card in Settings | [settings.png](screens/firstmate-home/settings.png) |
+| Another session holds the lock | [locked.png](screens/firstmate-home/locked.png) |
+| Asking before a switch that stops a turn | [confirm.png](screens/firstmate-home/confirm.png) |
+
 ## Reset it
 
 Velvet Hammer has no reset button, because a reset discards your changes. To start again from
@@ -564,6 +682,13 @@ shaped like the real one (`scripts/fixtures/bearings-mates.json`).
   scripts in tests (see below); a real `bin/fm-spawn.sh --secondmate`, `bin/fm-control.sh` and a
   retirement that goes through were not run, because each starts or stops a real agent.
 - The app's real window. Everything above ran headless.
+- A real chief-of-staff session on a custom home. Its session start runs firstmate's Herdr
+  cleanup, so it was not run. The custom home's check and `bin/fm-lock.sh status` were run against
+  a fresh clone of the real firstmate (`427056c4`) by the ignored test
+  `a_real_firstmate_home_passes_the_check_and_its_lock_is_read_without_writing`: the check passed,
+  the status printed `lock: free` and wrote nothing, and with a process named `claude` holding the
+  lock it printed `lock: held by live harness pid <pid>`, which the app reads. Everything else
+  about a custom home ran with the fake `claude` and a scratch clone standing in for it.
 
 **Decided: configurable, recommended run without asking.** The chief of staff's tool uses are
 governed by a persistent, customizable tool-approval setting. A fresh install runs tools without

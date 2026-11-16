@@ -27,6 +27,7 @@ use jiff::Timestamp;
 use rune::Waker;
 use serde_json::{Value, json};
 
+use crate::firstmate::Place;
 use crate::refresh::Schedule;
 
 /// How often the watcher looks at the times firstmate's status and task records last changed.
@@ -310,17 +311,17 @@ pub struct Watcher {
 }
 
 impl Watcher {
-    /// Watches `home`'s records with the scripts of the firstmate clone at `clone`, keeping the
-    /// last snapshot at `cache`. It waits quietly while the clone is not installed.
-    pub fn start(clone: &Path, home: &Path, cache: &Path) -> Watcher {
-        Watcher::start_with(clone, home, cache, TIMING)
+    /// Watches the records of the home at `place` with the scripts of its checkout, keeping the
+    /// last snapshot at `cache`. It waits quietly while the checkout is not installed.
+    pub fn start(place: &Place, cache: &Path) -> Watcher {
+        Watcher::start_with(place, cache, TIMING)
     }
 
-    fn start_with(clone: &Path, home: &Path, cache: &Path, timing: Timing) -> Watcher {
+    fn start_with(place: &Place, cache: &Path, timing: Timing) -> Watcher {
         let (tx, rx) = channel();
         let (asks, asked) = channel();
         let wake: Arc<OnceLock<Waker>> = Arc::new(OnceLock::new());
-        let (clone, home, cache) = (clone.to_path_buf(), home.to_path_buf(), cache.to_path_buf());
+        let (place, cache) = (place.clone(), cache.to_path_buf());
         let waker = wake.clone();
         thread::spawn(move || {
             let send = |update: Update| {
@@ -330,7 +331,7 @@ impl Watcher {
                 }
                 sent
             };
-            if let Some(kept) = read_cache(&cache, &home)
+            if let Some(kept) = read_cache(&cache, &place.home)
                 && !send(Update::Read(kept))
             {
                 return;
@@ -339,10 +340,10 @@ impl Watcher {
             let mut seen = None;
             let mut failed_at: Option<Instant> = None;
             loop {
-                let script = clone.join("bin/fm-bearings-snapshot.sh");
+                let script = place.code.join("bin/fm-bearings-snapshot.sh");
                 let now = Instant::now();
                 if script.exists() {
-                    let stamp = Some(stamp(&home));
+                    let stamp = Some(stamp(&place.home));
                     if seen.is_none() {
                         // The first run of a launch does not wait.
                         schedule.refresh(now);
@@ -358,11 +359,11 @@ impl Watcher {
                         if !send(Update::Running) {
                             return;
                         }
-                        let update = match snapshot(&script, &clone, &home) {
+                        let update = match snapshot(&script, &place) {
                             Ok((bearings, json)) => {
                                 failed_at = None;
                                 let at = Timestamp::now();
-                                write_cache(&cache, &home, &json, at);
+                                write_cache(&cache, &place.home, &json, at);
                                 Update::Read(Snapshot {
                                     bearings,
                                     at,
@@ -566,12 +567,14 @@ fn stamp(home: &Path) -> SystemTime {
 }
 
 /// Runs the snapshot: what it read, and firstmate's document as it printed it.
-fn snapshot(script: &PathBuf, clone: &Path, home: &Path) -> Result<(Bearings, Vec<u8>), String> {
-    crate::firstmate::prepare_home(home)
+fn snapshot(script: &PathBuf, place: &Place) -> Result<(Bearings, Vec<u8>), String> {
+    let home = &place.home;
+    place
+        .prepare()
         .map_err(|e| format!("Could not create {}: {e}", home.display()))?;
     let output = Command::new(script)
         .args(["--json", "--fields", "endpoints", "--all-secondmates"])
-        .current_dir(clone)
+        .current_dir(&place.code)
         .env("FM_HOME", home)
         // Firstmate's own switch for a snapshot that reads no forge.
         .env("FM_CREW_STATE_NO_FORGE", "1")
@@ -785,7 +788,7 @@ mod tests {
     /// A scratch clone whose snapshot script fails once with "jq is missing", then prints the
     /// two-hold fixture, and appends a line to `runs` each time it runs; and its home.
     #[cfg(unix)]
-    fn lab(name: &str) -> (PathBuf, PathBuf, PathBuf) {
+    fn lab(name: &str) -> (PathBuf, Place) {
         use std::os::unix::fs::PermissionsExt;
         let lab = std::env::temp_dir().join(format!("vh-bearings-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&lab);
@@ -804,7 +807,14 @@ mod tests {
         )
         .unwrap();
         std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
-        (lab, clone, home)
+        (
+            lab,
+            Place {
+                code: clone,
+                home,
+                custom: false,
+            },
+        )
     }
 
     const QUICK: Timing = Timing {
@@ -838,8 +848,8 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn a_failed_snapshot_is_retried_without_any_change_in_the_home() {
-        let (lab, clone, home) = lab("retry");
-        let mut watcher = Watcher::start_with(&clone, &home, &lab.join(CACHE), QUICK);
+        let (lab, place) = lab("retry");
+        let mut watcher = Watcher::start_with(&place, &lab.join(CACHE), QUICK);
         let got = updates_until(&mut watcher, |got| !reads(got).is_empty());
         drop(watcher);
         let _ = std::fs::remove_dir_all(&lab);
@@ -857,23 +867,30 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn the_last_snapshot_shows_at_launch_and_stands_while_a_run_fails() {
-        let (lab, clone, home) = lab("kept");
+        let (lab, place) = lab("kept");
         let cache = lab.join(CACHE);
         std::fs::write(lab.join("ran"), "").unwrap();
-        let mut first = Watcher::start_with(&clone, &home, &cache, QUICK);
+        let mut first = Watcher::start_with(&place, &cache, QUICK);
         let got = updates_until(&mut first, |got| !reads(got).is_empty());
         let at = reads(&got)[0].at;
         drop(first);
         // The next launch: the kept snapshot arrives before any run, and stays the last one
         // read when the run fails.
         std::fs::remove_file(lab.join("ran")).unwrap();
-        let mut next = Watcher::start_with(&clone, &home, &cache, QUICK);
+        let mut next = Watcher::start_with(&place, &cache, QUICK);
         let got = updates_until(&mut next, |got| {
             got.iter().any(|u| matches!(u, Update::Failed(_)))
         });
         drop(next);
         // A snapshot kept for another home is not shown.
-        let elsewhere = Watcher::start_with(&clone, &lab.join("other"), &cache, QUICK);
+        let elsewhere = Watcher::start_with(
+            &Place {
+                home: lab.join("other"),
+                ..place.clone()
+            },
+            &cache,
+            QUICK,
+        );
         thread::sleep(Duration::from_millis(100));
         let other: Vec<Update> = elsewhere.rx.try_iter().collect();
         let _ = std::fs::remove_dir_all(&lab);
@@ -896,14 +913,14 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn a_finished_turn_or_refresh_runs_the_snapshot_with_nothing_changed_on_disk() {
-        let (lab, clone, home) = lab("asked");
+        let (lab, place) = lab("asked");
         std::fs::write(lab.join("ran"), "").unwrap();
         // Looking for changes on disk only once a minute, so only the asks start runs.
         let timing = Timing {
             poll: Duration::from_secs(60),
             ..QUICK
         };
-        let mut watcher = Watcher::start_with(&clone, &home, &lab.join(CACHE), timing);
+        let mut watcher = Watcher::start_with(&place, &lab.join(CACHE), timing);
         updates_until(&mut watcher, |got| reads(got).len() == 1);
         watcher.invalidate();
         updates_until(&mut watcher, |got| reads(got).len() == 1);

@@ -10,6 +10,7 @@ use rune::Waker;
 
 use crate::approval::Entry;
 use crate::bridge::Policies;
+use crate::firstmate::Place;
 use crate::model::{
     Action, Agent, AgentStatus, Author, Id, Item, ItemKind, Message, Plan, Status, Workspace,
 };
@@ -71,8 +72,15 @@ pub trait ChiefOfStaff {
     fn cancel_sign_in(&mut self) {}
     /// Ask the agent layer again whether it is signed in.
     fn recheck(&mut self) {}
-    /// The managed firstmate clone the chief of staff runs in, if it runs in one.
+    /// The firstmate checkout the chief of staff runs in, if it runs as firstmate.
     fn workplace(&self) -> Option<&Path> {
+        None
+    }
+    /// Runs as firstmate at `place` from now on: a session that is running ends, and the next
+    /// message starts one there. Nothing for a chief of staff that is not firstmate.
+    fn move_to(&mut self, _place: Place) {}
+    /// The process of the session that is running, if one is.
+    fn session_pid(&self) -> Option<u32> {
         None
     }
     /// The captain's tool-approval, visual-replies and firstmate-rule settings, shared so a

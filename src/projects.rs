@@ -165,18 +165,25 @@ impl Drop for Watcher {
 }
 
 /// Asks the captain for a folder with the system's own folder dialog: `osascript` on macOS,
-/// `zenity` elsewhere. `None` when they cancel it.
-pub fn pick_folder() -> Result<Option<PathBuf>, String> {
-    let (program, args): (&str, &[&str]) = if cfg!(target_os = "macos") {
+/// `zenity` elsewhere, titled `prompt`, which has no double quotes. `None` when they cancel it.
+pub fn pick_folder(prompt: &str) -> Result<Option<PathBuf>, String> {
+    let (program, args) = if cfg!(target_os = "macos") {
         (
             "osascript",
-            &[
-                "-e",
-                "POSIX path of (choose folder with prompt \"Choose the project's folder\")",
+            vec![
+                "-e".to_string(),
+                format!("POSIX path of (choose folder with prompt \"{prompt}\")"),
             ],
         )
     } else {
-        ("zenity", &["--file-selection", "--directory"])
+        (
+            "zenity",
+            vec![
+                "--file-selection".to_string(),
+                "--directory".into(),
+                format!("--title={prompt}"),
+            ],
+        )
     };
     let output = Command::new(program).args(args).output().map_err(|e| {
         format!("Could not open a folder dialog ({program}: {e}). Type the folder's path instead.")
