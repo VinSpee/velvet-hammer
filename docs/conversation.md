@@ -72,7 +72,9 @@ build replaced the old one (see [Install the app](../README.md#install-the-app))
   attached to it, and the messages queued for the chief of staff are kept in `place.json` a
   second after they change, and come back when the app opens. Queued messages then go out as
   usual. Pages about something that may be gone by then, such as a worker's terminal or a
-  picture, open as the chat, and the chat opens at its newest message.
+  picture, open as the chat, and the chat opens at its newest message. Like the session id,
+  `place.json` is written readable by your user only (mode 0600), only while the conversation is
+  kept, and deleted when you choose **Do not keep the conversation**.
 
 ## Screenshots
 
