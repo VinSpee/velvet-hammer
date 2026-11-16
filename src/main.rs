@@ -3545,7 +3545,8 @@ mod tests {
     #[test]
     fn a_file_shows_as_adding_and_send_refuses_until_its_copy_finishes() {
         let mut rt = runtime();
-        rt.state.attach_files(&[fixture("notes.md").into()]);
+        // The chip is added by hand and its copy finished by hand, so no thread races the frame.
+        let id = rt.state.add_pending("notes.md".into());
         rt.invalidate();
         rt.frame(1.0 / 60.0);
         assert!(rt.state.attached.is_empty());
@@ -3554,7 +3555,10 @@ mod tests {
         let before = rt.state.ws.chat.len();
         rt.state.send();
         assert_eq!(rt.state.ws.chat.len(), before, "send waits for the copy");
-        copied(&mut rt);
+        let copy = attach::file(&rt.state.data, Path::new(&fixture("notes.md")));
+        rt.state.take_copy(id, copy);
+        rt.invalidate();
+        rt.frame(1.0 / 60.0);
         assert!(rt.find("adding-0").is_none());
         assert!(rt.find("attachment-0").is_some());
         rt.state.send();
