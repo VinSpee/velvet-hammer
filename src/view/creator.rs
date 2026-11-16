@@ -61,16 +61,25 @@ fn card(s: &App, change: &Change, t: Theme, dark: bool) -> El {
         .as_ref()
         .is_some_and(|t| t.state == State::Building);
     let mut buttons = row().gap(space::S2).flex_wrap().center_y();
+    if s.working {
+        card = card.child(note(
+            &format!("{key}-busy"),
+            "Your chief of staff is working. Try it and Undo wait until it is done.",
+            t,
+        ));
+    }
     if trial.is_some_and(|t| t.state == State::Trying) {
         let (keep, undo) = (change.clone(), key.clone());
         buttons = buttons
             .child(button(&format!("{key}-keep"), "Keep", t, move |s| {
                 s.keep_change(&keep)
-            }))
-            .child(button(&format!("{undo}-undo"), "Undo", t, |s| {
+            }));
+        if !s.working {
+            buttons = buttons.child(button(&format!("{undo}-undo"), "Undo", t, |s| {
                 s.undo_change()
             }));
-    } else if !building {
+        }
+    } else if !building && !s.working {
         let tried = change.clone();
         buttons = buttons.child(button(&format!("{key}-try"), "Try it", t, move |s| {
             s.try_change(&tried)
@@ -130,7 +139,9 @@ pub fn banner(s: &App, t: Theme) -> Option<El> {
                     s.keep_change(&change)
                 }));
             }
-            buttons = buttons.child(button("trial-undo", "Undo", t, |s| s.undo_change()));
+            if !s.working {
+                buttons = buttons.child(button("trial-undo", "Undo", t, |s| s.undo_change()));
+            }
             Some(
                 banner
                     .child(note(
