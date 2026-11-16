@@ -103,7 +103,8 @@ Claude Code 2.1.311 in `-p` mode with `--input-format stream-json`, a user messa
   second for twelve seconds costs four runs, and **Refresh** runs inside the gap.
 - `bearings::tests` reads each section from fixture snapshots, and runs the watcher on a scratch
   clone whose script fails once: the failure is retried, a kept snapshot arrives before any run
-  and stands while the run fails, a kept snapshot for another home is not shown, and a finished
+  and stands while the run fails, a kept snapshot for another home is not shown, a **Refresh**
+  asked before the script is installed runs once it appears, and a finished
   turn or **Refresh** runs the snapshot with nothing changed on disk.
 - `fleet::tests` checks which sections start open and that a day has its digest once across
   launches.
