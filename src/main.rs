@@ -91,8 +91,9 @@ pub struct App {
     pub quit_ask: Option<lifecycle::InFlight>,
     /// The chief of staff is working, as the agent layer last said.
     pub working: bool,
-    /// Messages waiting until the chief of staff is done, oldest first. Kept in memory only:
-    /// quitting the app drops them, and the kept conversation holds only messages that went out.
+    /// Messages waiting until the chief of staff is done, oldest first. The conversation history
+    /// holds only messages that went out; these are carried across a relaunch with the rest of
+    /// the captain's place (see [`carry`]), while the conversation is kept.
     pub queue: Vec<Queued>,
     /// Where the captain's place is kept across a relaunch; none in scenes and tests.
     pub carry: Option<carry::Carry>,
@@ -355,6 +356,7 @@ impl App {
             }
         });
         chief.move_to(firstmate.place());
+        let _ = store::create_private_dir(data).and_then(|()| store::make_private_dir(data));
         let approvals = Store::open(data);
         let visuals = store::Store::<visual::Mode>::open(data);
         let rules = store::Store::<guard::Settings>::open(data);
@@ -504,6 +506,11 @@ impl App {
     /// Keeps the conversation or stops keeping it, and with it the chief of staff's session.
     pub fn set_keeping(&mut self, keeping: history::Keeping) {
         self.keeping.change(|k| *k = keeping);
+        if !self.keeping.settings().0
+            && let Some(carry) = &mut self.carry
+        {
+            carry.forget();
+        }
         self.keep_sessions();
     }
 
@@ -4026,6 +4033,60 @@ mod tests {
         let back = with_carry();
         assert_eq!(back.showing, Showing::Rules);
         assert_eq!(back.draft.text, "half a thought");
+    }
+
+    #[test]
+    fn the_captains_place_is_not_kept_while_the_conversation_is_not() {
+        let dir = scratch("place-off");
+        let file = dir.join("place.json");
+        let with_carry = || {
+            let mut app = stub();
+            app.carry = Some(carry::Carry::open(&dir));
+            app.restore_place();
+            app
+        };
+        let mut rt = runtime_with(with_carry());
+        rt.state.draft.text = "a private thought".into();
+        rt.frame(0.1);
+        rt.frame(carry::SETTLE);
+        assert!(
+            std::fs::read_to_string(&file)
+                .unwrap()
+                .contains("a private thought")
+        );
+        rt.state.set_keeping(history::Keeping(false));
+        assert!(
+            !std::fs::read_to_string(&file)
+                .unwrap()
+                .contains("a private thought")
+        );
+        rt.state.draft.text = "another thought".into();
+        rt.frame(carry::SETTLE);
+        rt.frame(carry::SETTLE);
+        assert!(
+            !std::fs::read_to_string(&file)
+                .unwrap()
+                .contains("another thought")
+        );
+        drop(rt);
+        assert_eq!(with_carry().draft.text, "");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_data_directory_and_the_place_in_it_are_readable_by_their_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = scratch("place-mode");
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let mut app = App::new(Box::new(Stub::default()), installed_firstmate(), &dir);
+        app.carry = Some(carry::Carry::open(&dir));
+        let mut rt = runtime_with(app);
+        rt.state.draft.text = "kept".into();
+        rt.frame(0.1);
+        rt.frame(carry::SETTLE);
+        let mode = |p: &std::path::Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode(&dir.join("place.json")), 0o600);
+        assert_eq!(mode(&dir), 0o700);
     }
 
     #[test]

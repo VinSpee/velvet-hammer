@@ -2,7 +2,8 @@
 //! attached to it, and the messages queued for the chief of staff. It is kept in `place.json` in
 //! the data directory once it has stood for [`SETTLE`], and put back when the app opens, so a
 //! new build (see `scripts/install-app.sh`) opens where the old one was. The chat opens at its
-//! newest message, as it always does.
+//! newest message, as it always does. It is kept only while the captain keeps the conversation,
+//! since a draft and a queued message are part of it.
 
 use std::path::Path;
 use std::time::Duration;
@@ -114,6 +115,12 @@ impl Carry {
         self.changed_at = None;
         None
     }
+
+    /// Forgets the kept place at once.
+    pub fn forget(&mut self) {
+        self.changed_at = None;
+        self.store.change(|kept| *kept = Place::default());
+    }
 }
 
 impl Showing {
@@ -174,7 +181,7 @@ impl App {
 
     /// Puts the kept place back, when the app opens.
     pub fn restore_place(&mut self) {
-        let Some(carry) = &self.carry else {
+        let Some(carry) = &self.carry.as_ref().filter(|_| self.keeping.settings().0) else {
             return;
         };
         let place = carry.store.settings().clone();
@@ -188,7 +195,11 @@ impl App {
 
     /// Keeps the captain's place as it changes. The window calls this from each poll.
     pub fn carry_place(&mut self, now: f64, tx: &mut Tx) {
-        let place = self.place();
+        let place = if self.keeping.settings().0 {
+            self.place()
+        } else {
+            Place::default()
+        };
         if let Some(carry) = &mut self.carry
             && let Some(left) = carry.keep(place, now)
         {
