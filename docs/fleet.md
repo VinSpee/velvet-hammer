@@ -14,8 +14,9 @@ From the top, the panel has:
   every reminder that came due and every note the chief of staff left you. Each card keeps its
   actions: **Allow** or **Deny** (or the question's own answers), **Answer**, **Open pull
   request** and **Approve**, **Done**, **Snooze** and **Delete**. With nothing waiting it shrinks to
-  one line, "Nothing is waiting on you." Its border is thicker and coloured while something waits,
-  and the count in its heading says the same in words.
+  one line, the heading "Waiting on you (0)", with **All reminders** at its right when a reminder
+  is set. Its border is thicker and coloured while something waits, and the count in its heading
+  says the same in words.
 - **Underway (*n*)**: firstmate's tasks in flight, each with its state as a word (`working`,
   `parked`, `blocked`), what it is doing and what it runs on. Pressing one shows its terminal
   (see [The managed firstmate clone](firstmate.md#underway-and-peek)).
