@@ -34,11 +34,15 @@ that one `claude -p` process with two flags. Nothing is written to the user's Cl
   write the path and the full content. Nothing is shortened. Such an input larger than 64 KB is
   denied with "too large to review here", because approving a partial view would approve what
   you never saw. **Allow** or **Deny** goes back to Claude Code as the hook's decision. Every
-  decision is added to the activity log. If nobody
-  answers within 590 seconds, or Claude Code hangs up on the hook first, the app denies the tool
-  use and the question leaves the panel, so a later click cannot look like an approval. The hook
-  sets `onFailure: "block"`, so if the app cannot answer at all, Claude Code blocks the tool use.
-  When the session ends, its unanswered questions leave the panel and are denied.
+  decision is added to the activity log. A question waits as long as the **Attention** setting
+  says, eight hours by default (see [What gets your attention](attention.md#how-long-a-question-waits)).
+  If nobody answers in that time, or Claude Code hangs up on the hook first, the app denies the
+  tool use, and the question's card stays, marked expired, with **Ask again** instead of its
+  answers, so a later click cannot look like an approval. The hook's `timeout` is 24 hours and
+  ten minutes, longer than the longest wait the setting offers, so the app always answers before
+  Claude Code gives up. The hook sets `onFailure: "block"`, so if the app cannot answer at all,
+  Claude Code blocks the tool use. When the session ends, its unanswered questions are denied and
+  their cards say so.
 - **Access.** Each server makes a random 256-bit token. Both flags carry it in an
   `Authorization` header, and the server refuses requests without it and requests from web pages
   (any request with an `Origin` header).
@@ -68,7 +72,7 @@ says `--bare` will become the default for `-p` in a future release, which would 
 | Extension point | How the app routes it | Notes |
 | --- | --- | --- |
 | Custom tools | Serve an MCP server and pass `--mcp-config` (stdio or `"type": "http"`) | Tools are named `mcp__<server>__<tool>` and need permission, from an allow rule, a hook or a permission prompt ([MCP](https://code.claude.com/docs/en/mcp), [SDK MCP](https://code.claude.com/docs/en/agent-sdk/mcp#allow-mcp-tools)). `--strict-mcp-config` would ignore the user's other servers ([CLI](https://code.claude.com/docs/en/cli-reference)). |
-| Hooks | Pass `--settings` with `command` or `http` hooks that call the app | HTTP hooks take `url`, `headers`, `allowedEnvVars`, `timeout` (600 s by default) and `onFailure` (2.1.295+). PreToolUse answers with `hookSpecificOutput.permissionDecision` of `allow`, `deny`, `ask` or `defer`; deny and ask permission rules still win over `allow` ([hooks](https://code.claude.com/docs/en/hooks)). |
+| Hooks | Pass `--settings` with `command` or `http` hooks that call the app | HTTP hooks take `url`, `headers`, `allowedEnvVars`, `timeout` (600 s by default; Claude Code 2.1.311 honored 7,200 s and accepted 87,000 s in a test, see [What gets your attention](attention.md#what-was-checked)) and `onFailure` (2.1.295+). PreToolUse answers with `hookSpecificOutput.permissionDecision` of `allow`, `deny`, `ask` or `defer`; deny and ask permission rules still win over `allow` ([hooks](https://code.claude.com/docs/en/hooks)). |
 | Skills and slash commands | Ship them in a plugin and pass `--plugin-dir`, or use `.claude/skills` in the working directory | In `-p`, a prompt that starts with `/skill-name` runs that skill; terminal-only commands such as `/login` do not work ([skills](https://code.claude.com/docs/en/skills), [headless](https://code.claude.com/docs/en/headless)). Load errors appear in `plugin_errors` of the `system/init` record. |
 | Subagents | Pass `--agents` with JSON definitions | Subagent records carry `parent_tool_use_id` in stream-json, which could feed the Agents column ([CLI](https://code.claude.com/docs/en/cli-reference), [headless](https://code.claude.com/docs/en/headless#follow-subagent-messages)). |
 | Permission prompts | `--permission-prompt-tool mcp__<server>__<tool>`, or a PreToolUse or PermissionRequest hook | Since 2.1.302, `-p` runs start in Manual mode and deny any tool use that needs approval unless something approves it ([headless](https://code.claude.com/docs/en/headless#auto-approve-tools)). The app uses a PreToolUse hook because its format is documented; the result format of a permission prompt tool and the stream-json `can_use_tool` control messages were not found in the pages read. |

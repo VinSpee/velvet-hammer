@@ -29,6 +29,7 @@ use std::time::{Duration, Instant};
 use serde_json::{Value, json};
 
 use crate::approval::{self, Effect, Entry, Policy, Settings};
+use crate::attention;
 use crate::crew;
 use crate::guard::{self, Home};
 use crate::reminders::{self, Reminders};
@@ -40,13 +41,12 @@ use crate::visual::{self, Turn};
 pub const SERVER: &str = "velvet-hammer";
 const NOTE_TOOL: &str = "app_note";
 const SECONDMATE_TOOL: &str = "app_secondmate";
-/// Claude Code's timeout for the hook, in seconds (its default).
-const HOOK_TIMEOUT_SECS: u64 = 600;
+/// Claude Code's timeout for the tool hook, in seconds: ten minutes longer than the longest wait
+/// the captain can set ([`attention::LONGEST_WAIT`]), so the app always answers first, with a
+/// deny it chose, and a changed wait applies to a session that is already running.
+const HOOK_TIMEOUT_SECS: u64 = attention::LONGEST_WAIT.as_secs() + 600;
 /// Claude Code's timeout for the prompt and stop hooks, which answer at once.
 const QUICK_TIMEOUT_SECS: u64 = 30;
-/// How long the hook waits for the captain: a little less than Claude Code waits for the hook,
-/// so an unanswered question becomes a deny the app chose rather than a timeout.
-const APPROVAL_WAIT: Duration = Duration::from_secs(HOOK_TIMEOUT_SECS - 10);
 /// The largest request body the server reads.
 const MAX_BODY: usize = 1 << 20;
 /// The most of a tool's input the captain is shown. A larger input is denied, never approved
@@ -72,9 +72,9 @@ pub enum Call {
         input: String,
         answer: Sender<bool>,
     },
-    /// The question with this ticket can no longer be answered: the wait ran out or Claude Code
-    /// stopped waiting. Whatever answer comes later is not used.
-    Expired(u64),
+    /// The question with this ticket can no longer be answered, for `why`. Whatever answer comes
+    /// later is not used.
+    Expired { ticket: u64, why: Expiry },
     /// The hook decided a tool use, for the activity log.
     Logged(Entry),
     /// The stop hook sent the reply back to be shown as a view, because it has this shape (in
@@ -82,6 +82,31 @@ pub enum Call {
     Nudged(String),
     /// `app_remind` set a reminder, so the app looks again for the next one due.
     Reminded,
+}
+
+/// Why a question can no longer be answered.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Expiry {
+    /// Nobody answered within the captain's wait, so the tool use was denied.
+    TimedOut(Duration),
+    /// Claude Code hung up, as it does when its session ends.
+    HungUp,
+}
+
+impl Expiry {
+    /// What happened, for the expired question's card.
+    pub fn words(self) -> String {
+        match self {
+            Expiry::TimedOut(wait) => format!(
+                "Nobody answered within {}, so the tool use was denied.",
+                attention::words(wait)
+            ),
+            Expiry::HungUp => {
+                "Claude Code stopped waiting before you answered, so the tool use did not run."
+                    .into()
+            }
+        }
+    }
 }
 
 /// The settings the hooks decide with, each read at every call so a change applies at once,
@@ -96,6 +121,8 @@ pub struct Policies {
     pub nicknames: Shared<crew::Nicknames>,
     pub models: Shared<Vec<String>>,
     pub reminders: Reminders,
+    /// How long a question waits for the captain.
+    pub attention: Shared<attention::Settings>,
 }
 
 impl Policies {
@@ -109,6 +136,7 @@ impl Policies {
             nicknames: Arc::new(RwLock::new(crew::Nicknames::default())),
             models: Arc::new(RwLock::new(Vec::new())),
             reminders: Reminders::in_memory(reminders::system_clock()),
+            attention: Arc::new(RwLock::new(attention::Settings::default())),
         }
     }
 }
@@ -434,24 +462,31 @@ fn hung_up(stream: &TcpStream) -> bool {
     gone
 }
 
-/// Waits for the captain's answer to `ticket`; None when the wait ended without one.
+/// Waits up to `wait` for the captain's answer to `ticket`; the answer, or why the wait ended
+/// without one. A question the app withdrew itself (its answer dropped) ends with no reason.
 fn wait_for(
     stream: &TcpStream,
     ticket: u64,
     decision: &Receiver<bool>,
+    wait: Duration,
     on_call: &dyn Fn(Call),
-) -> Option<bool> {
-    let deadline = Instant::now() + APPROVAL_WAIT;
+) -> Result<bool, Option<Expiry>> {
+    let deadline = Instant::now() + wait;
     loop {
         match decision.recv_timeout(POLL) {
-            Ok(allow) => return Some(allow),
-            Err(RecvTimeoutError::Disconnected) => return None,
+            Ok(allow) => return Ok(allow),
+            Err(RecvTimeoutError::Disconnected) => return Err(None),
             Err(RecvTimeoutError::Timeout) => {}
         }
-        if Instant::now() >= deadline || hung_up(stream) {
-            on_call(Call::Expired(ticket));
-            return None;
-        }
+        let why = if hung_up(stream) {
+            Expiry::HungUp
+        } else if Instant::now() >= deadline {
+            Expiry::TimedOut(wait)
+        } else {
+            continue;
+        };
+        on_call(Call::Expired { ticket, why });
+        return Err(Some(why));
     }
 }
 
@@ -556,10 +591,19 @@ fn pre_tool_use(
                 input: shown,
                 answer,
             });
-            match wait_for(stream, ticket, &decision, on_call) {
-                Some(true) => (true, format!("asked {why}; you allowed it")),
-                Some(false) => (false, format!("asked {why}; you denied it")),
-                None => (false, format!("asked {why}; nobody answered, so denied")),
+            let wait = read(&serving.policies.attention).wait;
+            match wait_for(stream, ticket, &decision, wait, on_call) {
+                Ok(true) => (true, format!("asked {why}; you allowed it")),
+                Ok(false) => (false, format!("asked {why}; you denied it")),
+                Err(Some(Expiry::TimedOut(wait))) => (
+                    false,
+                    format!(
+                        "asked {why}; nobody answered within {}, so denied. The captain can ask \
+                         you to try again",
+                        attention::words(wait)
+                    ),
+                ),
+                Err(_) => (false, format!("asked {why}; nobody answered, so denied")),
             }
         }
     };
@@ -611,6 +655,7 @@ mod tests {
             nicknames: Arc::new(RwLock::new(crew::Nicknames::default())),
             models: Arc::new(RwLock::new(Vec::new())),
             reminders: Reminders::in_memory(reminders::system_clock()),
+            attention: Arc::new(RwLock::new(attention::Settings::default())),
         };
         let bridge = Bridge::start(policies.clone(), home, move |call| {
             tx.lock().unwrap().send(call).unwrap()
@@ -1092,9 +1137,57 @@ mod tests {
         drop(stream);
         assert!(matches!(
             calls.recv_timeout(Duration::from_secs(5)),
-            Ok(Call::Expired(t)) if t == ticket
+            Ok(Call::Expired { ticket: t, why: Expiry::HungUp }) if t == ticket
         ));
         drop(answer);
+    }
+
+    #[test]
+    fn a_question_nobody_answers_within_the_wait_expires_and_is_denied() {
+        let (bridge, calls, policies) = bridge_on(
+            Settings {
+                mode: Mode::Ask,
+                rules: vec![],
+            },
+            None,
+        );
+        let wait = Duration::from_secs(1);
+        policies.attention.write().unwrap().wait = wait;
+        let auth = bearer(&bridge);
+        let (_, reply) = thread::scope(|scope| {
+            let pending = scope.spawn(|| {
+                let input = json!({"tool_name": "Bash", "tool_input": {"command": "git push"}});
+                post(&bridge, "/hooks/pre-tool-use", Some(&auth), input)
+            });
+            let Some(Call::Approve { ticket, answer, .. }) = next_call(&calls) else {
+                panic!("expected an approval");
+            };
+            assert!(matches!(
+                next_call(&calls),
+                Some(Call::Expired { ticket: t, why: Expiry::TimedOut(w) }) if t == ticket && w == wait
+            ));
+            drop(answer);
+            pending.join().unwrap()
+        });
+        let output = &reply["hookSpecificOutput"];
+        assert_eq!(output["permissionDecision"], "deny");
+        assert!(
+            output["permissionDecisionReason"]
+                .as_str()
+                .unwrap()
+                .contains("nobody answered within 1 second, so denied"),
+            "{reply}"
+        );
+    }
+
+    #[test]
+    fn claude_code_waits_longer_for_the_tool_hook_than_the_longest_wait() {
+        let (bridge, _) = bridge();
+        let settings: Value = serde_json::from_str(&bridge.settings()).unwrap();
+        let timeout = settings["hooks"]["PreToolUse"][0]["hooks"][0]["timeout"]
+            .as_u64()
+            .unwrap();
+        assert!(timeout > attention::LONGEST_WAIT.as_secs(), "{timeout}");
     }
 
     #[test]
