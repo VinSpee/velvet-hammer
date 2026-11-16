@@ -160,7 +160,8 @@ views or styling; a worker makes it on a local branch, builds it and stops befor
 change shows in Waiting on you. **Try it** swaps in the new build in a few seconds, in the same
 window with the same conversation, session and place; **Keep** asks the chief of staff to deliver
 the branch through the normal pull request path, and **Undo** swaps the last kept build back.
-**Discard** drops the change. Try it and Undo are refused while the chief of staff is working.
+**Discard** drops the change. Try it and Undo are refused while the chief of staff is working, and
+Try it is also refused while another change is being tried: Keep or Undo that one first.
 
 The main window keeps what you use all the time: the agents and projects, the chat and the fleet
 panel.
