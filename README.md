@@ -277,6 +277,8 @@ panel.
   [docs/json-render.md](docs/json-render.md)).
 - `src/ansi.rs`: a command's output as a terminal shows it: the colours its ANSI escape
   sequences ask for, over the text without them.
+- `src/calm.rs`: calm mode: the setting, the stretches of tool uses it folds and the line each shows
+  (see [docs/tool-calls.md](docs/tool-calls.md#calm-mode)).
 - `src/find.rs`: find in the conversation: what each message is searched as, the matches and
   stepping through them (see [docs/conversation.md](docs/conversation.md)).
 - `src/history.rs`: the conversation kept across restarts in `history.jsonl`, and the setting
