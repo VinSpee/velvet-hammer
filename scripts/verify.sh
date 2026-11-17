@@ -44,7 +44,7 @@ for scene in chat replied empty peek signed-out signing-in signed-in expired cli
   projects-repos projects-repos-filtered projects-repos-chosen projects-repos-missing projects-repos-signed-out \
   formatted formatted-all formatted-streaming tool-image tool-image-broken tool-video tool-generic tool-picture \
   attach-draft attach-sent attach-too-large attach-adding attach-drop \
-  tool-bash tool-bash-open tool-terminal tool-diff tool-files \
+  tool-bash tool-bash-open tool-terminal tool-diff tool-files calm-folded calm-open calm-setting \
   view-static view-streaming view-state view-action view-unknown view-too-large \
   choice-ask choice-answered choice-multiple choice-enforced \
   visuals-settings visuals-enforced visuals-capped rules-settings rules-merge-ask rules-project-ask \
@@ -179,6 +179,7 @@ check approved.json yes '"key": "waiting-empty"'
 # the fake's real tool uses; and a settings file the app could not read.
 check settings.json yes '"key": "approvals"'
 check settings.json yes '"text": "Run without asking"'
+check settings.json yes '"key": "calm-section"'
 check approval-settings.json yes '"key": "approvals-page"'
 check approval-settings.json yes '"text": "● Run without asking (Recommended)"'
 check approval-settings.json yes 'will edit files, run commands and use tools without stopping for you, and every tool use is still logged'
@@ -448,6 +449,18 @@ check tool-diff.json yes '"key": "tool-5-error"'
 check tool-files.json yes '"key": "tool-4-numbers"'
 check tool-files.json yes '"text": "Found 2 files"'
 check tool-files.json yes 'https://doc.rust-lang.org/book/ch08-02-strings.html'
+# Calm mode: the same tool uses folded into one line, then that line opened.
+check calm-folded.json yes '"key": "stretch-2-toggle"'
+check calm-folded.json yes '"text": "4 tool uses: Grep, Glob, Read and 1 more"'
+check calm-folded.json no  '"key": "tool-2"'
+check calm-folded.json yes '"text": "Where is the greeting, and what does the Rust book say about strings?"'
+check calm-folded.json yes '"text": "Looking."'
+check calm-open.json yes '"key": "stretch-2-toggle"'
+check calm-open.json yes '"key": "tool-4-numbers"'
+check calm-open.json yes '"text": "Found 2 files"'
+check calm-setting.json yes '"key": "calm-on"'
+check calm-setting.json yes '"key": "calm-off"'
+check calm-setting.json yes '"text": "● On (Recommended)"'
 # json-render views: every component, a spec half streamed, state bound to inputs and a repeat,
 # a submit and its reply, an unknown component, and a spec over the limits.
 check view-static.json yes '"text": "Chief of staff'"'"'s view"'

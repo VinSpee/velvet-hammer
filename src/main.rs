@@ -9,6 +9,7 @@ mod attach;
 mod attention;
 mod bearings;
 mod bridge;
+mod calm;
 mod carry;
 mod claude;
 mod creator;
@@ -40,7 +41,7 @@ mod ui;
 mod view;
 mod visual;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -227,6 +228,10 @@ pub struct App {
     pub attachment_media: HashMap<PathBuf, Media>,
     /// How the captain set out each tool use's card, by its id.
     pub cards: HashMap<String, Card>,
+    /// Whether calm mode folds the chief of staff's tool uses away.
+    pub calm: store::Store<calm::Calm>,
+    /// The stretches of tool uses the captain opened in calm mode, by [`calm::stretch_key`].
+    pub opened: HashSet<String>,
     /// When each tool use started, or how long it took once its result arrived, by its id.
     pub clock: HashMap<String, Clock>,
     /// The copy button pressed last, by its key, which says it copied.
@@ -471,6 +476,8 @@ impl App {
             replying: None,
             media: HashMap::new(),
             cards: HashMap::new(),
+            calm: store::Store::open(data),
+            opened: HashSet::new(),
             clock: HashMap::new(),
             copy_pressed: None,
             ui: HashMap::new(),
@@ -1894,11 +1901,27 @@ impl App {
         let target = match self.ws.message(id) {
             Some((i, m)) => {
                 self.scroll_to = Some(view::message_key(i, m));
+                self.open_stretch_of(i);
                 Ok(id.to_string())
             }
             None => Err(id.to_string()),
         };
         self.flash = Some((target, self.now + FLASH));
+    }
+
+    /// Opens the stretch of tool uses calm mode folded chat message `i` into, if it did, so
+    /// whatever goes to the message finds it shown.
+    pub fn open_stretch_of(&mut self, i: usize) {
+        if !self.calm.settings().0 {
+            return;
+        }
+        let chat = &self.ws.chat;
+        if let Some(stretch) = calm::stretches(chat, self.ws.earlier)
+            .into_iter()
+            .find(|r| r.contains(&i))
+        {
+            self.opened.insert(calm::stretch_key(chat, &stretch));
+        }
     }
 }
 
@@ -2327,7 +2350,7 @@ fn main() {
             ("tool-image-broken", |s| *s = shown(&fixture("broken.png"))),
             ("tool-video", |s| *s = shown(&fixture("clip.mp4"))),
             ("tool-generic", |s| {
-                *s = fake_in(Mode::Run);
+                *s = without_calm(fake_in(Mode::Run));
                 say(s, "shell: ls");
                 s.cards
                     .entry("toolu_fake_Bash".into())
@@ -2393,6 +2416,18 @@ fn main() {
             ("tool-terminal", |s| *s = ran("tools-terminal.json")),
             ("tool-diff", |s| *s = ran("tools-diff.json")),
             ("tool-files", |s| *s = ran("tools-files.json")),
+            // Calm mode: the same reads, searches and fetch folded into one line, and opened.
+            ("calm-folded", |s| *s = calm(ran("tools-files.json"))),
+            ("calm-open", |s| {
+                *s = calm(ran("tools-files.json"));
+                s.opened.insert("toolu_grep".into());
+                s.scroll_to = Some("stretch-2-toggle".into());
+            }),
+            ("calm-setting", |s| {
+                *s = stub();
+                s.showing = Showing::Settings;
+                s.scroll_to = Some("calm-section".into());
+            }),
             // Views the chief of staff showed with `app_ui` (json-render specs): every kind of
             // component, the same view half streamed, state bound to inputs and a repeat after
             // the captain ticked, typed and added, a submit and the reply to it, a component the
@@ -2772,7 +2807,7 @@ fn main() {
                 });
             }),
             ("mate-routed", |s| {
-                *s = mates_lab("mate-routed").0;
+                *s = without_calm(mates_lab("mate-routed").0);
                 say(
                     s,
                     "shell: bin/fm-send.sh docs Add a search page to the docs",
@@ -3282,9 +3317,21 @@ fn fixture(name: &str) -> String {
     path.display().to_string()
 }
 
-/// The fake `claude` after it used Read on `path`, with any image decoded.
+/// `app` with calm mode off, so each tool use shows as its card.
+fn without_calm(mut app: App) -> App {
+    app.calm.change(|c| *c = calm::Calm(false));
+    app
+}
+
+/// `app` with calm mode on, as it is by default.
+fn calm(mut app: App) -> App {
+    app.calm.change(|c| *c = calm::Calm(true));
+    app
+}
+
+/// The fake `claude` after it used Read on `path`, with any image decoded, calm mode off.
 fn shown(path: &str) -> App {
-    let mut app = fake_in(Mode::Run);
+    let mut app = without_calm(fake_in(Mode::Run));
     say(&mut app, &format!("show: {path}"));
     for media in app.media.values() {
         if let Some(Ok(image)) = &media.image {
@@ -3321,11 +3368,11 @@ fn settle_attachments(app: &mut App) {
 
 /// The stub app after the turn a `scripts/fixtures` file describes: the captain's question, the
 /// chief of staff's first words, its tool uses with their results and how long each took (none
-/// for one still running), and its reply.
+/// for one still running), and its reply. Calm mode is off, so each tool use shows as its card.
 fn ran(name: &str) -> App {
     let turn: serde_json::Value = serde_json::from_str(&fixture_text(name)).expect("fixture JSON");
     let words = |field: &str| turn[field].as_str().unwrap_or_default().to_string();
-    let mut app = stub();
+    let mut app = without_calm(stub());
     app.ws.chat = vec![
         Message::new(Author::Captain, words("ask")),
         Message::new(Author::ChiefOfStaff, words("lead")),
@@ -6054,8 +6101,70 @@ mod tests {
     }
 
     #[test]
+    fn calm_mode_folds_each_stretch_of_tool_uses_until_the_captain_opens_it() {
+        let mut rt = runtime_with(calm(ran("tools-files.json")));
+        rt.frame(1.0 / 60.0);
+        assert!(rt.find("tool-2").is_none(), "the tool uses start folded");
+        assert_eq!(
+            texts_under(&rt, "stretch-2-summary"),
+            ["4 tool uses: Grep, Glob, Read and 1 more"]
+        );
+        // The chief of staff's words around the stretch still show.
+        assert!(rt.find("msg-1").is_some() && rt.find("msg-6").is_some());
+        tap(&mut rt, "stretch-2-toggle");
+        for key in ["tool-2", "tool-3", "tool-4", "tool-5"] {
+            assert!(rt.find(key).is_some(), "no {key}");
+        }
+        // More tool uses and words arrive: the open stretch stays open, the new one is folded.
+        rt.update(|s, _| {
+            s.take(Event::Tool(tools::ToolUse {
+                id: "toolu_more".into(),
+                name: "Bash".into(),
+                input: serde_json::json!({"command": "ls"}),
+                result: None,
+            }));
+        });
+        rt.frame(1.0 / 60.0);
+        assert!(rt.find("tool-2").is_some(), "the open stretch stays open");
+        assert!(rt.find("tool-7").is_none());
+        assert_eq!(
+            texts_under(&rt, "stretch-7-summary"),
+            ["1 tool use: Bash \u{b7} running\u{2026}"]
+        );
+        tap_scrolled(&mut rt, "stretch-2-toggle");
+        assert!(rt.find("tool-2").is_none(), "pressed again, it folds");
+    }
+
+    #[test]
+    fn calm_mode_is_on_by_default_and_turned_off_in_settings_shows_every_card() {
+        let mut rt = runtime_with(calm(ran("tools-files.json")));
+        assert!(rt.state.calm.settings().0);
+        chord(&mut rt, ',', false);
+        tap_scrolled(&mut rt, "calm-off");
+        assert!(!rt.state.calm.settings().0);
+        let saved: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(rt.state.calm.path()).unwrap()).unwrap();
+        assert_eq!(saved["on"], false);
+        tap_scrolled(&mut rt, "settings-close");
+        let keys: Vec<String> = rt.elements().iter().filter_map(|e| e.key.clone()).collect();
+        assert!(!keys.iter().any(|k| k.starts_with("stretch-")));
+        for key in ["tool-2", "tool-3", "tool-4", "tool-5"] {
+            assert!(keys.iter().any(|k| k == key), "no {key}");
+        }
+    }
+
+    #[test]
+    fn going_to_a_folded_tool_use_opens_its_stretch() {
+        let mut rt = runtime_with(calm(ran("tools-files.json")));
+        let id = rt.state.ws.chat[4].id.clone();
+        rt.update(move |s, _| s.go_to(&id));
+        rt.frame(1.0 / 60.0);
+        assert!(rt.find("tool-4").is_some());
+    }
+
+    #[test]
     fn a_command_from_claude_shows_as_a_terminal_card_and_any_other_tool_as_text() {
-        let mut app = fake_in(Mode::Run);
+        let mut app = without_calm(fake_in(Mode::Run));
         say(&mut app, "shell: ls");
         // An MCP tool the registry does not know draws its result as text.
         app.take(Event::Tool(tools::ToolUse {
@@ -7238,7 +7347,7 @@ mod tests {
     #[test]
     fn work_the_chief_of_staff_routes_shows_which_mate_took_it() {
         let lab = Lab::new();
-        let mut rt = runtime_with(mates_app(&lab));
+        let mut rt = runtime_with(without_calm(mates_app(&lab)));
         send_and_wait(
             &mut rt,
             "shell: bin/fm-send.sh docs Add a search page to the docs",

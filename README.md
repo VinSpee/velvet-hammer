@@ -97,7 +97,9 @@ The window has three columns, and every setting is in **Settings** (see
   **Open in your video player**, and every other tool use is a card with its status, time and a
   copy button: a command coloured as shell over its output with the output's colours, an edit as
   a diff, a file's numbered lines, a search's matches and a fetched page's summary, each long
-  result folded to its first lines. See [Tool calls in the chat](docs/tool-calls.md).
+  result folded to its first lines. In calm mode, which is on by default, the tool uses between
+  two messages fold into one line saying how many ran and whether any failed, and pressing it
+  shows the cards. See [Tool calls in the chat](docs/tool-calls.md).
   You can attach images, videos and other files to a message by pasting them (a screenshot, or
   files copied in Finder) or dropping them on the chat. Each shows as a chip with a thumbnail, a
   first frame or the file's name and size, and a **×** to remove it before sending. The app keeps
@@ -159,6 +161,15 @@ Settings page itself: **Keep the conversation** (recommended, the default) or **
 conversation**, and **Clear history**, which asks before it deletes anything (see
 [The conversation: find and history](docs/conversation.md#history)). The settings are kept in
 `history.json` beside the other settings files.
+
+**Calm mode** (a Settings section, on by default) folds the chief of staff's tool uses away: each
+stretch of tool uses between two messages shows as one line, such as **4 tool uses: Grep, Glob,
+Read and 1 more**, with **N failed** or **running…** when that is so. Pressing the line shows the
+cards; pressing it again folds them. Every stretch starts folded and stays as you left it while
+new messages arrive, and a message link or find match inside a folded stretch opens it. Views the
+chief of staff shows are never folded. **Off** shows every tool use as its card, as before. The
+setting is kept in `calm.json` beside the other settings files (see
+[Tool calls in the chat](docs/tool-calls.md#calm-mode)).
 
 **Creator mode** (a Settings section, off by default, and only useful when the app is built from
 source) lets you change the app from inside it. Ask the chief of staff for a change to the app's
@@ -596,6 +607,9 @@ It writes these files to `OUT_DIR`:
 | `tool-terminal.png`, `tool-terminal.json` | Output in colour, a failed command with its exit code, no output, a long line and a command still running |
 | `tool-diff.png`, `tool-diff.json` | An Edit, a Write and a MultiEdit as diffs, and an Edit that failed |
 | `tool-files.png`, `tool-files.json` | A Grep, a Glob, a Read as numbered code and a WebFetch |
+| `calm-folded.png`, `calm-folded.json` | The same turn in calm mode: the four tool uses folded into one line between the chief of staff's words |
+| `calm-open.png`, `calm-open.json` | The same with that line pressed open, showing the four cards |
+| `calm-setting.png`, `calm-setting.json` | Settings, the **Calm mode** section: **On** recommended and chosen, and **Off** |
 | `view-static.png`, `view-static.json` | A json-render view: a card with badges, a progress bar, a table, an alert and buttons |
 | `view-streaming.png`, `view-streaming.json` | The same view with a little over half of its spec streamed |
 | `view-state.png`, `view-state.json` | A checklist after ticking an item, typing and adding one, and typing again: inputs bound to state and a repeat |
@@ -659,7 +673,7 @@ and stop hooks; the `rules` and `workers` scenes run the fake `claude` as firstm
 `/tmp/velvet-hammer`, and the `workers` scenes install a stand-in pi release from a `file://` URL
 there; the `tool`
 scenes have the fake `claude` use Read and Bash on the files in `scripts/fixtures`, except the
-`tool-bash`, `tool-bash-open`, `tool-terminal`, `tool-diff` and `tool-files` scenes, which replay the turns in
+`tool-bash`, `tool-bash-open`, `tool-terminal`, `tool-diff`, `tool-files`, `calm-folded` and `calm-open` scenes, which replay the turns in
 `scripts/fixtures/tools-*.json` on the stub; the `attach` scenes attach files in
 `scripts/fixtures`, and `attach-sent` sends them to the fake `claude`. The sign-in scenes run the app on `scripts/fake-claude`, so
 they need no Claude account; each waits for the fake's real processes before rendering. The

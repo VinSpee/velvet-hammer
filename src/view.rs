@@ -2,18 +2,22 @@
 //! Claude sign-in while the chat can't run) in the middle, and the fleet panel, with what waits on
 //! the captain, on the right. Every element a test or a headless script reaches has a key.
 
+use std::ops::Range;
+
 use crate::{App, Showing};
 use rune::tok::{self, Theme, radius, space, type_};
 use rune::{Cx, El, ScrollSpec, TextEdit, TextHighlight, col, el, row, text, text_input};
 use rune_kit::{Highlight, Kit, Markdown};
 
 use crate::approval::{self, Effect, Mode};
+use crate::calm;
 
 use crate::find::{self, Hits};
 use crate::firstmate::{Checkout, Distro, Firstmate, Standing, Work};
 use crate::links;
 use crate::model::{Agent, Author, Message, Plan, Status};
 use crate::projects::Project;
+use crate::tools::ToolUse;
 
 mod attach;
 mod attention;
@@ -1559,19 +1563,28 @@ fn transcript(
     t: Theme,
     dark: bool,
 ) -> El {
+    let stretches = if s.calm.settings().0 {
+        calm::stretches(messages, found.earlier)
+    } else {
+        Vec::new()
+    };
+    let mut folded_to = 0;
     let mut list = col().gap(space::S2);
     for (i, m) in messages.iter().enumerate() {
         if found.earlier > 0 && i == found.earlier {
             list = list.child(earlier_divider(t));
         }
+        if i < folded_to {
+            continue;
+        }
+        if let Some(stretch) = stretches.iter().find(|r| r.start == i) {
+            folded_to = stretch.end;
+            list = list.child(tool_stretch(s, messages, stretch, &found, t, dark));
+            continue;
+        }
         let hits = found.of(i);
         if let Some(tool) = &m.tool {
-            let mut card = tool_use(s, i, tool, t, dark);
-            if let Some(hits) = hits {
-                let current = hits.holds(found.current);
-                card = card.border(if current { 2.0 } else { 1.0 }, match_color(current, dark));
-            }
-            list = list.child(card);
+            list = list.child(tool_card(s, i, tool, &found, t, dark));
             continue;
         }
         let who = match m.author {
@@ -1683,6 +1696,82 @@ fn transcript(
         .min_h(0.0)
         .scroll(ScrollSpec { stick_bottom: true })
         .child(list)
+}
+
+/// Tool use `i`'s card, its border marking the find bar's matches in it.
+fn tool_card(s: &App, i: usize, tool: &ToolUse, found: &Found, t: Theme, dark: bool) -> El {
+    let card = tool_use(s, i, tool, t, dark);
+    match found.of(i) {
+        Some(hits) => {
+            let current = hits.holds(found.current);
+            card.border(if current { 2.0 } else { 1.0 }, match_color(current, dark))
+        }
+        None => card,
+    }
+}
+
+/// A stretch of tool uses in calm mode (see [`calm`]): one line saying what ran, which the
+/// captain presses to show or hide the cards. It starts folded, and a stretch holding a match of
+/// the find bar marks the line as a card is marked.
+fn tool_stretch(
+    s: &App,
+    messages: &[Message],
+    stretch: &Range<usize>,
+    found: &Found,
+    t: Theme,
+    dark: bool,
+) -> El {
+    let key = format!("stretch-{}", stretch.start);
+    let id = calm::stretch_key(messages, stretch);
+    let open = s.opened.contains(&id);
+    let summary = calm::summary(&messages[stretch.clone()]);
+    let hits: Vec<&Hits> = stretch.clone().filter_map(|i| found.of(i)).collect();
+    let mut line = row()
+        .key(format!("{key}-toggle"))
+        .role("button")
+        .label(format!(
+            "{} the tool uses: {summary}",
+            if open { "Hide" } else { "Show" }
+        ))
+        .expanded(open)
+        .focusable(true)
+        .gap(space::S2)
+        .center_y()
+        .px(space::S3)
+        .py(space::S1)
+        .radius(radius::MD)
+        .hover(t.control_off)
+        .on_press(move |s: &mut App| {
+            if !s.opened.remove(&id) {
+                s.opened.insert(id.clone());
+            }
+        })
+        .child(
+            text(if open { "\u{25be}" } else { "\u{25b8}" })
+                .font(type_::LABEL)
+                .color(t.text_secondary),
+        )
+        .child(
+            text(summary)
+                .key(format!("{key}-summary"))
+                .font(type_::LABEL)
+                .color(t.text_secondary)
+                .grow(1.0)
+                .wrap(),
+        );
+    if !hits.is_empty() {
+        let current = hits.iter().any(|h| h.holds(found.current));
+        line = line.border(if current { 2.0 } else { 1.0 }, match_color(current, dark));
+    }
+    let mut part = col().key(key).gap(space::S2).child(line);
+    if open {
+        for i in stretch.clone() {
+            if let Some(tool) = &messages[i].tool {
+                part = part.child(tool_card(s, i, tool, found, t, dark));
+            }
+        }
+    }
+    part
 }
 
 /// The key of chat message `i`'s element: its card for a tool use, its bubble otherwise.

@@ -238,6 +238,9 @@ impl App {
         }
         if std::mem::take(&mut self.find.reveal) {
             let hits = search(self, &self.find.query.text);
+            if let Some(hit) = hits.iter().find(|h| h.holds(self.find.current) && h.card) {
+                self.open_stretch_of(hit.message);
+            }
             if let Some(key) = target(&hits, self.find.current) {
                 tx.scroll_center(key);
             }

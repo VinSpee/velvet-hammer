@@ -148,6 +148,32 @@ More in `docs/screens/tool-calls`: the run unfolded (`bash-open.png`), commands 
 colours, printed nothing or still run (`terminal.png`), edits as diffs (`diff.png`), a read, two
 searches and a fetch (`files.png`), and light versions.
 
+## Calm mode
+
+Calm mode, on by default, folds the cards away (`src/calm.rs`). Each stretch of tool uses between
+two messages shows as one line saying how many ran and which tools, by name in the order they
+first ran (three, then **and N more**), with **N failed** and **running…** when that is so. The
+line is a button that reports whether it is expanded; pressing it shows the stretch's cards as
+described above, and pressing it again folds them.
+
+- **Stretches.** A stretch is the tool uses between two messages. A view (`app_ui`) is a reply,
+  not tool activity: it always shows and ends a stretch. A stretch never crosses the line between
+  earlier sessions and this one.
+- **Open state.** Every stretch starts folded. Which stretches are open is kept by the id of
+  each one's first tool use, so a stretch keeps its state while more tool uses join it and
+  messages arrive after it. It is not kept across restarts.
+- **Finding.** A message link to a tool use in a folded stretch, and a find match in one, opens
+  that stretch so the card can be shown.
+- **The setting.** **Calm mode** on the Settings page, **On** (recommended) or **Off**, kept in
+  `calm.json` in the data directory. Off, every tool use shows as its card as before. Peeking at
+  a subagent folds its tool uses the same way.
+
+The `calm-folded` and `calm-open` scenes show the `tools-files.json` turn folded and opened:
+
+![Calm mode: four tool uses folded into one line between the chief of staff's words](screens/tool-calls/calm-folded.png)
+
+![The same line pressed open, with the cards under it](screens/tool-calls/calm-open.png)
+
 ## The next handlers
 
 | Handler | Standard | What it would show |
