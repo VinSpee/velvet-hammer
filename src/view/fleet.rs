@@ -209,7 +209,7 @@ fn waiting(s: &App, t: Theme, dark: bool) -> El {
     if alone {
         strip.grow(1.0).min_h(0.0).child(list.grow(1.0).child(body))
     } else {
-        strip.max_h(WAITING_MAX_H).child(list.child(body))
+        strip.max_h(WAITING_MAX_H).child(list.shrink().child(body))
     }
 }
 

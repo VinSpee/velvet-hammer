@@ -652,6 +652,10 @@ pub const MATES: &str = include_str!("../scripts/fixtures/bearings-mates.json");
 /// from a live terminal and a real pull request.
 pub const FLEET: &str = include_str!("../scripts/fixtures/bearings-fleet.json");
 
+/// [`FLEET`] with eight merge approvals in place of its one, made by repeating its row by hand, so
+/// the Waiting on you strip has more than it can show.
+pub const MANY_WAITING: &str = include_str!("../scripts/fixtures/bearings-many-waiting.json");
+
 /// What the same script printed for an empty scratch home.
 pub const EMPTY: &str = include_str!("../scripts/fixtures/bearings-empty.json");
 

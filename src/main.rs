@@ -2207,6 +2207,9 @@ fn main() {
             // Charted next opened; an empty fleet; and a snapshot kept from an earlier launch
             // while this launch's run fails.
             ("fleet", |s| *s = fleet_scene("fleet", bearings::FLEET)),
+            ("fleet-many-waiting", |s| {
+                *s = fleet_scene("fleet-many-waiting", bearings::MANY_WAITING)
+            }),
             ("fleet-charted", |s| {
                 *s = fleet_scene("fleet-charted", bearings::FLEET);
                 for section in fleet::Section::ALL {
