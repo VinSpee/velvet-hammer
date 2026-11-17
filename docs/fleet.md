@@ -20,7 +20,8 @@ From the top, the panel has:
   list scrolls; the sections below keep their place.
 - **Underway (*n*)**: firstmate's tasks in flight, each with its state as a word (`working`,
   `parked`, `blocked`), what it is doing and what it runs on. Pressing one shows its terminal
-  (see [The managed firstmate clone](firstmate.md#underway-and-peek)).
+  (see [The managed firstmate clone](firstmate.md#underway-and-peek)). The **Agents** column at
+  the left of the window lists the same workers.
 - **Recently landed (*n*)**: work that finished lately, with **Open pull request** for a merged
   pull request, or the path of a scout's report.
 - **Charted next (*n*)**: queued work and what each task waits for. It starts closed.

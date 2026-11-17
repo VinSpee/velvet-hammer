@@ -7,7 +7,7 @@ installed and updated, how to change it, how to reset it, and how to run on
 [a firstmate home you already have](#a-custom-firstmate-home) instead.
 
 Velvet Hammer installs and updates the clone, runs the chief of staff inside it, fills the
-fleet panel (see [The fleet panel](fleet.md)), the projects list and the second mates from
+fleet panel (see [The fleet panel](fleet.md)), the agents column and the second mates from
 firstmate's records, lets you peek at a crewmate's terminal, starts adding a project with the
 chief of staff, and adds, manages and talks to second mates through firstmate's own scripts. [Where the integration stands](#where-the-integration-stands) lists what
 works end to end and what is not verified.
@@ -225,7 +225,7 @@ mode, the panel shows firstmate's own error above the last items it read.
 ## Underway and peek
 
 **Underway** in the fleet panel lists firstmate's tasks in flight, from `in_flight[]` in the same
-snapshot: each row shows the task's title, firstmate's word for its state (such as
+snapshot, and the **Agents** column at the left of the window lists the same workers: each row shows the task's title, firstmate's word for its state (such as
 `working`, `parked` or `blocked`) and one line on what it is doing. Under that, a row shows what
 the worker runs on, such as `pi · opencode-go/deepseek-v4.1-flash`, read from the `harness=` and
 `model=` lines of firstmate's `state/<id>.meta`, because the snapshot does not carry them (see
@@ -252,20 +252,21 @@ registry `data/projects.md`. Its `project-management` skill owns how a project i
 header of its `bin/fm-project-mode.sh` owns the registry's line format:
 `- <name> [<delivery posture>] - <description> (added <date>)`.
 
-**The list.** Firstmate publishes no document of its projects, so `src/projects.rs` reads these
-two records itself, every two seconds, and never writes them. It lists each registry entry by its
-name, its posture (an entry with no bracket is `no-mistakes`, as firstmate reads it) and its
-description, then any clone under `projects/` that the registry does not list, because firstmate
-rebuilds a missing registry from the clones. A home that does not exist yet, as on a fresh
-install, has no projects. If a record cannot be read, the list shows why instead of claiming
-there are none.
+**Reading them.** Firstmate publishes no document of its projects, so `src/projects.rs` reads
+these two records itself, every two seconds, and never writes them. It reads each registry entry
+by its name, its posture (an entry with no bracket is `no-mistakes`, as firstmate reads it) and
+its description, then any clone under `projects/` that the registry does not list, because
+firstmate rebuilds a missing registry from the clones. A home that does not exist yet, as on a
+fresh install, has no projects. The window draws no list of projects: the app uses them for the
+first-project card below and for choosing a second mate's projects, where a record that cannot
+be read shows why instead of claiming there are none.
 
 **With no projects** the chat opens with a card that explains projects and offers **Add a
-project**. Before the clone is installed and Claude Code is signed in, the list says that the
-chief of staff adds projects once it can chat.
+project**. Before the clone is installed and Claude Code is signed in, there is no chat, so the
+card waits for it.
 
-**Adding a project** is a conversation with the chief of staff. **Add a project** in that card,
-or **Add project** under the list at any time, sends this message in your name:
+**Adding a project** is a conversation with the chief of staff. **Add a project** in that card
+sends this message in your name; once you have projects, ask the chief of staff to add another:
 
 > I want to add a project. Follow your project-management procedure and walk me through it one
 > question at a time, waiting for my answer before the next: first the repository (a git URL, or
@@ -280,7 +281,7 @@ Firstmate then loads its `project-management` skill, which also checks its secon
 proposes defaults (a remote-backed project defaults to `no-mistakes-prod-only`, a project with
 no remote to `local-only`), and clones, registers and initializes the project itself. The app
 does not write the registry or clone anything: what is created is exactly what firstmate's
-procedure creates, and it appears in the list when firstmate's records change. Firstmate's own
+procedure creates, and the app reads it when firstmate's records change. Firstmate's own
 rules forbid creating a remote repository without the captain's explicit consent, and the
 message repeats that rule.
 
@@ -658,8 +659,8 @@ delivered a message whose correlation id the app found, and a reply from the rea
 `bin/fm-secondmate-report.sh` paired with it.
 
 **Works against stand-ins only** (the fake `claude` and stand-in scripts in a scratch upstream):
-the answer flow, merge approvals, Underway and the peek view. The projects list, its
-empty state and the add controls also run on the fake `claude`, with the test writing the
+the answer flow, merge approvals, Underway and the peek view. The projects' empty
+state and the add controls also run on the fake `claude`, with the test writing the
 registry that firstmate's procedure would write. So do the second mates' list, pages, guided
 add, actions, conversation and escalations, with stand-ins of `bin/fm-home-seed.sh`,
 `bin/fm-spawn.sh`, `bin/fm-control.sh`, `bin/fm-teardown.sh`, `bin/fm-send.sh` and

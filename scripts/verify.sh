@@ -40,7 +40,7 @@ for scene in chat replied empty peek signed-out signing-in signed-in expired cli
   firstmate-home-checked firstmate-home-refused firstmate-home-custom firstmate-home-page firstmate-home-settings \
   firstmate-home-locked firstmate-home-confirm \
   fleet fleet-charted fleet-empty fleet-failed \
-  projects-fresh projects-empty projects-adding projects-listed \
+  projects-fresh projects-empty projects-adding \
   projects-repos projects-repos-filtered projects-repos-chosen projects-repos-missing projects-repos-signed-out \
   formatted formatted-all formatted-streaming tool-image tool-image-broken tool-video tool-generic tool-picture \
   attach-draft attach-sent attach-too-large attach-adding attach-drop \
@@ -275,7 +275,7 @@ check firstmate-home-custom.json yes '/captain-firstmate · your firstmate home'
 check firstmate-home-custom.json yes 'Your chief of staff now runs on your firstmate home at'
 check firstmate-home-custom.json yes 'FM_HOME='
 check firstmate-home-custom.json no  '/data/home'
-check firstmate-home-custom.json yes '"text": "The marketing site"'
+check firstmate-home-custom.json no  '"key": "projects"'
 check firstmate-home-custom.json yes '"key": "hold-lab-window-size"'
 check firstmate-home-custom.json no  '"key": "lock-held"'
 check firstmate-home-page.json yes '"text": "Running on your firstmate home"'
@@ -331,6 +331,8 @@ check fleet.json yes '"text": "Waiting on you (2)"'
 check fleet.json yes '"key": "hold-lab-app-bundle"'
 check fleet.json yes '"key": "approve-lab-stop-button-docs"'
 check fleet.json yes '"text": "Underway (2)"'
+check fleet.json yes '"key": "agent-crew-lab-notify"'
+check fleet-empty.json yes '"key": "agents-none"'
 check fleet.json yes '"key": "crew-lab-notify"'
 check fleet.json yes '"text": "blocked · macOS will not post notifications from cargo run; needs an app bundle"'
 check fleet.json yes '"text": "Recently landed (2)"'
@@ -351,15 +353,13 @@ check fleet-failed.json yes 'before this launch'
 check fleet-failed.json yes '"key": "hold-lab-app-bundle"'
 check fleet-failed.json yes '"key": "crew-lab-notify"'
 # Projects from firstmate's records: a fresh install with no home, an installed home with none,
-# adding the first one with the chief of staff, and a registry of three.
-check projects-fresh.json yes '"key": "projects-none"'
-check projects-fresh.json yes '"key": "add-project-later"'
+# and adding the first one with the chief of staff. No projects list is drawn.
+check projects-fresh.json no  '"key": "projects"'
 check projects-fresh.json yes '"key": "firstmate-page"'
-check projects-fresh.json no  '"key": "add-project"'
 check projects-empty.json yes '"key": "projects-empty"'
 check projects-empty.json yes '"text": "Add your first project"'
 check projects-empty.json yes '"key": "add-first-project"'
-check projects-empty.json yes '"key": "add-project"'
+check projects-empty.json no  '"key": "projects"'
 check projects-empty.json no  '"key": "adding"'
 check projects-adding.json yes '"key": "adding"'
 check projects-adding.json yes 'I want to add a project. Follow your project-management procedure'
@@ -368,13 +368,6 @@ check projects-adding.json yes '"key": "add-pick-folder"'
 check projects-adding.json yes '"key": "add-yes"'
 check projects-adding.json yes '"key": "add-finish"'
 check projects-adding.json no  '"key": "projects-empty"'
-check projects-listed.json yes '"key": "project-velvet-hammer"'
-check projects-listed.json yes '"text": "no-mistakes-prod-only"'
-check projects-listed.json yes '"key": "project-notes"'
-check projects-listed.json yes '"key": "project-site"'
-check projects-listed.json yes '"key": "add-project"'
-check projects-listed.json no  '"key": "projects-empty"'
-check projects-listed.json no  '"key": "projects-none"'
 check chat.json no  '"key": "projects"'
 # The GitHub repository combobox while adding a project.
 check projects-adding.json yes '"key": "repo-search"'

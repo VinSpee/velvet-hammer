@@ -42,10 +42,10 @@ newest build (see [Install the app](#install-the-app)). Under Waiting on you,
 **Underway** shows the tasks firstmate has in flight, and selecting one shows that crewmate's
 terminal; **Recently landed** and **Charted next** follow. **Ahoy** and **Bearings** ask the
 chief of staff for `/ahoy` and `/bearings`, and the app sends `/bearings` by itself once, on its
-first launch of a day. The **Projects** list shows the projects in firstmate's records, and **Add project**
-starts a guided conversation in which the chief of staff adds one with firstmate's own procedure;
-with no projects yet, the chat opens with a prompt to add the first (see
-[Projects](docs/firstmate.md#projects)). **Second mates** lists firstmate's second mates with
+first launch of a day. The **Agents** column lists the same workers. With no projects yet, the
+chat opens with a prompt to add the first, and **Add a project** starts a guided conversation in
+which the chief of staff adds one with firstmate's own procedure (see
+[Projects](docs/firstmate.md#projects)); to add another later, ask the chief of staff. **Second mates** lists firstmate's second mates with
 how each one stands; **Add second mate** walks you through creating one and runs firstmate's
 own scripts after your yes, and each mate's page starts, interrupts, relaunches or retires it,
 peeks at its terminal, and holds a conversation with it and the questions it escalated (see
@@ -61,10 +61,11 @@ been tested yet (see [Trying the real sign-in](#trying-the-real-sign-in)).
 The window has three columns, and every setting is in **Settings** (see
 [Settings and menus](#settings-and-menus)):
 
-- **Agents** (left): the subagents the chief of staff manages. Selecting one opens a peek at its
-  transcript in place of the chat; **Back to chat** closes it. Under them, **Second mates** lists
-  firstmate's second mates with **Add second mate**, and selecting one opens its page; then
-  **Projects** lists the projects in firstmate's records with **Add project**.
+- **Agents** (left): the fleet's workers, firstmate's tasks in flight as **Underway** lists
+  them, each with its state and what it is doing; selecting one opens a peek at its terminal in
+  place of the chat. With no workers, it says that no agent is working. Under them, **Second
+  mates** lists firstmate's second mates with **Add second mate**, and selecting one opens its
+  page.
   The **Reminders** card at the bottom of the column shows how many are set and opens
   their page; their settings are the **Reminders** section of Settings.
 - **Chief of staff** (middle): the conversation, with a message field and a **Send** button. A
@@ -181,7 +182,7 @@ the branch through the normal pull request path, and **Undo** swaps the last kep
 Try it is also refused while another change is being tried: Keep or Undo that one first. The
 setting is kept in `creator.json`; see [Creator mode](docs/creator-mode.md).
 
-The main window keeps what you use all the time: the agents and projects, the chat and the fleet
+The main window keeps what you use all the time: the agents, the chat and the fleet
 panel.
 
 | State | Screenshot |
@@ -577,7 +578,7 @@ It writes these files to `OUT_DIR`:
 | `firstmate-answering.png`, `firstmate-answering.json` | After choosing **Answer** on a held task |
 | `firstmate-home-checked.png`, `firstmate-home-checked.json` | A firstmate the captain already runs, typed on the Firstmate page and checked |
 | `firstmate-home-refused.png`, `firstmate-home-refused.json` | A folder that is not a firstmate checkout, refused |
-| `firstmate-home-custom.png`, `firstmate-home-custom.json` | The chat on a custom home: the line under the heading, its projects and holds, and `whereami` |
+| `firstmate-home-custom.png`, `firstmate-home-custom.json` | The chat on a custom home: the line under the heading, its holds, and `whereami` |
 | `firstmate-home-page.png`, `firstmate-home-page.json` | The Firstmate page while a custom home is in use, with **Use the managed home** |
 | `firstmate-home-settings.png`, `firstmate-home-settings.json` | Settings, the **Firstmate** card naming the custom home |
 | `firstmate-home-locked.png`, `firstmate-home-locked.json` | Another session holds the custom home's lock: its holder and firstmate's words |
@@ -585,7 +586,6 @@ It writes these files to `OUT_DIR`:
 | `projects-fresh.png`, `projects-fresh.json` | A fresh install: no home yet, no projects, and adding waits for the chat |
 | `projects-empty.png`, `projects-empty.json` | An installed home with no projects: the prompt to add the first one |
 | `projects-adding.png`, `projects-adding.json` | After **Add a project**: the request in the chat, the reply and the add controls |
-| `projects-listed.png`, `projects-listed.json` | Three projects from firstmate's registry |
 | `projects-repos.png`, `projects-repos.json` | Adding a project with the GitHub repository combobox open on sample repositories |
 | `projects-repos-filtered.png`, `projects-repos-filtered.json` | The combobox filtered by `ham`, with the matches marked |
 | `projects-repos-chosen.png`, `projects-repos-chosen.json` | A repository chosen: its address in the message |

@@ -385,7 +385,7 @@ fn fleet_section(s: &App, section: Section, t: Theme, dark: bool) -> El {
             .captain
             .crew
             .iter()
-            .map(|c| underway(s, c, t, dark))
+            .map(|c| underway(s, c, "crew", t, dark))
             .collect(),
         Section::Landed => s.captain.landed.iter().map(|l| landed(l, t)).collect(),
         Section::Charted => s.captain.gates.iter().map(|g| charted(g, t)).collect(),
@@ -436,13 +436,14 @@ fn empty(section: Section) -> &'static str {
     }
 }
 
-/// A task in flight; pressing it shows its terminal. Its state is the first word of its line.
-fn underway(s: &App, crew: &Crew, t: Theme, dark: bool) -> El {
+/// A task in flight, keyed `<prefix>-<id>`; pressing it shows its terminal. Its state is the
+/// first word of its line. Underway and the agents column both list them.
+pub(super) fn underway(s: &App, crew: &Crew, prefix: &str, t: Theme, dark: bool) -> El {
     let id = crew.id.clone();
     let selected = s.showing == Showing::Crew(id.clone());
     let stuck = matches!(crew.state.as_str(), "blocked" | "failed" | "needs-decision");
     col()
-        .key(format!("crew-{id}"))
+        .key(format!("{prefix}-{id}"))
         .role("button")
         .label(format!(
             "{}, {}. Peek at its terminal",
@@ -468,12 +469,12 @@ fn underway(s: &App, crew: &Crew, t: Theme, dark: bool) -> El {
                 } else {
                     t.text_secondary
                 })
-                .wrap(),
+                .wrap_anywhere(),
         )
         .children(
             crew.runs
                 .as_ref()
-                .map(|runs| note(&format!("crew-{}-runs", crew.id), runs, t).wrap_anywhere()),
+                .map(|runs| note(&format!("{prefix}-{}-runs", crew.id), runs, t).wrap_anywhere()),
         )
 }
 

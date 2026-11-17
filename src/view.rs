@@ -16,7 +16,6 @@ use crate::find::{self, Hits};
 use crate::firstmate::{Checkout, Distro, Firstmate, Standing, Work};
 use crate::links;
 use crate::model::{Agent, Author, Message, Plan, Status};
-use crate::projects::Project;
 use crate::tools::ToolUse;
 
 mod attach;
@@ -123,7 +122,7 @@ fn agents(s: &App, t: Theme, dark: bool) -> El {
         .py(space::S6)
         .gap(space::S1)
         .fill(t.card)
-        // The agents, second mates and projects can outgrow the window.
+        // The agents and second mates can outgrow the window.
         .min_h(0.0)
         .scroll(ScrollSpec {
             stick_bottom: false,
@@ -152,11 +151,15 @@ fn agents(s: &App, t: Theme, dark: bool) -> El {
                 ),
         );
     }
+    // The fleet's workers, from firstmate's records, as Underway lists them.
+    for crew in &s.captain.crew {
+        list = list.child(fleet::underway(s, crew, "agent-crew", t, dark));
+    }
+    if s.ws.agents.is_empty() && s.captain.crew.is_empty() {
+        list = list.child(note("agents-none", "No agent is working.", t));
+    }
     if s.mates.records.is_some() {
         list = list.child(mates::mate_list(s, t, dark));
-    }
-    if let Some(projects) = &s.projects {
-        list = list.child(project_list(s, projects, t, dark));
     }
     list.child(el().grow(1.0)).child(nav_card(
         s,
@@ -188,65 +191,6 @@ fn nav_card(s: &App, key: &str, title: &str, summary: String, pages: &[Showing],
         .on_press(move |s: &mut App| s.showing = open.clone())
         .child(text(title.to_string()).font(type_::TITLE).color(t.text))
         .child(note(&format!("{key}-summary"), &summary, t))
-}
-
-/// The projects in firstmate's records, and the way to add one.
-fn project_list(s: &App, projects: &Result<Vec<Project>, String>, t: Theme, dark: bool) -> El {
-    let mut list = col()
-        .key("projects")
-        .role("list")
-        .label("Projects")
-        .pt(space::S6)
-        .gap(space::S1)
-        .child(heading("Projects", t));
-    match projects {
-        Err(problem) => list = list.child(warning("projects-problem", problem, dark)),
-        Ok(projects) if projects.is_empty() => {
-            list = list.child(note("projects-none", "No projects yet.", t))
-        }
-        Ok(projects) => {
-            for project in projects {
-                let mut row = col()
-                    .key(format!("project-{}", project.name))
-                    .padding(space::S2)
-                    .gap(2.0)
-                    .child(
-                        text(project.name.clone())
-                            .font(type_::TITLE)
-                            .color(t.text)
-                            .wrap(),
-                    )
-                    .child(
-                        text(project.summary())
-                            .font(type_::LABEL)
-                            .color(t.text_secondary)
-                            .wrap(),
-                    );
-                if !project.about.is_empty() {
-                    row = row.child(
-                        text(project.about.clone())
-                            .font(type_::LABEL)
-                            .color(t.text_secondary)
-                            .wrap(),
-                    );
-                }
-                list = list.child(row);
-            }
-        }
-    }
-    if s.chat_ready() {
-        list.child(
-            row().child(small_button("add-project", "Add project", t, |s| {
-                s.add_project()
-            })),
-        )
-    } else {
-        list.child(note(
-            "add-project-later",
-            "Your chief of staff adds projects once it can chat.",
-            t,
-        ))
-    }
 }
 
 /// The firstmate in use in a few words, for its card in Settings.
