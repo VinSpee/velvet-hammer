@@ -1,0 +1,206 @@
+{
+  "schema": "fm-bearings.v1",
+  "home": "lab/home",
+  "generated": "2026-11-16T01:42:15Z",
+  "prs": "not_requested (run: /bearings include PRs)",
+  "contributions": {
+    "scope": "owned contributions per home",
+    "known": 8,
+    "checked": 8,
+    "counts": {
+      "captain": 8,
+      "fleet": 1,
+      "maintainer": 0,
+      "nobody": 0
+    },
+    "complete": false,
+    "proven_clear": false,
+    "unmeasured_homes": 0,
+    "unreadable_records": 0,
+    "unmeasured": 0,
+    "stale_verdicts": 0,
+    "missing_verdicts": 0,
+    "captain_omitted": 0,
+    "captain": [
+      {
+        "task": "lab-wait-1",
+        "url": "https://github.com/example/velvet-hammer/pull/10",
+        "kind": "pr",
+        "head": "9f8e7d6",
+        "reason": "checks green; merge approval needed",
+        "hold": null,
+        "owner": "(main)"
+      },
+      {
+        "task": "lab-wait-2",
+        "url": "https://github.com/example/velvet-hammer/pull/11",
+        "kind": "pr",
+        "head": "9f8e7d6",
+        "reason": "checks green; merge approval needed",
+        "hold": null,
+        "owner": "(main)"
+      },
+      {
+        "task": "lab-wait-3",
+        "url": "https://github.com/example/velvet-hammer/pull/12",
+        "kind": "pr",
+        "head": "9f8e7d6",
+        "reason": "checks green; merge approval needed",
+        "hold": null,
+        "owner": "(main)"
+      },
+      {
+        "task": "lab-wait-4",
+        "url": "https://github.com/example/velvet-hammer/pull/13",
+        "kind": "pr",
+        "head": "9f8e7d6",
+        "reason": "checks green; merge approval needed",
+        "hold": null,
+        "owner": "(main)"
+      },
+      {
+        "task": "lab-wait-5",
+        "url": "https://github.com/example/velvet-hammer/pull/14",
+        "kind": "pr",
+        "head": "9f8e7d6",
+        "reason": "checks green; merge approval needed",
+        "hold": null,
+        "owner": "(main)"
+      },
+      {
+        "task": "lab-wait-6",
+        "url": "https://github.com/example/velvet-hammer/pull/15",
+        "kind": "pr",
+        "head": "9f8e7d6",
+        "reason": "checks green; merge approval needed",
+        "hold": null,
+        "owner": "(main)"
+      },
+      {
+        "task": "lab-wait-7",
+        "url": "https://github.com/example/velvet-hammer/pull/16",
+        "kind": "pr",
+        "head": "9f8e7d6",
+        "reason": "checks green; merge approval needed",
+        "hold": null,
+        "owner": "(main)"
+      },
+      {
+        "task": "lab-wait-8",
+        "url": "https://github.com/example/velvet-hammer/pull/17",
+        "kind": "pr",
+        "head": "9f8e7d6",
+        "reason": "checks green; merge approval needed",
+        "hold": null,
+        "owner": "(main)"
+      }
+    ]
+  },
+  "in_flight": [
+    {
+      "id": "lab-fleet-panel",
+      "kind": "ship",
+      "state": "working",
+      "repo": "velvet-hammer",
+      "name": "Fleet status in place of the two right-hand panels",
+      "doing": "rendering the panel scenes"
+    },
+    {
+      "id": "lab-notify",
+      "kind": "ship",
+      "state": "blocked",
+      "repo": "velvet-hammer",
+      "name": "Notifications and a dock badge for what waits on the captain",
+      "doing": "macOS will not post notifications from cargo run; needs an app bundle"
+    }
+  ],
+  "secondmates": [],
+  "secondmate_reconcile": [],
+  "decisions_open": [
+    {
+      "id": "lab-app-bundle",
+      "key": "lab-app-bundle",
+      "verb": "captain-hold",
+      "summary": "Build a local Velvet Hammer.app into /Applications: Install to /Applications (all users) o\u2026",
+      "question": "Build a local Velvet Hammer.app into /Applications: Install to /Applications (all users) or ~/Applications (only you)?",
+      "owner": "(main)"
+    }
+  ],
+  "landed": [
+    {
+      "id": "lab-stop-button",
+      "what": "A stop button for a running turn",
+      "artifact": "https://github.com/example/velvet-hammer/pull/31",
+      "owner": "(main)"
+    },
+    {
+      "id": "lab-daily-review",
+      "what": "Scout: review the app for day-to-day use",
+      "artifact": "data/lab-daily-review/report.md",
+      "owner": "(main)"
+    }
+  ],
+  "gates": [
+    {
+      "id": "lab-multiline",
+      "title": "Multi-line message field",
+      "blocked_by": "lab-fleet-panel",
+      "reason": "-",
+      "owner": "(main)",
+      "filed": "2026-11-15"
+    },
+    {
+      "id": "lab-resume-session",
+      "title": "Offer to resume the last session after a restart",
+      "blocked_by": "-",
+      "reason": "-",
+      "owner": "(main)",
+      "filed": "2026-11-13"
+    }
+  ],
+  "reports": [
+    {
+      "id": "lab-daily-review",
+      "path": "lab/home/data/lab-daily-review/report.md"
+    }
+  ],
+  "recorded_prs": [],
+  "endpoints": [
+    {
+      "id": "lab-fleet-panel",
+      "backend": "tmux",
+      "target": "vh:lab-fleet-panel",
+      "exists": true,
+      "agent": "alive"
+    },
+    {
+      "id": "lab-notify",
+      "backend": "tmux",
+      "target": "vh:lab-notify",
+      "exists": true,
+      "agent": "alive"
+    }
+  ],
+  "omitted": [
+    {
+      "surface": "backlog item bodies",
+      "reveal": "--fields bodies"
+    },
+    {
+      "surface": "task paths",
+      "reveal": "--fields paths"
+    },
+    {
+      "surface": "watch/steer actions",
+      "reveal": "--fields actions"
+    },
+    {
+      "surface": "full scout-report inventory",
+      "reveal": "--all-reports"
+    },
+    {
+      "surface": "live PR discovery + checks",
+      "reveal": "--include-prs"
+    }
+  ]
+}

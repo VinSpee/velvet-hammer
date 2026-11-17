@@ -57,7 +57,8 @@ for scene in chat replied empty peek signed-out signing-in signed-in expired cli
   mate-routed mate-from-chat \
   workers-fresh workers-settings workers-claude-refused workers-crew \
   send-while-working send-while-working-answered messages-settings queue-waiting queue-delivering queue-not-ready \
-  creator-change creator-building creator-trying creator-refused creator-busy creator-setting; do
+  creator-change creator-building creator-trying creator-refused creator-busy creator-setting \
+  fleet-many-waiting; do
   headless --scene "$scene" --snap "$out/$scene.png"
   headless --scene "$scene" --tree "$out/$scene.json"
 done
