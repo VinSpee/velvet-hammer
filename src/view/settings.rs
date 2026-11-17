@@ -7,6 +7,7 @@ use rune::tok::{Theme, radius, space, type_};
 use rune::{El, col, el, row, text};
 
 use super::{button, choice, firstmate_summary, note, page, section, warning, workers_summary};
+use crate::calm::Calm;
 use crate::history::Keeping;
 use crate::menus;
 use crate::{App, Showing, guard};
@@ -93,6 +94,7 @@ pub fn settings_page(s: &App, t: Theme, dark: bool) -> El {
                 ))
                 .child(sections),
         )
+        .child(calm_section(s, t, dark))
         .child(history_section(s, t, dark))
         .child(super::creator::setting(s, t, dark));
     let actions = row()
@@ -129,6 +131,28 @@ fn section_card(key: &str, title: &str, summary: String, page: Showing, t: Theme
         })
         .child(text(title.to_string()).font(type_::TITLE).color(t.text))
         .child(note(&format!("{key}-summary"), &summary, t))
+}
+
+/// Whether calm mode folds the chief of staff's tool uses away (see [`crate::calm`]).
+fn calm_section(s: &App, t: Theme, dark: bool) -> El {
+    let calm = *s.calm.settings();
+    let mut part = section("Calm mode", t).key("calm-section");
+    if let Some(problem) = s.calm.problem() {
+        part = part.child(warning("calm-problem", problem, dark));
+    }
+    let mut choices = col().key("calm-modes").role("radiogroup").gap(space::S2);
+    for option in Calm::ALL {
+        choices = choices.child(choice(
+            &format!("calm-{}", option.key()),
+            option.label(),
+            option == Calm::RECOMMENDED,
+            option.explanation(),
+            calm == option,
+            t,
+            move |s: &mut App| s.calm.change(|c| *c = option),
+        ));
+    }
+    part.child(choices)
 }
 
 /// Whether the conversation is kept across restarts, and clearing what is kept.
