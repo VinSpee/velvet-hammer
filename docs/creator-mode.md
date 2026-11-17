@@ -17,7 +17,8 @@ This version is for macOS, changes views and styling only, and needs the app bui
    run with `--offline`, so the crates the app uses must already be in Cargo's cache, as they are
    after the first `scripts/install-app.sh`.
 3. Have `velvet-hammer` as a project in your firstmate home, so your chief of staff can send
-   workers to it. **Add project** adds it.
+   workers to it. Ask your chief of staff to add it, or use **Add a project** while you have
+   none.
 4. Open Settings (Cmd+,) and set **Creator mode** to **On**. It is off by default.
 
 ## How a change goes

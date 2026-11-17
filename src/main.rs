@@ -2271,7 +2271,7 @@ fn main() {
                 s.settle(|s| s.captain_problem.is_some());
             }),
             // Projects from firstmate's records: none yet in a fresh install, none in an
-            // installed home, adding the first one with the chief of staff, and three listed.
+            // installed home, and adding the first one with the chief of staff.
             ("projects-fresh", |s| {
                 *s = fake_in_firstmate(&Lab::new(), false);
                 s.settle(|s| s.projects.is_some());
@@ -2285,14 +2285,6 @@ fn main() {
                 s.settle(|s| s.projects.is_some());
                 s.add_project();
                 s.settle(replied);
-            }),
-            ("projects-listed", |s| {
-                let lab = Lab::new();
-                lab.registry(projects::SAMPLE_REGISTRY);
-                *s = fake_in_firstmate(&lab, true);
-                s.settle(|s| {
-                    s.projects.as_ref().is_some_and(|p| p.is_ok()) && !s.has_no_projects()
-                });
             }),
             // The GitHub repository combobox while adding a project: the list, a query with its
             // matches marked, a chosen repository, and gh missing or signed out.
@@ -4417,6 +4409,10 @@ mod tests {
         assert!(rt.find("gate-lab-multiline").is_some());
         let tree = words(&rt, "gate-lab-multiline-why");
         assert!(tree.contains("waits for lab-fleet-panel"), "{tree}");
+        // The agents column lists the same workers, whichever sections are closed.
+        assert!(rt.find("agent-crew-lab-notify").is_some());
+        assert!(rt.find("agent-crew-lab-fleet-panel").is_some());
+        assert!(rt.find("agents-none").is_none());
         // A worker's row shows its terminal.
         tap(&mut rt, "fleet-underway-toggle");
         tap(&mut rt, "crew-lab-notify");
@@ -4432,6 +4428,7 @@ mod tests {
             "waiting-empty",
             "fleet-underway-empty",
             "fleet-landed-empty",
+            "agents-none",
         ] {
             assert!(rt.find(key).is_some(), "{key}");
         }
@@ -4658,9 +4655,7 @@ mod tests {
         wait(&mut rt, projects_read);
         assert!(!lab.data.join("home").exists(), "reading made no home");
         assert!(rt.state.has_no_projects());
-        assert!(rt.find("projects-none").is_some());
-        assert!(rt.find("add-project-later").is_some());
-        assert!(rt.find("add-project").is_none());
+        assert!(rt.find("projects").is_none(), "no projects list");
         rt.state.add_project();
         assert!(!rt.state.adding);
         assert!(rt.state.ws.chat.is_empty());
@@ -4668,7 +4663,6 @@ mod tests {
         wait(&mut rt, idle);
         assert!(rt.find("projects-empty").is_some());
         assert!(rt.find("add-first-project").is_some());
-        assert!(rt.find("add-project").is_some());
     }
 
     #[test]
@@ -4692,10 +4686,7 @@ mod tests {
         // Firstmate's procedure registered the project: it appears without a restart.
         lab.registry("- notes [local-only] - Meeting notes (added 2026-11-13)\n");
         wait(&mut rt, |s| !s.has_no_projects());
-        assert!(rt.find("project-notes").is_some());
-        assert!(rt.find("projects-none").is_none());
         // The captain can add another, or stop.
-        assert!(rt.find("add-project").is_some());
         tap(&mut rt, "add-finish");
         assert!(!rt.state.adding);
         assert!(rt.find("adding").is_none());
@@ -4706,7 +4697,7 @@ mod tests {
     fn choosing_a_folder_puts_its_path_in_the_draft_to_send() {
         let mut rt = runtime_with(fake_in_firstmate(&Lab::new(), true));
         wait(&mut rt, projects_read);
-        tap(&mut rt, "add-project");
+        tap(&mut rt, "add-first-project");
         wait(&mut rt, replied);
         let sent = rt.state.ws.chat.len();
         rt.state.picker = |_| Ok(Some(PathBuf::from("/Users/captain/code/notes")));
@@ -4742,7 +4733,7 @@ mod tests {
     fn adding_with_repos(lister: fn() -> Result<Vec<repos::Repo>, repos::Problem>) -> Runtime<App> {
         let mut rt = runtime_with(fake_in_firstmate(&Lab::new(), true));
         wait(&mut rt, projects_read);
-        tap(&mut rt, "add-project");
+        tap(&mut rt, "add-first-project");
         wait(&mut rt, replied);
         rt.state.repos.lister = lister;
         rt
@@ -4845,7 +4836,7 @@ mod tests {
         let mut rt = runtime_with(fake_in_firstmate(&lab, true));
         wait(&mut rt, projects_read);
         assert!(!rt.state.has_no_projects());
-        assert!(rt.find("projects-problem").is_some());
+        assert!(matches!(rt.state.projects, Some(Err(_))));
         assert!(rt.find("projects-empty").is_none());
     }
 
@@ -4961,7 +4952,6 @@ mod tests {
             std::fs::read_to_string(data.join("home/data/projects.md")).unwrap_or_default()
         );
         assert!(projects.iter().any(|p| p.name == "notes"), "{projects:?}");
-        assert!(rt.find("project-notes").is_some());
     }
 
     #[test]
