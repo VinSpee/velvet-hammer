@@ -147,20 +147,21 @@ option with its hint, a **Recommended** mark on the option whose value is `recom
 **Other** field for an answer of the captain's own (Return sends it) unless `other` is false. In a
 single choice a press on an option sends it at once; with `multiple`, presses pick and unpick and
 **Send** sends the picks (it is disabled until something is picked or typed). It needs no `on`
-binding: the answer goes back by itself, once. The chat shows it as the captain's own message
-("Chose “yolo off”.", "Answered “…”."), the `Choice` shows the answer and takes no more presses,
-and the chief of staff's session receives each option by its exact `value`, so an answer can never
-be an ambiguous "No":
+binding: the answer goes back by itself, once. The `Choice` shows the answer and takes no more
+presses, and adds no message of the captain's to the chat, so the chief of staff's reply follows it
+directly (see [Choice then act](visual-replies.md#choice-then-act)). The chief of staff's session
+receives each option by its exact `value`, so an answer can never be an ambiguous "No", and the
+pick as the go-ahead:
 
 > In the view you showed with app_ui (tool use toolu_…), I answered your question “Merge
 > authority for velvet-hammer is yolo on. Do you want it off?” with the option "yolo-off"
-> (“yolo off”).
+> (“yolo off”). That is my go-ahead: act on it now and tell me only the outcome.
 
 Several picks are listed in the order the view shows them, and the Other text follows as "my own
 words, “…”". The tool's answer warns about an option without a string `value` and `label` (it is
 left out), a `Choice` with fewer than two options, and a `recommended` that is no option's value.
-What was answered lives in the running app; a restart shows the `Choice` unanswered again, while
-the captain's message about it stays in the chat.
+What was answered lives in the running app; a restart shows the `Choice` unanswered again, and
+the kept conversation has no record of the pick.
 
 ## Safety
 

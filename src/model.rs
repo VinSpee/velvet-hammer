@@ -4,7 +4,7 @@
 
 use crate::attach::Attachment;
 use crate::tools::ToolUse;
-use crate::ui::UiAction;
+use crate::ui::{Sent, UiAction};
 
 pub type Id = u32;
 
@@ -226,16 +226,20 @@ impl Workspace {
     }
 
     /// Records the captain's side of `action`: what they said goes into the chat, and an
-    /// answered or finished item leaves its panel. The agent layer replies separately.
+    /// answered or finished item leaves its panel. The answer to a `Choice` adds nothing: the
+    /// `Choice` itself shows what was picked. The agent layer replies separately.
     pub fn apply(&mut self, action: &Action) {
         match action {
             Action::Say { text, attachments } => self.chat.push(Message {
                 attachments: attachments.clone(),
                 ..Message::new(Author::Captain, text.clone())
             }),
-            Action::Ui(ui) => self
-                .chat
-                .push(Message::new(Author::Captain, format!("{}.", ui.did))),
+            Action::Ui(ui) => {
+                if !matches!(ui.sent, Sent::Answer { .. }) {
+                    self.chat
+                        .push(Message::new(Author::Captain, format!("{}.", ui.did)))
+                }
+            }
             Action::Answer { item, .. } | Action::Done { item } => {
                 self.items.retain(|i| i.id != *item)
             }

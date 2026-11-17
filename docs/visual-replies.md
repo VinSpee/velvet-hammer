@@ -5,8 +5,11 @@ The chief of staff can show a reply as a view in the chat with the app's `app_ui
 that read better as a view, such as a status digest, a list of items that need a decision, a
 pull request review or merge ask, a table or progress. A question with a fixed set of answers (yes
 or no, pick one, pick several) is asked with a `Choice` selector, so the captain answers with one
-click and the chief of staff gets the option's exact value. A plain conversational answer stays
-plain text.
+click and the chief of staff gets the option's exact value. The `Choice` is the whole exchange:
+the chief of staff ends its turn with it, the captain's pick shows in the `Choice` itself rather
+than as a message of their own, and the pick is the go-ahead, so the chief of staff acts on it at
+once and reports only the outcome (see [Choice then act](#choice-then-act)). A plain
+conversational answer stays plain text.
 
 Two of Claude Code's hooks carry it, served by the app like its PreToolUse hook (see
 [Extending](extending.md)):
@@ -73,8 +76,10 @@ hang. Claude Code's own cap of eight continuations is a second guard.
 > table, or progress: such a reply is shown with app_ui (a json-render spec), with only a short
 > sentence of text around it. A question with a fixed set of answers (yes or no, pick one of
 > several, pick several) is asked with a Choice element in app_ui, with the recommended option
-> marked, and is not also asked or answered in text; the captain's pick comes back as the
-> option's exact value. A plain conversational answer stays plain text.
+> marked, and is not also asked or answered in text. The Choice is the whole exchange: the turn
+> ends with it, with no text after it, and the captain's pick comes back as the option's exact
+> value. The pick is the go-ahead, so the reply to it does the work at once and reports only the
+> outcome, without confirming the pick first. A plain conversational answer stays plain text.
 
 ### The feedback
 
@@ -90,8 +95,9 @@ For a question (the choices and question shapes):
 > Velvet Hammer: this reply asks a question with a fixed set of answers, which the captain
 > answers with one click. Ask it now with the mcp__velvet-hammer__app_ui tool as a Choice element
 > (the question, each option as a value and a label with a short hint, and the recommended
-> option's value), with at most one short sentence of text, and do not ask the question or list
-> the options again in text. This is asked once; if the question is open-ended, end the turn.
+> option's value), then end the turn with no text after it: do not ask the question, list the
+> options or say that the choice is waiting. When the pick comes back, act on it at once and
+> report only the outcome. This is asked once; if the question is open-ended, end the turn.
 
 ### Qualifying shapes
 
@@ -115,6 +121,25 @@ does not count.
 These are deliberately plain. A short answer that happens to have two bullets and a question
 counts as choices, and a closing "Should I start now?" counts as a question; a long prose answer
 with no closed question never counts.
+
+## Choice then act
+
+A question asked with a `Choice` is one element in the chat, from the question to the work it
+starts. The captain clicks an option and the action starts; nothing comes between the two. Two
+parts make it so, and they are different in kind:
+
+- **App behaviour.** Answering a `Choice` adds no message to the chat. The `Choice` marks the
+  picked option, shows any words typed in its Other field as "Your answer: …", says "Sent." and
+  takes no more presses (`Workspace::apply` in `src/model.rs`). The chief of staff's reply
+  follows the `Choice` directly. This holds whatever the model does.
+- **Instruction text.** The standing instruction and the stop hook's feedback for a question tell
+  the chief of staff to end its turn with the `Choice`, with no text after it (no "the choice is
+  up to you"), and to act on the pick at once and report only the outcome. The message the
+  answer sends ends with "That is my go-ahead: act on it now and tell me only the outcome." These
+  steer the model; nothing checks that it complies.
+
+What was answered lives in the running app, so after a restart a kept `Choice` shows unanswered
+again, and, since the answer adds no message, the kept conversation does not record the pick.
 
 ## Settings
 
@@ -144,8 +169,9 @@ change keeps the old file as `visual-replies.json.bad`.
   `ask:` messages, the stop hook the way Claude Code does.
 - The merge-authority case that prompted the `Choice`: the fake asks "Merge authority for
   velvet-hammer is yolo on. Recommended: yolo off. Do you want it off?" in prose, the stop hook
-  sends it back, the fake asks it with a `Choice`, and choosing yolo off sends the fake the value
-  `"yolo-off"` (`a_question_asked_in_prose_is_asked_again_with_a_choice_and_its_value_comes_back`
+  sends it back, the fake asks it with a `Choice` and ends its turn there, and choosing yolo off
+  sends the fake the value `"yolo-off"`, with no message of the captain's between the `Choice` and
+  the fake's reply (`a_question_asked_in_prose_is_asked_again_with_a_choice_and_its_value_comes_back`
   in `src/main.rs`, and the `choice-enforced` scene).
 - With the real `claude` (2.1.311, Haiku), the ignored test
   `real_claude_shows_a_list_as_a_view` was run on 2026-11-13. Asked "Name three fruits I could buy
