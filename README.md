@@ -603,7 +603,7 @@ It writes these files to `OUT_DIR`:
 | `view-unknown.png`, `view-unknown.json` | A view naming a component the catalog lacks, shown as a placeholder |
 | `view-too-large.png`, `view-too-large.json` | A view over the element limit, refused with why |
 | `choice-ask.png`, `choice-ask.json` | A question with a fixed set of answers asked with a Choice: yolo off recommended, yolo on, and an Other field |
-| `choice-answered.png`, `choice-answered.json` | After choosing **yolo off**: the answered Choice, your choice in the chat, and the reply to its exact value |
+| `choice-answered.png`, `choice-answered.json` | After choosing **yolo off**: the answered Choice, with no message of yours in the chat, and the reply to its exact value |
 | `choice-multiple.png`, `choice-multiple.json` | A Choice that takes several picks, with two picked and an answer of your own typed |
 | `choice-enforced.png`, `choice-enforced.json` | A question the fake asked in prose, sent back by the stop hook, asked again with a Choice and answered |
 | `visuals-settings.png`, `visuals-settings.json` | The Visual replies page: Enforce recommended, the shapes, the instruction and an example |

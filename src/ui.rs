@@ -233,7 +233,7 @@ pub static CATALOG: &[Component] = &[
                 recommend; multiple lets the captain pick several and press Send; other (default \
                 true) adds a field for an answer of their own. The captain's pick comes back to \
                 you as the option's exact value, so ask such a question with a Choice and not in \
-                text",
+                text, and end the turn with it: the pick is the go-ahead to act on",
     },
 ];
 
@@ -1449,7 +1449,7 @@ pub struct Answer {
 }
 
 impl Answer {
-    /// What the captain did, as the chat shows it: "Chose “yolo off”".
+    /// What the captain did, in a few words: "Chose “yolo off”".
     pub fn did(&self) -> String {
         let labels = quoted(
             self.picked
@@ -1541,7 +1541,8 @@ impl UiAction {
             ),
             Sent::Answer { question, answer } => format!(
                 "In the view you showed with {TOOL} (tool use {}), I answered your question \
-                 \u{201c}{question}\u{201d} with {}.",
+                 \u{201c}{question}\u{201d} with {}. That is my go-ahead: act on it now and \
+                 tell me only the outcome.",
                 self.tool,
                 answer.words()
             ),
@@ -1853,7 +1854,8 @@ mod tests {
         assert_eq!(
             one.message(),
             "In the view you showed with app_ui (tool use toolu_1), I answered your question \
-             \u{201c}Do you want it off?\u{201d} with the option \"yolo-off\" (\u{201c}yolo off\u{201d})."
+             \u{201c}Do you want it off?\u{201d} with the option \"yolo-off\" (\u{201c}yolo off\u{201d}). \
+             That is my go-ahead: act on it now and tell me only the outcome."
         );
         let several = action(Answer {
             picked: vec![opt("a", "A"), opt("b\"c", "B"), opt("d", "D")],
@@ -1865,11 +1867,15 @@ mod tests {
         );
         assert!(several.message().ends_with(
             "with the options \"a\" (\u{201c}A\u{201d}), \"b\\\"c\" (\u{201c}B\u{201d}) and \"d\" \
-             (\u{201c}D\u{201d}), and my own words, \u{201c}E\u{201d}."
+             (\u{201c}D\u{201d}), and my own words, \u{201c}E\u{201d}. That is my go-ahead: act \
+             on it now and tell me only the outcome."
         ));
         let none = action(Answer::default());
         assert_eq!(none.did, "Chose none of the options");
-        assert!(none.message().ends_with("with none of the options."));
+        assert!(
+            none.message()
+                .contains("with none of the options. That is my go-ahead")
+        );
     }
 
     #[test]

@@ -1011,11 +1011,20 @@ impl App {
                 m.while_working = true;
             }
         }
-        if matches!(action, Action::Say { .. } | Action::Ui(_)) {
+        // A reminder the chief of staff sets in this turn links back to the captain's message,
+        // or to the view they answered, which adds none.
+        if self.ws.chat.len() > before {
             self.keep(self.ws.chat.len() - 1);
-            // A reminder the chief of staff sets in this turn links back to this message.
             self.reminders
                 .said_in(&self.ws.chat[self.ws.chat.len() - 1].id);
+        } else if let Action::Ui(ui) = &action
+            && let Some(view) = self
+                .ws
+                .chat
+                .iter()
+                .find(|m| m.tool.as_ref().is_some_and(|t| t.id == ui.tool))
+        {
+            self.reminders.said_in(&view.id);
         }
         if matches!(action, Action::Answer { .. } | Action::Done { .. }) {
             self.invalidate_fleet();
@@ -1812,6 +1821,17 @@ fn settled(s: &App) -> bool {
     s.status != Status::Checking
 }
 
+/// The fake's turn asked with its `Choice` and ended there, with no text after it.
+fn asked(s: &App) -> bool {
+    !s.working
+        && s.replying.is_none()
+        && s.ws
+            .chat
+            .last()
+            .and_then(|m| m.tool.as_ref())
+            .is_some_and(|t| t.id == FAKE_CHOICE)
+}
+
 fn replied(s: &App) -> bool {
     s.replying.is_none()
         && s.ws
@@ -2440,9 +2460,17 @@ fn main() {
             }),
             ("choice-enforced", |s| {
                 *s = fake_in(Mode::Run);
-                say_until(s, ASK, "Pick one above.");
+                s.draft.text = ASK.into();
+                s.send();
+                s.settle(asked);
                 s.answer(FAKE_CHOICE, "merge", &["yolo-off".into()]);
-                s.settle(replied);
+                s.settle(|s| {
+                    replied(s)
+                        && s.ws
+                            .chat
+                            .last()
+                            .is_some_and(|m| m.text.starts_with("You said:"))
+                });
             }),
             // Visual replies: the settings page, a list the fake sent as text that was sent back
             // once and shown as a view, and a reply that ignored the feedback, sent back once.
@@ -6169,7 +6197,7 @@ mod tests {
     }
 
     #[test]
-    fn a_choice_sends_the_exact_value_once_and_shows_it_as_the_captains_choice() {
+    fn a_choice_sends_the_exact_value_once_and_shows_the_pick_in_itself() {
         let mut rt = view_runtime(spec("ui-choice.json"));
         assert!(rt.find("tool-1-ui-merge-recommended").is_some());
         assert!(
@@ -6179,10 +6207,10 @@ mod tests {
         );
         tap(&mut rt, "tool-1-ui-merge-option-0");
         let chat = rt.state.ws.chat.clone();
-        assert_eq!(chat[2].author, Author::Captain);
-        assert_eq!(chat[2].text, "Chose \u{201c}yolo off\u{201d}.");
+        // The Choice shows the pick, so the chief of staff's reply follows it directly.
+        assert_eq!(chat.len(), 3);
         assert_eq!(
-            chat[3].text,
+            chat[2].text,
             "Thanks. I got the values [\"yolo-off\"] and the words \u{201c}\u{201d}."
         );
         assert!(rt.find("tool-1-ui-merge-sent").is_some());
@@ -6204,14 +6232,11 @@ mod tests {
             s.view_edit(VIEW, &ui::other_field("checks"), "").text = "A changelog entry".into()
         });
         tap(&mut rt, "tool-1-ui-checks-send");
+        assert!(rt.find("tool-1-ui-checks-other-sent").is_some());
         let chat = &rt.state.ws.chat;
+        assert_eq!(chat.len(), 3);
         assert_eq!(
             chat[2].text,
-            "Chose \u{201c}Tests\u{201d} and \u{201c}Screenshots\u{201d}, and answered \
-             \u{201c}A changelog entry\u{201d}."
-        );
-        assert_eq!(
-            chat[3].text,
             "Thanks. I got the values [\"tests\", \"screens\"] and the words \u{201c}A changelog \
              entry\u{201d}."
         );
@@ -6395,7 +6420,9 @@ mod tests {
     #[test]
     fn a_question_asked_in_prose_is_asked_again_with_a_choice_and_its_value_comes_back() {
         let mut rt = runtime_with(fake_in(Mode::Run));
-        send_until(&mut rt, ASK, "Pick one above.");
+        rt.state.draft.text = ASK.into();
+        tap(&mut rt, "send");
+        wait(&mut rt, asked);
         assert_eq!(
             notices(&rt),
             [
@@ -6417,10 +6444,14 @@ mod tests {
                     .last()
                     .is_some_and(|m| m.text.starts_with("You said:"))
         });
+        // The Choice shows the pick; no message of the captain's comes between it and the reply.
         let chat = &rt.state.ws.chat;
-        let chose = &chat[chat.len() - 2];
-        assert_eq!(chose.author, Author::Captain);
-        assert_eq!(chose.text, "Chose \u{201c}yolo off\u{201d}.");
+        assert!(
+            chat[chat.len() - 2]
+                .tool
+                .as_ref()
+                .is_some_and(|t| t.id == FAKE_CHOICE)
+        );
         // The fake echoes what it received: the option's exact value, never a bare "No".
         let echoed = &chat[chat.len() - 1].text;
         assert!(

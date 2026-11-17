@@ -108,8 +108,11 @@ pub const INSTRUCTION: &str = "Velvet Hammer shows this chat to the captain and 
     or merge ask, a table, or progress: such a reply is shown with app_ui (a json-render spec), \
     with only a short sentence of text around it. A question with a fixed set of answers (yes or \
     no, pick one of several, pick several) is asked with a Choice element in app_ui, with the \
-    recommended option marked, and is not also asked or answered in text; the captain's pick \
-    comes back as the option's exact value. A plain conversational answer stays plain text.";
+    recommended option marked, and is not also asked or answered in text. The Choice is the \
+    whole exchange: the turn ends with it, with no text after it, and the captain's pick comes \
+    back as the option's exact value. The pick is the go-ahead, so the reply to it does the work \
+    at once and reports only the outcome, without confirming the pick first. A plain \
+    conversational answer stays plain text.";
 
 /// A reply's shape that reads better as a view. [`shape`] finds it.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -336,8 +339,9 @@ pub fn feedback(shape: &Shape) -> String {
             "Velvet Hammer: this reply {}, which the captain answers with one click. Ask it now \
              with the mcp__velvet-hammer__app_ui tool as a Choice element (the question, each \
              option as a value and a label with a short hint, and the recommended option's value), \
-             with at most one short sentence of text, and do not ask the question or list the \
-             options again in text. This is asked once; if the question is open-ended, end the \
+             then end the turn with no text after it: do not ask the question, list the options \
+             or say that the choice is waiting. When the pick comes back, act on it at once and \
+             report only the outcome. This is asked once; if the question is open-ended, end the \
              turn.",
             shape.describe()
         );
