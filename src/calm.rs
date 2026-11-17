@@ -11,7 +11,7 @@ use serde_json::{Value, json};
 
 use crate::model::Message;
 use crate::store::{self, Saved};
-use crate::tools::{self, Handler};
+use crate::tools;
 
 /// The settings file in the data directory.
 pub const SETTINGS_FILE: &str = "calm.json";
@@ -73,7 +73,7 @@ impl Saved for Calm {
 pub fn folds(m: &Message) -> bool {
     m.tool
         .as_ref()
-        .is_some_and(|tool| tools::handler(tool) != Handler::Ui)
+        .is_some_and(|tool| tool.name != crate::ui::tool_name())
 }
 
 /// Each stretch of messages calm mode folds, in order. A stretch never crosses `split`, where
