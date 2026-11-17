@@ -16,7 +16,8 @@ From the top, the panel has:
   request** and **Approve**, **Done**, **Snooze** and **Delete**. With nothing waiting it shrinks to
   one line, the heading "Waiting on you (0)", with **All reminders** at its right when a reminder
   is set. Its border is thicker and coloured while something waits, and the count in its heading
-  says the same in words.
+  says the same in words. With many cards it stays inside its own box, capped in height, and its
+  list scrolls; the sections below keep their place.
 - **Underway (*n*)**: firstmate's tasks in flight, each with its state as a word (`working`,
   `parked`, `blocked`), what it is doing and what it runs on. Pressing one shows its terminal
   (see [The managed firstmate clone](firstmate.md#underway-and-peek)).
@@ -112,7 +113,9 @@ Claude Code 2.1.311 in `-p` mode with `--input-format stream-json`, a user messa
   `scripts/fixtures/bearings-fleet.json` (a decision, a merge approval, a blocked worker, landed
   work and charted work) and `bearings-empty.json` (an empty fleet), both printed by the real
   script for a seeded scratch home (the workers' states and the merge row are written by hand,
-  because firstmate reads those only from a live terminal and a real pull request). They also cover
+  because firstmate reads those only from a live terminal and a real pull request). The scene
+  `fleet-many-waiting` uses `bearings-many-waiting.json`, the same snapshot with eight merge
+  approvals, to check that the Waiting on you strip scrolls inside its box. They also cover
   a kept snapshot with a failing run, **Ahoy** and **Bearings** in the chat, and `/bearings` on
   the first launch of a day only.
 
